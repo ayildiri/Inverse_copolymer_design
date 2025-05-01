@@ -187,8 +187,8 @@ if augment == "augmented":
 
 num_node_features = train_datalist[0].num_node_features
 num_edge_features = train_datalist[0].num_edge_features
-print(f'Number of node feautres: {num_node_features}')
-print(f'Numer of edge feautres:{num_edge_features} ')
+print(f'Number of node features: {num_node_features}')
+print(f'Numer of edge features:{num_edge_features} ')
 
 
 # %%batch them

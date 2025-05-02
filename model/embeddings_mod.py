@@ -171,10 +171,15 @@ class Embeddings(nn.Module):
         # The embedding matrix look-up tables. The first look-up table
         # is for words. Subsequent ones are for features, if any exist.
         emb_params = zip(vocab_sizes, emb_dims, pad_indices)
-        embeddings = [
-            nn.Embedding(vocab if isinstance(vocab, int) else len(vocab), dim, padding_idx=pad, sparse=sparse)
-            for vocab, dim, pad in emb_params
-        ]
+        embeddings = []
+        for vocab_size, dim, pad in emb_params:
+            if isinstance(vocab_size, int):
+                embed = nn.Embedding(vocab_size, dim, padding_idx=pad, sparse=sparse)
+            else:
+                # If it's a container like dictionary or list, get its length
+                embed = nn.Embedding(len(vocab_size), dim, padding_idx=pad, sparse=sparse)
+            embeddings.append(embed)
+            
         emb_luts = Elementwise(feat_merge, embeddings)
 
         # The final output size of word + feature vectors. This can vary

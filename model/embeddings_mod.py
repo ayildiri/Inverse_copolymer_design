@@ -173,12 +173,27 @@ class Embeddings(nn.Module):
         emb_params = zip(vocab_sizes, emb_dims, pad_indices)
         embeddings = []
         for vocab_size, dim, pad in emb_params:
-            if isinstance(vocab_size, int):
-                embed = nn.Embedding(vocab_size, dim, padding_idx=pad, sparse=sparse)
-            else:
-                # If it's a container like dictionary or list, get its length
-                embed = nn.Embedding(len(vocab_size), dim, padding_idx=pad, sparse=sparse)
-            embeddings.append(embed)
+            # Ensure all parameters have the correct types
+            if not isinstance(vocab_size, int) and hasattr(vocab_size, '__len__'):
+                vocab_size = len(vocab_size)
+            
+            # Convert dim to int if it's a string
+            if isinstance(dim, str):
+                try:
+                    dim = int(dim)
+                except ValueError:
+                    raise ValueError(f"Cannot convert embedding dimension '{dim}' to integer")
+            
+            # Ensure padding_idx is an integer or None
+            if pad is not None and not isinstance(pad, int):
+                try:
+                    pad = int(pad)
+                except ValueError:
+                    pad = None  # Default to None if can't convert
+    
+        # Create the embedding with proper types
+        embed = nn.Embedding(vocab_size, dim, padding_idx=pad, sparse=sparse)
+        embeddings.append(embed)
             
         emb_luts = Elementwise(feat_merge, embeddings)
 

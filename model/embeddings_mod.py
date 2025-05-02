@@ -187,8 +187,13 @@ class Embeddings(nn.Module):
             else:
                 pad_int = pad
                 
+            if isinstance(dim, str):
+                dim_int = int(dim) if dim.isdigit() else 32  # Default to 32 if conversion fails
+            else:
+                dim_int = dim
+                
             # Create embedding with proper types
-            emb = nn.Embedding(vocab_int, dim, padding_idx=pad_int, sparse=sparse)
+            emb = nn.Embedding(vocab_int, dim_int, padding_idx=pad_int, sparse=sparse)
             embeddings.append(emb)
     
         emb_luts = Elementwise(feat_merge, embeddings)

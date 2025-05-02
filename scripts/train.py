@@ -162,7 +162,7 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
-
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
 
 
 args = parser.parse_args()
@@ -276,7 +276,13 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 # Log directory creation
 data_augment="old"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-directory_path = os.path.join(main_dir_path,'Checkpoints/', model_name)
+
+# Use custom save directory if provided, otherwise use default path
+if args.save_dir is not None:
+    directory_path = args.save_dir
+else:
+    directory_path = os.path.join(main_dir_path,'Checkpoints/', model_name)
+
 if not os.path.exists(directory_path):
     os.makedirs(directory_path)
 

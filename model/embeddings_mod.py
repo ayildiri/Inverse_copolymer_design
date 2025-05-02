@@ -171,38 +171,16 @@ class Embeddings(nn.Module):
         # The embedding matrix look-up tables. The first look-up table
         # is for words. Subsequent ones are for features, if any exist.
         emb_params = zip(vocab_sizes, emb_dims, pad_indices)
-        embeddings = []
-        for vocab_size, dim, pad in emb_params:
-            # Ensure all parameters have the correct types
-            if not isinstance(vocab_size, int) and hasattr(vocab_size, '__len__'):
-                vocab_size = len(vocab_size)
-
-            # Convert dim to int if it's a string
-            if isinstance(dim, str):
-                try:
-                    dim = int(dim)
-                except ValueError:
-                    raise ValueError(f"Cannot convert embedding dimension '{dim}' to integer")
-            
-            # Ensure padding_idx is an integer or None
-            if pad is not None and not isinstance(pad, int):
-                try:
-                    pad = int(pad)
-                except ValueError:
-                    pad = None  # Default to None if can't convert
-
-            # Create the embedding with proper types
-            embed = nn.Embedding(vocab_size, dim, padding_idx=pad, sparse=sparse)
-            embeddings.append(embed)
-            
+        embeddings = [
+            nn.Embedding(vocab, dim, padding_idx=pad, sparse=sparse)
+            for vocab, dim, pad in emb_params
+        ]
         emb_luts = Elementwise(feat_merge, embeddings)
 
         # The final output size of word + feature vectors. This can vary
         # from the word vector size if and only if features are defined.
         # This is the attribute you should access if you need to know
         # how big your embeddings are going to be.
-
-        emb_dims = [int(d) if isinstance(d, str) else d for d in emb_dims]
         self.embedding_size = sum(emb_dims) if feat_merge == "concat" else word_vec_size
 
         # The sequence of operations that converts the input sequence

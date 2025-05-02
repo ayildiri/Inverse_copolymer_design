@@ -176,7 +176,7 @@ class Embeddings(nn.Module):
             # Ensure all parameters have the correct types
             if not isinstance(vocab_size, int) and hasattr(vocab_size, '__len__'):
                 vocab_size = len(vocab_size)
-            
+
             # Convert dim to int if it's a string
             if isinstance(dim, str):
                 try:
@@ -190,10 +190,10 @@ class Embeddings(nn.Module):
                     pad = int(pad)
                 except ValueError:
                     pad = None  # Default to None if can't convert
-    
-        # Create the embedding with proper types
-        embed = nn.Embedding(vocab_size, dim, padding_idx=pad, sparse=sparse)
-        embeddings.append(embed)
+
+            # Create the embedding with proper types
+            embed = nn.Embedding(vocab_size, dim, padding_idx=pad, sparse=sparse)
+            embeddings.append(embed)
             
         emb_luts = Elementwise(feat_merge, embeddings)
 
@@ -201,6 +201,8 @@ class Embeddings(nn.Module):
         # from the word vector size if and only if features are defined.
         # This is the attribute you should access if you need to know
         # how big your embeddings are going to be.
+
+        emb_dims = [int(d) if isinstance(d, str) else d for d in emb_dims]
         self.embedding_size = sum(emb_dims) if feat_merge == "concat" else word_vec_size
 
         # The sequence of operations that converts the input sequence

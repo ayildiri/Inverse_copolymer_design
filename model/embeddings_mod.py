@@ -167,43 +167,21 @@ class Embeddings(nn.Module):
         vocab_sizes.extend(feat_vocab_sizes)
         emb_dims.extend(feat_dims)
         pad_indices.extend(feat_padding_idx)
-        emb_dims = [int(dim) if isinstance(dim, str) else dim for dim in emb_dims]
 
         # The embedding matrix look-up tables. The first look-up table
         # is for words. Subsequent ones are for features, if any exist.
         emb_params = zip(vocab_sizes, emb_dims, pad_indices)
-        embeddings = []
-        for vocab_size, dim, pad in emb_params:
-            # Ensure vocab_size is an integer
-            if isinstance(vocab_size, int):
-                vocab_int = vocab_size
-            elif isinstance(vocab_size, dict):
-                vocab_int = len(vocab_size)
-            else:
-                vocab_int = int(vocab_size)  # Try to convert other types
-            
-            # Ensure padding_idx is an integer
-            if isinstance(pad, str):
-                pad_int = 0  # Default to 0 if pad is a string
-            else:
-                pad_int = pad
-                
-            if isinstance(dim, str):
-                dim_int = int(dim) if dim.isdigit() else 32  # Default to 32 if conversion fails
-            else:
-                dim_int = dim
-                
-            # Create embedding with proper types
-            emb = nn.Embedding(vocab_int, dim_int, padding_idx=pad_int, sparse=sparse)
-            embeddings.append(emb)
-    
+        embeddings = [
+            nn.Embedding(vocab, dim, padding_idx=pad, sparse=sparse)
+            for vocab, dim, pad in emb_params
+        ]
         emb_luts = Elementwise(feat_merge, embeddings)
 
         # The final output size of word + feature vectors. This can vary
         # from the word vector size if and only if features are defined.
         # This is the attribute you should access if you need to know
         # how big your embeddings are going to be.
-        self.embedding_size = sum(int(dim) if isinstance(dim, str) else dim for dim in emb_dims) if feat_merge == "concat" else word_vec_size
+        self.embedding_size = sum(emb_dims) if feat_merge == "concat" else word_vec_size
 
         # The sequence of operations that converts the input sequence
         # into a sequence of embeddings. At minimum this consists of

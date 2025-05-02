@@ -241,24 +241,13 @@ class SequenceDecoder(nn.Module):
         self.beam_size = 1
         self.add_latent = add_latent
 
-        # Debug print
-        print(f"Type of vocab in SequenceDecoder: {type(self.vocab)}")
-        print(f"Length of vocab: {len(self.vocab) if hasattr(self.vocab, '__len__') else 'unknown'}")
-        try:
-            vocab_size = len(self.vocab)+1 if hasattr(self.vocab, '__len__') else self.vocab+1
-            self.decoder_embeddings = Embeddings(
-                word_vec_size=model_config['embedding_dim'],
-                word_vocab_size=vocab_size,
-                word_padding_idx=self.vocab["_PAD"] if isinstance(self.vocab, dict) else 0,
-                position_encoding=True,
-                dropout=0.3
-            )
-        except Exception as e:
-            print(f"Error in creating Embeddings: {e}")
-            print(f"Vocab type: {type(self.vocab)}")
-            print(f"Vocab value: {self.vocab}")
-            raise
-                
+        self.decoder_embeddings = Embeddings(
+            word_vec_size=model_config['embedding_dim'],
+            word_vocab_size=len(self.vocab)+1,
+            word_padding_idx=self.vocab["_PAD"],
+            position_encoding=True,
+            dropout=0.3
+        )
         if self.add_latent: 
             d_model=model_config['embedding_dim']*2
         else: 

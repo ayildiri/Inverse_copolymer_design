@@ -167,6 +167,7 @@ class Embeddings(nn.Module):
         vocab_sizes.extend(feat_vocab_sizes)
         emb_dims.extend(feat_dims)
         pad_indices.extend(feat_padding_idx)
+        emb_dims = [int(dim) if isinstance(dim, str) else dim for dim in emb_dims]
 
         # The embedding matrix look-up tables. The first look-up table
         # is for words. Subsequent ones are for features, if any exist.
@@ -202,7 +203,7 @@ class Embeddings(nn.Module):
         # from the word vector size if and only if features are defined.
         # This is the attribute you should access if you need to know
         # how big your embeddings are going to be.
-        self.embedding_size = sum(emb_dims) if feat_merge == "concat" else word_vec_size
+        self.embedding_size = sum(int(dim) if isinstance(dim, str) else dim for dim in emb_dims) if feat_merge == "concat" else word_vec_size
 
         # The sequence of operations that converts the input sequence
         # into a sequence of embeddings. At minimum this consists of

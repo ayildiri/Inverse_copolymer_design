@@ -200,6 +200,26 @@ print(f"DEBUG: Type of vocab: {type(vocab)}")
 print(f"DEBUG: First 10 keys of vocab: {list(vocab.keys())[:10] if isinstance(vocab, dict) else 'Not a dict'}")
 print(f"DEBUG: Length of vocab: {len(vocab) if hasattr(vocab, '__len__') else 'No length'}")
 
+# Add the test script here to debug:
+print("\n=== TESTING EMBEDDINGS PARAMETERS ===")
+word_vocab_size = len(vocab)
+word_vec_size = 32  # example
+word_padding_idx = vocab["_PAD"]
+
+vocab_sizes = [word_vocab_size]
+emb_dims = [word_vec_size]
+pad_indices = [word_padding_idx]
+
+print(f"DEBUG: vocab_sizes: {vocab_sizes}, type: {type(vocab_sizes[0])}")
+print(f"DEBUG: emb_dims: {emb_dims}, type: {type(emb_dims[0])}")
+print(f"DEBUG: pad_indices: {pad_indices}, type: {type(pad_indices[0])}")
+
+emb_params = zip(vocab_sizes, emb_dims, pad_indices)
+for i, (v, d, p) in enumerate(emb_params):
+    print(f"DEBUG: emb_params[{i}]: vocab={v} (type={type(v)}), dim={d} (type={type(d)}), pad={p} (type={type(p)})")
+print("=== END TESTING ===\n")
+
+
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors
     "beta": args.beta,

@@ -117,9 +117,17 @@ def train(dict_train_loader, global_step, monotonic_step):
         accs.append(acc.item())
         mses.append(mse.item())
         if i % 10 == 0:
-            print(f"Batch [{i} / {len(order_batches)}]")
-            print(recon_loss.item(), loss.item(), kl_loss.item(), acc.item(), mse.item())
-            print("beta:"+str(model.beta))
+            print(f"\nBatch [{i} / {len(order_batches)}]")
+            print("-" * 70)
+            print(f"{'Metric':<15} | {'Value':<20}")
+            print("-" * 70)
+            print(f"{'Recon Loss':<15} | {recon_loss.item():<20.6f}")
+            print(f"{'Total Loss':<15} | {loss.item():<20.6f}")
+            print(f"{'KLD':<15} | {kl_loss.item():<20.6f}")
+            print(f"{'Accuracy':<15} | {acc.item():<20.6f}")
+            print(f"{'MSE':<15} | {mse.item():<20.6f}")
+            print(f"{'Beta':<15} | {model.beta:<20.6f}")
+            print("-" * 70)
         
         global_step += 1
         

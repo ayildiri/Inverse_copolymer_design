@@ -185,7 +185,7 @@ if args.add_latent ==1:
 elif args.add_latent ==0:
     add_latent=False
 
-# Model config and vocab
+
 # Model config and vocab
 vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
 print(f"DEBUG: Constructed vocab file path: {vocab_file_path}")
@@ -194,6 +194,11 @@ print(f"DEBUG: Current working directory: {os.getcwd()}")
 print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
 
 vocab = load_vocab(vocab_file_path)
+
+# Add these debug lines AFTER loading vocab:
+print(f"DEBUG: Type of vocab: {type(vocab)}")
+print(f"DEBUG: First 10 keys of vocab: {list(vocab.keys())[:10] if isinstance(vocab, dict) else 'Not a dict'}")
+print(f"DEBUG: Length of vocab: {len(vocab) if hasattr(vocab, '__len__') else 'No length'}")
 
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors

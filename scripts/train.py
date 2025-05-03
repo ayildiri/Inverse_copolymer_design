@@ -91,7 +91,7 @@ def train(dict_train_loader, global_step, monotonic_step):
         # Check if KLD spike indicates instability
         if i > 0 and kl_loss.item() > 5 * np.mean(kld_losses[-min(10, len(kld_losses)):]):
             print(f"WARNING: KLD spike detected at batch {i}")
-            print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]:.2f}")
+            print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]):.2f}")
 
         optimizer.zero_grad()
         loss.backward()

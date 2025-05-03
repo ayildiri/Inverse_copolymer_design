@@ -193,8 +193,7 @@ print(f"DEBUG: File exists: {os.path.exists(vocab_file_path)}")
 print(f"DEBUG: Current working directory: {os.getcwd()}")
 print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
 
-vocab_dict = load_vocab(vocab_file_path)
-vocab = vocab_dict  
+vocab = load_vocab(vocab_file_path)
 
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors
@@ -245,6 +244,7 @@ if args.ppguided:
     model_type = G2S_VAE_PPguided
 else:
     model_type = G2S_VAE_PPguideddisabled
+
 model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dim,device,model_config, vocab, seed, loss_weights=class_weights, add_latent=add_latent)
 model.to(device)
 

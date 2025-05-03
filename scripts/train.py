@@ -212,13 +212,18 @@ parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--initialization", default="random", choices=["random"])
 parser.add_argument("--add_latent", type=int, default=1)
 parser.add_argument("--ppguided", type=int, default=0)
+parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for optimizer")
+parser.add_argument("--scheduler_patience", type=int, default=10, help="Patience for learning rate scheduler")
+parser.add_argument("--es_patience", type=int, default=5, help="Patience for early stopping")
 parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
 parser.add_argument("--epochs", type=int, default=100, help="number of training epochs")
+parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
 parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume training from")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
+
 
 
 args = parser.parse_args()
@@ -257,13 +262,13 @@ model_config = {
     "epsilon":args.epsilon,
     "decoder_num_layers": args.dec_layers,
     "num_attention_heads":4,
-    'batch_size': 64,
+    'batch_size': args.batch_size,
     'epochs': args.epochs,
     'hidden_dimension': 300, #hidden dimension of nodes
     'n_nodes_pool': 10, #how many representative nodes are used for attention based pooling
     'pooling': 'mean', #mean or custom
-    'learning_rate': 1e-3,
-    'es_patience': 5,
+    'learning_rate': args.learning_rate,
+    'es_patience': args.es_patience,
     'loss': args.loss, # focal or ce
     'max_alpha': args.max_alpha,
 }
@@ -334,11 +339,11 @@ elif model_config['beta'] == "normalVAE":
 
 # %%# %% Train
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
 # Add learning rate scheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-5)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.scheduler_patience, verbose=True, min_lr=1e-5)
 
 # Early stopping callback
 # Log directory creation

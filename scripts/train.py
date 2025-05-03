@@ -194,7 +194,7 @@ print(f"DEBUG: Current working directory: {os.getcwd()}")
 print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
 
 vocab = load_vocab(vocab_file=vocab_file_path)
-vocab = len(vocab_dict)
+vocab = len(vocab)
 
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors

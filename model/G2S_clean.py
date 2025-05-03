@@ -288,7 +288,7 @@ class SequenceDecoder(nn.Module):
         z_length = z.size(1)
         src_lengths = torch.ones(z.size(0), device=z.device).long()*z_length # long tensor [b,]
         # prepare target
-        target = torch.tensor(graph_batch.tgt_token_ids, device=z.device)[:, :-1] #pop last token
+        target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)[:, :-1]
         m = nn.ConstantPad1d((1, 0), self.vocab["_SOS"]) #pads SOS token left side (beginning of sequences)
         target = m(target)
         target = target.unsqueeze(-1) 

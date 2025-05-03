@@ -311,7 +311,7 @@ class SequenceDecoder(nn.Module):
         # evaluate
         # reproducible on GPU requires reduction none in CE loss in order to use torch.use_deterministic_algorithms(True), mean afterwards
         # https://discuss.pytorch.org/t/pytorchs-non-deterministic-cross-entropy-loss-and-the-problem-of-reproducibility/172180/8
-        target = torch.tensor(graph_batch.tgt_token_ids, device=z.device)
+        target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)
         recon_loss = self.criterion(
             input=dec_outs, 
             target=target.long()

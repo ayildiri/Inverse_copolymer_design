@@ -217,6 +217,7 @@ parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
 parser.add_argument("--epochs", type=int, default=100, help="number of training epochs")
+parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume training from")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
 
 
@@ -358,12 +359,25 @@ earlystopping = EarlyStopping(dir=directory_path, patience=es_patience)
 
 print(f'STARTING TRAINING')
 # Prepare dictionaries for training or load checkpoint
-# Try to load best model first, then latest
-checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
-if not os.path.exists(checkpoint_file):
-    checkpoint_file = os.path.join(directory_path, "model_latest.pt")
 
-if os.path.exists(checkpoint_file):
+checkpoint_file = None
+
+# If resume_from_checkpoint is specified, use that checkpoint
+if args.resume_from_checkpoint is not None:
+    if os.path.exists(args.resume_from_checkpoint):
+        checkpoint_file = args.resume_from_checkpoint
+    else:
+        print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
+
+# Otherwise, try to load best model first, then latest from the default directory
+elif os.path.exists(directory_path):
+    if os.path.exists(os.path.join(directory_path, "model_best_loss.pt")):
+        checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
+    elif os.path.exists(os.path.join(directory_path, "model_latest.pt")):
+        checkpoint_file = os.path.join(directory_path, "model_latest.pt")
+
+# Load the checkpoint if one was found
+if checkpoint_file is not None:
     print(f"Loading model from {checkpoint_file}")
     checkpoint = torch.load(checkpoint_file)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -376,6 +390,7 @@ if os.path.exists(checkpoint_file):
         monotonic_step = checkpoint['monotonic_step']
         model.beta = model_config['max_beta']
 else:
+    print("Starting training from scratch")
     train_loss_dict = {}
     val_loss_dict = {}
     epoch_cp = 0

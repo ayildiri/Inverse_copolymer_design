@@ -15,7 +15,8 @@ from statistics import mean
 import pickle
 import math
 import argparse
-
+import numpy as np
+import csv
 
 class EarlyStopping:
     def __init__(self, dir, patience):
@@ -80,13 +81,34 @@ def train(dict_train_loader, global_step, monotonic_step):
 
         # Perform a single forward pass.
         loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
-        #torch.save(predictions, "Predictions/predictions_batch"+str(i)+".pt")
-        #torch.save(target, "Predictions/targets_batch"+str(i)+".pt")
+        
+        # Check for unstable loss values before backpropagation
+        if torch.isnan(loss).any() or torch.isinf(loss).any():
+            print(f"WARNING: NaN or Inf detected in loss at batch {i}")
+            print(f"Loss: {loss.item()}, Recon: {recon_loss.item()}, KLD: {kl_loss.item()}")
+            continue  # Skip this batch
+
+        # Check if KLD spike indicates instability
+        if i > 0 and kl_loss.item() > 5 * np.mean(kld_losses[-min(10, len(kld_losses)):]):
+            print(f"WARNING: KLD spike detected at batch {i}")
+            print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]:.2f}")
 
         optimizer.zero_grad()
         loss.backward()
+        
+        # Monitor gradient norms before clipping
+        total_grad_norm = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_grad_norm += param_norm.item() ** 2
+        total_grad_norm = total_grad_norm ** 0.5
+
+        if total_grad_norm > 10.0:  # Warning threshold
+            print(f"WARNING: Large gradient norm detected: {total_grad_norm:.2f}")
+        
         # TODO: do we need the clip_grad_norm?
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
         
         ce_losses.append(recon_loss.item())
@@ -134,6 +156,30 @@ def test(dict_loader):
             mses.append(mse.item())
         
     return ce_losses, total_losses, kld_losses, accs, mses
+
+
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path):
+    """Save training and validation metrics for each epoch to CSV"""
+    csv_file = os.path.join(directory_path, 'training_log.csv')
+    
+    # Create the CSV file and write headers if it doesn't exist
+    if not os.path.exists(csv_file):
+        with open(csv_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
+                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'
+            ])
+    
+    # Append the current epoch's metrics
+    with open(csv_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            epoch,
+            train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],
+            val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse']
+        ])
+
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -186,7 +232,6 @@ if args.add_latent ==1:
 elif args.add_latent ==0:
     add_latent=False
 
-
 # Model config and vocab
 vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
 print(f"DEBUG: Constructed vocab file path: {vocab_file_path}")
@@ -195,31 +240,6 @@ print(f"DEBUG: Current working directory: {os.getcwd()}")
 print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
 
 vocab = load_vocab(vocab_file_path)
-
-# Add these debug lines AFTER loading vocab:
-print(f"DEBUG: Type of vocab: {type(vocab)}")
-print(f"DEBUG: First 10 keys of vocab: {list(vocab.keys())[:10] if isinstance(vocab, dict) else 'Not a dict'}")
-print(f"DEBUG: Length of vocab: {len(vocab) if hasattr(vocab, '__len__') else 'No length'}")
-
-# Add the test script here to debug:
-print("\n=== TESTING EMBEDDINGS PARAMETERS ===")
-word_vocab_size = len(vocab)
-word_vec_size = 32  # example
-word_padding_idx = vocab["_PAD"]
-
-vocab_sizes = [word_vocab_size]
-emb_dims = [word_vec_size]
-pad_indices = [word_padding_idx]
-
-print(f"DEBUG: vocab_sizes: {vocab_sizes}, type: {type(vocab_sizes[0])}")
-print(f"DEBUG: emb_dims: {emb_dims}, type: {type(emb_dims[0])}")
-print(f"DEBUG: pad_indices: {pad_indices}, type: {type(pad_indices[0])}")
-
-emb_params = zip(vocab_sizes, emb_dims, pad_indices)
-for i, (v, d, p) in enumerate(emb_params):
-    print(f"DEBUG: emb_params[{i}]: vocab={v} (type={type(v)}), dim={d} (type={type(d)}), pad={p} (type={type(p)})")
-print("=== END TESTING ===\n")
-
 
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors
@@ -307,6 +327,10 @@ elif model_config['beta'] == "normalVAE":
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
+# Add learning rate scheduler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-5)
+
 # Early stopping callback
 # Log directory creation
 data_augment="old"
@@ -326,10 +350,14 @@ earlystopping = EarlyStopping(dir=directory_path, patience=es_patience)
 
 print(f'STARTING TRAINING')
 # Prepare dictionaries for training or load checkpoint
-if os.path.isfile(os.path.join(directory_path,"model_best_loss.pt")):
-    print("Loading model from checkpoint")
+# Try to load best model first, then latest
+checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
+if not os.path.exists(checkpoint_file):
+    checkpoint_file = os.path.join(directory_path, "model_latest.pt")
 
-    checkpoint = torch.load(os.path.join(directory_path,"model_best_loss.pt"))
+if os.path.exists(checkpoint_file):
+    print(f"Loading model from {checkpoint_file}")
+    checkpoint = torch.load(checkpoint_file)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch_cp = checkpoint['epoch']
@@ -338,16 +366,13 @@ if os.path.isfile(os.path.join(directory_path,"model_best_loss.pt")):
     if model_config['beta'] == "schedule":
         global_step = checkpoint['global_step']
         monotonic_step = checkpoint['monotonic_step']
-        model.beta =  model_config['max_beta']
-        #monotonic_step = 0
-else: 
+        model.beta = model_config['max_beta']
+else:
     train_loss_dict = {}
     val_loss_dict = {}
     epoch_cp = 0
     global_step = 0
     monotonic_step = 0
-
-
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch+1}\n-------------------------------")
@@ -362,6 +387,13 @@ for epoch in range(epoch_cp, epochs):
     val_kld_loss = mean(val_kld_losses)
     train_acc = mean(train_accs)
     val_acc = mean(val_accs)
+    train_mse = mean(train_mses)
+    val_mse = mean(val_mses)
+
+    # Update learning rate based on validation loss
+    scheduler.step(val_loss)
+    current_lr = optimizer.param_groups[0]['lr']
+    print(f"Current learning rate: {current_lr}")
     
     # Early stopping check, but only if the cyclical annealing schedule is already done
     if global_step >= len(beta_schedule):
@@ -378,7 +410,26 @@ for epoch in range(epoch_cp, epochs):
         earlystopping(val_loss, model_dict)
         if earlystopping.early_stop:
             print("Early stopping!")
-            break     
+            break
+    
+    # Save the latest checkpoint (overwrites every time)
+    model_dict = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss_dict': train_loss_dict,
+        'val_loss_dict': val_loss_dict,
+        'model_config':model_config,
+        'global_step':global_step,
+        'monotonic_step':monotonic_step,
+    }
+    torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
+
+    # Print checkpoint status
+    print(f"Saved latest checkpoint at epoch {epoch}")
+    if hasattr(earlystopping, 'best_score') and earlystopping.best_score == val_loss:
+        print(f"New best model saved with validation loss: {val_loss:.5f}")
+    
     if math.isnan(train_loss):
         print("Network diverged!")
         break
@@ -387,7 +438,21 @@ for epoch in range(epoch_cp, epochs):
                          | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}\n")
     train_loss_dict[epoch] = (train_total_losses, train_kld_losses, train_accs)
     val_loss_dict[epoch] = (val_total_losses, val_kld_losses, val_accs)
-
+    
+    # Save metrics to CSV
+    train_metrics = {
+        'loss': train_loss,
+        'kld': train_kld_loss,
+        'acc': train_acc,
+        'mse': train_mse
+    }
+    val_metrics = {
+        'loss': val_loss,
+        'kld': val_kld_loss,
+        'acc': val_acc,
+        'mse': val_mse
+    }
+    save_epoch_metrics_to_csv(epoch+1, train_metrics, val_metrics, directory_path)
 
 # Save the training loss values
 with open(os.path.join(directory_path,'train_loss.pkl'), 'wb') as file:
@@ -399,6 +464,3 @@ with open(os.path.join(directory_path,'val_loss.pkl'), 'wb') as file:
 
 print('Done!\n')
 #experiment.end()
-
-
-# %%

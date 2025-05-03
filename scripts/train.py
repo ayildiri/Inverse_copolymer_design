@@ -193,8 +193,8 @@ print(f"DEBUG: File exists: {os.path.exists(vocab_file_path)}")
 print(f"DEBUG: Current working directory: {os.getcwd()}")
 print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
 
-vocab = load_vocab(vocab_file=vocab_file_path)
-vocab = len(vocab)
+vocab_dict = load_vocab(vocab_file_path)
+vocab = len(vocab_dict)  # Get the size of vocabulary
 
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors

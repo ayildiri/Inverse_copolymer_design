@@ -186,7 +186,15 @@ elif args.add_latent ==0:
     add_latent=False
 
 # Model config and vocab
-vocab = load_vocab(vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt')
+# Model config and vocab
+vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+print(f"DEBUG: Constructed vocab file path: {vocab_file_path}")
+print(f"DEBUG: File exists: {os.path.exists(vocab_file_path)}")
+print(f"DEBUG: Current working directory: {os.getcwd()}")
+print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
+
+vocab = load_vocab(vocab_file=vocab_file_path)
+
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors
     "beta": args.beta,

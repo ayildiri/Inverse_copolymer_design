@@ -162,6 +162,7 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
+parser.add_argument("--epochs", type=int, default=100, help="number of training epochs")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
 
 
@@ -228,7 +229,7 @@ model_config = {
     "decoder_num_layers": args.dec_layers,
     "num_attention_heads":4,
     'batch_size': 64,
-    'epochs': 100,
+    'epochs': args.epochs,
     'hidden_dimension': 300, #hidden dimension of nodes
     'n_nodes_pool': 10, #how many representative nodes are used for attention based pooling
     'pooling': 'mean', #mean or custom

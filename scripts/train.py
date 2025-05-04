@@ -169,32 +169,32 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
     
-    # Determine if we're writing headers and how to handle the file
-    if not resume_training:
-        # Starting fresh training - create new file with headers
-        mode = 'w'  # Write mode to create new file or overwrite existing
-        write_headers = True
-        if os.path.exists(csv_file):
-            print(f"[INFO] Starting fresh training - creating new training log at {csv_file}")
+    # Determine if we need to create a new file with headers
+    file_exists = os.path.exists(csv_file)
+    
+    # If starting fresh training, reset the file
+    if not resume_training and file_exists:
+        # We'll create a new file with headers
+        mode = 'w'
+        print(f"[INFO] Starting fresh training - creating new training log at {csv_file}")
     else:
-        # Resuming training - append to existing file
-        mode = 'a'  # Append mode to add to existing file
-        write_headers = not os.path.exists(csv_file)  # Only write headers if file doesn't exist
-        if os.path.exists(csv_file):
+        # Either resuming, or file doesn't exist yet
+        mode = 'a'  # Append mode
+        if resume_training and file_exists:
             print(f"[INFO] Resuming training - appending to existing training log at {csv_file}")
     
     # Open file with appropriate mode
     with open(csv_file, mode, newline='') as f:
         writer = csv.writer(f)
         
-        # Write headers if needed
-        if write_headers:
+        # Write headers if creating a new file or if file doesn't exist
+        if mode == 'w' or not file_exists:
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                 'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'
             ])
         
-        # Write the current epoch's data (only for the current epoch)
+        # Write the current epoch's data
         writer.writerow([
             epoch,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],

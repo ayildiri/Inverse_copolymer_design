@@ -272,6 +272,7 @@ model_config = {
     'es_patience': args.es_patience,
     'loss': args.loss, # focal or ce
     'max_alpha': args.max_alpha,
+    'alpha': args.alpha
 }
 batch_size = model_config['batch_size']
 epochs = model_config['epochs']

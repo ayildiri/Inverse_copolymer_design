@@ -84,7 +84,7 @@ if os.path.isfile(filepath):
     if args.ppguided:
         model_type = G2S_VAE_PPguided
     else: 
-        model_type = G2S_VAE_PPguideddisabled  # Updated to match train.py
+        model_type = G2S_VAE
 
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]

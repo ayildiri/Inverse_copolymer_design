@@ -169,26 +169,26 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
     
-    # Determine if we need to create a new file with headers
-    file_exists = os.path.exists(csv_file)
+    # Track the first save operation with a flag file
+    flag_file = os.path.join(directory_path, '.csv_init_done')
+    first_save = not os.path.exists(flag_file)
     
-    # If starting fresh training, reset the file
-    if not resume_training and file_exists:
-        # We'll create a new file with headers
-        mode = 'w'
+    # Only reset file on the first save operation of a fresh training run
+    if first_save and not resume_training and os.path.exists(csv_file):
+        mode = 'w'  # Overwrite existing file
         print(f"[INFO] Starting fresh training - creating new training log at {csv_file}")
+        # Create flag file to indicate we've initialized the CSV
+        with open(flag_file, 'w') as f:
+            f.write(str(time.time()))
     else:
-        # Either resuming, or file doesn't exist yet
-        mode = 'a'  # Append mode
-        if resume_training and file_exists:
-            print(f"[INFO] Resuming training - appending to existing training log at {csv_file}")
+        mode = 'a'  # Append to existing file
     
     # Open file with appropriate mode
     with open(csv_file, mode, newline='') as f:
         writer = csv.writer(f)
         
         # Write headers if creating a new file or if file doesn't exist
-        if mode == 'w' or not file_exists:
+        if mode == 'w' or not os.path.exists(csv_file):
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                 'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'

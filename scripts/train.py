@@ -460,41 +460,33 @@ for epoch in range(epoch_cp, epochs):
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Current learning rate: {current_lr:.6f}")
         
-    # Early stopping check, but only if the cyclical annealing schedule is already done
-    if global_step >= len(beta_schedule):
-        model_dict = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss_dict': train_loss_dict,
-        'val_loss_dict': val_loss_dict,
-        'model_config':model_config,
-        'global_step':global_step,
-        'monotonic_step':monotonic_step,
-        }
-        earlystopping(val_loss, model_dict)
-        if earlystopping.early_stop:
-            print("Early stopping!")
-            break
-
-    
-    # Save the latest checkpoint (overwrites every time)
+    # Create a model dictionary after validation
     model_dict = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss_dict': train_loss_dict,
         'val_loss_dict': val_loss_dict,
-        'model_config':model_config,
-        'global_step':global_step,
-        'monotonic_step':monotonic_step,
+        'model_config': model_config,
+        'global_step': global_step,
+        'monotonic_step': monotonic_step,
     }
+    
+    # Always check and save best model regardless of beta schedule
+    earlystopping(val_loss, model_dict)
+    
+    # Save the latest checkpoint (overwrites every time)
     torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
-
+    
     # Print checkpoint status
     print(f"Saved latest checkpoint at epoch {epoch}")
     if hasattr(earlystopping, 'best_score') and earlystopping.best_score == val_loss:
         print(f"New best model saved with validation loss: {val_loss:.5f}")
+    
+    # Perform early stopping check only if beta schedule is complete
+    if global_step >= len(beta_schedule) and earlystopping.early_stop:
+        print("Early stopping!")
+        break
     
     if math.isnan(train_loss):
         print("Network diverged!")

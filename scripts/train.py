@@ -360,9 +360,10 @@ scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.s
 data_augment="old"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
 
-# Use custom save directory if provided, otherwise use default path
+# Always use model_name in the path structure, regardless of save_dir
 if args.save_dir is not None:
-    directory_path = args.save_dir
+    # Create the expected directory structure inside save_dir
+    directory_path = os.path.join(args.save_dir, model_name)
 else:
     directory_path = os.path.join(main_dir_path,'Checkpoints/', model_name)
 

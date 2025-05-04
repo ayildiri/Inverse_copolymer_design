@@ -173,6 +173,7 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     # If starting from scratch and file exists, clear it
     if not resume_training and os.path.exists(csv_file):
         os.remove(csv_file)
+        print(f"[INFO] Cleared existing training log at {csv_file}")
         write_headers = True
     else:
         # Check if we need to write headers (if file doesn't exist)

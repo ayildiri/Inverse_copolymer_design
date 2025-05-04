@@ -382,11 +382,11 @@ if args.resume_from_checkpoint is not None:
         print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
 
 # Otherwise, try to load best model first, then latest from the default directory
-elif os.path.exists(directory_path):
-    if os.path.exists(os.path.join(directory_path, "model_best_loss.pt")):
-        checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
-    elif os.path.exists(os.path.join(directory_path, "model_latest.pt")):
-        checkpoint_file = os.path.join(directory_path, "model_latest.pt")
+# elif os.path.exists(directory_path):
+#     if os.path.exists(os.path.join(directory_path, "model_best_loss.pt")):
+#         checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
+#     elif os.path.exists(os.path.join(directory_path, "model_latest.pt")):
+#         checkpoint_file = os.path.join(directory_path, "model_latest.pt")
 
 # Load the checkpoint if one was found
 if checkpoint_file is not None:

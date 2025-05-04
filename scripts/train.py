@@ -378,10 +378,10 @@ checkpoint_file = None
 if args.resume_from_checkpoint is not None:
     if os.path.exists(args.resume_from_checkpoint):
         checkpoint_file = args.resume_from_checkpoint
+        print(f"Resuming training from checkpoint: {checkpoint_file}")
     else:
         print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
 else:
-    # If resume_from_checkpoint is not specified, always start from scratch
     print("No checkpoint specified. Starting training from scratch.")
 
 # Otherwise, try to load best model first, then latest from the default directory
@@ -390,6 +390,8 @@ else:
 #         checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
 #     elif os.path.exists(os.path.join(directory_path, "model_latest.pt")):
 #         checkpoint_file = os.path.join(directory_path, "model_latest.pt")
+
+
 
 # Load the checkpoint if one was found
 if checkpoint_file is not None:

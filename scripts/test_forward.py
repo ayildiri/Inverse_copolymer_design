@@ -18,8 +18,6 @@ import numpy as np
 import argparse
 import pickle
 
-
-
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -35,8 +33,9 @@ if device.type == 'cuda':
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
-parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
+parser.add_argument("--embedding_dim", type=int, help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -47,8 +46,8 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
-
-
+parser.add_argument("--batch_size", type=int, default=64, help="Batch size for testing")
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 
 args = parser.parse_args()
 seed = args.seed
@@ -64,19 +63,25 @@ dataset_type = "train"
 data_augment = "old" # new or old
 dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
 
-
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
 
 # Load model
 # Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-filepath = os.path.join(main_dir_path,'Checkpoints/', model_name,"model_best_loss.pt")
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+
+# Updated path handling to use save_dir if provided
+if args.save_dir is not None:
+    filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+else:
+    filepath = os.path.join(main_dir_path, 'Checkpoints/', model_name, "model_best_loss.pt")
+
 if os.path.isfile(filepath):
     if args.ppguided:
         model_type = G2S_VAE_PPguided
     else: 
-        model_type = G2S_VAE
+        model_type = G2S_VAE_PPguideddisabled  # Updated to match train.py
+
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
     batch_size = model_config['batch_size']
@@ -92,8 +97,12 @@ if os.path.isfile(filepath):
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
 
-    # Directory to save results
-    dir_name=  os.path.join(main_dir_path,'Checkpoints/', model_name)
+    # Directory to save results - updated to use save_dir if provided
+    if args.save_dir is not None:
+        dir_name = os.path.join(args.save_dir, model_name)
+    else:
+        dir_name = os.path.join(main_dir_path, 'Checkpoints/', model_name)
+        
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
@@ -120,7 +129,7 @@ if os.path.isfile(filepath):
     connectivity_pattern = []
     with torch.no_grad():
         for i, batch in enumerate(batches):
-            if augment=='augmented' and dataset_type=='train': # otherwise it takes to long for train dataset
+            if augment=='augmented' and dataset_type=='train': # otherwise it takes too long for train dataset
                 if i>=500: 
                     break
             data = dict_train_loader[str(batch)][0]
@@ -157,19 +166,19 @@ if os.path.isfile(filepath):
     y1_all = np.concatenate(y1, axis=0)
     y2_all = np.concatenate(y2, axis=0)
     y_p_all = np.concatenate(y_p, axis=0)
-    with open(dir_name+'stoichiometry_'+dataset_type, 'wb') as f:
+    with open(os.path.join(dir_name, 'stoichiometry_'+dataset_type), 'wb') as f:
         pickle.dump(stoichiometry, f)
-    with open(dir_name+'connectivity_'+dataset_type, 'wb') as f:
+    with open(os.path.join(dir_name, 'connectivity_'+dataset_type), 'wb') as f:
         pickle.dump(connectivity_pattern, f)
-    with open(dir_name+'monomers_'+dataset_type, 'wb') as f:
+    with open(os.path.join(dir_name, 'monomers_'+dataset_type), 'wb') as f:
         pickle.dump(monomers, f)
-    with open(dir_name+'latent_space_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'latent_space_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, latent_space)
-    with open(dir_name+'y1_all_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'y1_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y1_all)
-    with open(dir_name+'y2_all_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'y2_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y2_all)
-    with open(dir_name+'yp_all_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'yp_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y_p_all)
 
     print(f"Trainset: Total Loss: {test_total:.5f} | KLD: {test_kld:.5f} | ACC: {test_acc:.5f}")
@@ -200,14 +209,14 @@ if os.path.isfile(filepath):
     connectivity_pattern = []
     with torch.no_grad():
         for i, batch in enumerate(batches):
-            if augment=='augmented' and dataset_type=='train': # otherwise it takes to long for train dataset
+            if augment=='augmented' and dataset_type=='train': # otherwise it takes too long for train dataset
                 if i>=500: 
                     break
-            data = dict_train_loader[str(batch)][0]
+            data = dict_test_loader[str(batch)][0]  # Using test_loader correctly
             data.to(device)
-            dest_is_origin_matrix = dict_train_loader[str(batch)][1]
+            dest_is_origin_matrix = dict_test_loader[str(batch)][1]
             dest_is_origin_matrix.to(device)
-            inc_edges_to_atom_matrix = dict_train_loader[str(batch)][2]
+            inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
             inc_edges_to_atom_matrix.to(device)
 
             # Perform a single forward pass.
@@ -237,22 +246,21 @@ if os.path.isfile(filepath):
     y1_all = np.concatenate(y1, axis=0)
     y2_all = np.concatenate(y2, axis=0)
     y_p_all = np.concatenate(y_p, axis=0)
-    with open(dir_name+'stoichiometry_'+dataset_type, 'wb') as f:
+    with open(os.path.join(dir_name, 'stoichiometry_'+dataset_type), 'wb') as f:
         pickle.dump(stoichiometry, f)
-    with open(dir_name+'connectivity_'+dataset_type, 'wb') as f:
+    with open(os.path.join(dir_name, 'connectivity_'+dataset_type), 'wb') as f:
         pickle.dump(connectivity_pattern, f)
-    with open(dir_name+'monomers_'+dataset_type, 'wb') as f:
+    with open(os.path.join(dir_name, 'monomers_'+dataset_type), 'wb') as f:
         pickle.dump(monomers, f)
-    with open(dir_name+'latent_space_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'latent_space_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, latent_space)
-    with open(dir_name+'y1_all_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'y1_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y1_all)
-    with open(dir_name+'y2_all_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'y2_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y2_all)
-    with open(dir_name+'yp_all_'+dataset_type+'.npy', 'wb') as f:
+    with open(os.path.join(dir_name, 'yp_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y_p_all)
-
 
     print(f"Testset: Total Loss: {test_total:.5f} | KLD: {test_kld:.5f} | ACC: {test_acc:.5f}")
 
-else: print("The model training diverged and there are is no trained model file!")
+else: print("The model training diverged and there is no trained model file!")

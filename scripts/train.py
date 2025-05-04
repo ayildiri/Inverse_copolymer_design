@@ -135,7 +135,9 @@ def train(dict_train_loader, global_step, monotonic_step):
             print(f"{'MSE':<15} | {mse.item():<20.6f}")
             print(f"{'Beta':<15} | {model.beta:<20.6f}")
             print("-" * 70)
-        
+            print(f"{'Alpha':<15} | {model.alpha:<20.6f}")
+            print("-" * 70)
+            
         global_step += 1
         
     return model, ce_losses, total_losses, kld_losses, accs, mses, global_step, monotonic_step

@@ -70,7 +70,14 @@ def train(dict_train_loader, global_step, monotonic_step):
                 beta_t = beta_schedule[global_step]
         
             model.beta = beta_t
-
+        if model_config['alpha']=="schedule":
+            # determine alpha at time step t
+            if global_step >= len(alpha_schedule):
+                alpha_t = model.alpha #stays the same
+            else:
+                alpha_t = alpha_schedule[global_step]
+            model.alpha = alpha_t
+        
         # get graphs & matrices for MP from dictionary
         data = dict_train_loader[str(batch)][0]
         data.to(device)
@@ -206,6 +213,7 @@ parser.add_argument("--augment", help="options: augmented, original", default="a
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", type=int, help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -337,6 +345,11 @@ if model_config['beta'] == "schedule":
 elif model_config['beta'] == "normalVAE":
     beta_schedule = np.ones(1)
 
+if model_config['alpha'] == "schedule":
+    alpha_schedule = frange_cycle_zero_linear(n_iter=n_iter, start=0.0, stop=model_config['max_alpha'], n_cycle=5, ratio_increase=0.5, ratio_zero=0.3)
+elif model_config['alpha'] == "fixed":
+    alpha_schedule = np.ones(1)
+
 # %%# %% Train
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -439,6 +452,7 @@ for epoch in range(epoch_cp, epochs):
         if earlystopping.early_stop:
             print("Early stopping!")
             break
+
     
     # Save the latest checkpoint (overwrites every time)
     model_dict = {

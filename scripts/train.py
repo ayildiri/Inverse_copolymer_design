@@ -126,16 +126,7 @@ def train(dict_train_loader, global_step, monotonic_step):
         if i % 10 == 0:
             print(f"\nBatch [{i} / {len(order_batches)}]")
             print("-" * 70)
-            print(f"{'Metric':<15} | {'Value':<20}")
-            print("-" * 70)
-            print(f"{'Recon Loss':<15} | {recon_loss.item():<20.6f}")
-            print(f"{'Total Loss':<15} | {loss.item():<20.6f}")
-            print(f"{'KLD':<15} | {kl_loss.item():<20.6f}")
-            print(f"{'Accuracy':<15} | {acc.item():<20.6f}")
-            print(f"{'MSE':<15} | {mse.item():<20.6f}")
-            print(f"{'Beta':<15} | {model.beta:<20.6f}")
-            print("-" * 70)
-            print(f"{'Alpha':<15} | {model.alpha:<20.6f}")
+            print(f"Recon: {recon_loss.item():.6f} | Total: {loss.item():.6f} | KLD: {kl_loss.item():.6f} | Acc: {acc.item():.6f} | MSE: {mse.item():.6f} | Beta: {model.beta:.6f} | Alpha: {model.alpha:.6f}")
             print("-" * 70)
             
         global_step += 1

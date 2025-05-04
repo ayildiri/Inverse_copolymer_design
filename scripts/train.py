@@ -166,12 +166,13 @@ def test(dict_loader):
     return ce_losses, total_losses, kld_losses, accs, mses
 
 
-def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path):
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_training=False):
     """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
     
-    # Create the CSV file and write headers if it doesn't exist
-    if not os.path.exists(csv_file):
+    # Create the CSV file and write headers if it doesn't exist or we're starting from scratch
+    if not os.path.exists(csv_file) or not resume_training:
+        # Write mode - overwrites existing file
         with open(csv_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -391,8 +392,6 @@ else:
 #     elif os.path.exists(os.path.join(directory_path, "model_latest.pt")):
 #         checkpoint_file = os.path.join(directory_path, "model_latest.pt")
 
-
-
 # Load the checkpoint if one was found
 if checkpoint_file is not None:
     print(f"Loading model from {checkpoint_file}")
@@ -406,6 +405,7 @@ if checkpoint_file is not None:
         global_step = checkpoint['global_step']
         monotonic_step = checkpoint['monotonic_step']
         model.beta = model_config['max_beta']
+    resume_training = True
 else:
     print("Starting training from scratch")
     train_loss_dict = {}
@@ -413,6 +413,7 @@ else:
     epoch_cp = 0
     global_step = 0
     monotonic_step = 0
+    resume_training = False
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch+1}\n-------------------------------")
@@ -514,14 +515,15 @@ for epoch in range(epoch_cp, epochs):
         'acc': val_acc,
         'mse': val_mse
     }
-    save_epoch_metrics_to_csv(epoch+1, train_metrics, val_metrics, directory_path)
+    save_epoch_metrics_to_csv(epoch+1, train_metrics, val_metrics, directory_path, resume_training)
 
-# Save the training loss values
-with open(os.path.join(directory_path,'train_loss.pkl'), 'wb') as file:
+# Save the training loss values - only overwrite if starting fresh
+file_mode = 'wb'  # Always use write mode - we're saving the full dictionaries
+with open(os.path.join(directory_path,'train_loss.pkl'), file_mode) as file:
     pickle.dump(train_loss_dict, file)
  
 # Save the validation loss values
-with open(os.path.join(directory_path,'val_loss.pkl'), 'wb') as file:
+with open(os.path.join(directory_path,'val_loss.pkl'), file_mode) as file:
     pickle.dump(val_loss_dict, file)
 
 print('Done!\n')

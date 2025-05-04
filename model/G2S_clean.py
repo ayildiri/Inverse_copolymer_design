@@ -604,7 +604,7 @@ class G2S_VAE_PPguided(nn.Module):
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
         
         self.pp_ffn_hidden = 56
-        self.alpha = model_config['max_alpha']
+        self.alpha = model_config['max_alpha'] if model_config['alpha'] == "fixed" else 0.0
         #self.alpha=0.1
         #self.max_n=data_config['max_num_nodes']
         self.PP_lin1 = Sequential(Linear(embedding_dim, self.pp_ffn_hidden), ReLU(), ).to(device)
@@ -723,8 +723,7 @@ class G2S_VAE_PPguideddisabled(nn.Module):
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
         
         self.pp_ffn_hidden = 56
-        self.alpha = model_config['max_alpha']
-
+        self.alpha = model_config['max_alpha'] if model_config['alpha'] == "fixed" else 0.0
         #self.max_n=data_config['max_num_nodes']
         self.PP_lin1 = Sequential(Linear(embedding_dim, self.pp_ffn_hidden), ReLU(), ).to(device)
         self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, 2)).to(device)

@@ -170,14 +170,13 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
     
-    # Check if we need to write headers (if file doesn't exist or we're starting fresh)
-    write_headers = not os.path.exists(csv_file) or not resume_training
-    
     # If starting from scratch and file exists, clear it
     if not resume_training and os.path.exists(csv_file):
-        # Open and close in 'w' mode to clear the file, but don't write anything yet
-        with open(csv_file, 'w', newline='') as f:
-            pass
+        os.remove(csv_file)
+        write_headers = True
+    else:
+        # Check if we need to write headers (if file doesn't exist)
+        write_headers = not os.path.exists(csv_file)
     
     # Open in append mode to add new data
     with open(csv_file, 'a', newline='') as f:

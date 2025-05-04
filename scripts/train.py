@@ -165,7 +165,6 @@ def test(dict_loader):
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
-
 def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_training=False):
     """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
@@ -196,7 +195,6 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],
             val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse']
         ])
-
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -388,10 +386,13 @@ if args.resume_from_checkpoint is not None:
     if os.path.exists(args.resume_from_checkpoint):
         checkpoint_file = args.resume_from_checkpoint
         print(f"Resuming training from checkpoint: {checkpoint_file}")
+        resume_training = True  # Set to True ONLY when explicitly resuming from checkpoint
     else:
         print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
+        resume_training = False
 else:
     print("No checkpoint specified. Starting training from scratch.")
+    resume_training = False
 
 # Otherwise, try to load best model first, then latest from the default directory
 # elif os.path.exists(directory_path):

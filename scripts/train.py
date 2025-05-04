@@ -382,7 +382,6 @@ if args.resume_from_checkpoint is not None:
         print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
 else:
     # If resume_from_checkpoint is not specified, always start from scratch
-    checkpoint_file = None
     print("No checkpoint specified. Starting training from scratch.")
 
 # Otherwise, try to load best model first, then latest from the default directory

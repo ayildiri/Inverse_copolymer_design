@@ -390,6 +390,14 @@ else:
     print("No checkpoint specified. Starting training from scratch.")
     resume_training = False
 
+# Optional: reset CSV flag if training from scratch
+if not resume_training:
+    flag_file = os.path.join(directory_path, '.csv_initialized')
+    if os.path.exists(flag_file):
+        print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
+        os.remove(flag_file)
+
+
 # Otherwise, try to load best model first, then latest from the default directory
 # elif os.path.exists(directory_path):
 #     if os.path.exists(os.path.join(directory_path, "model_best_loss.pt")):

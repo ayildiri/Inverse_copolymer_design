@@ -429,28 +429,20 @@ else:
     resume_training = False
 
 for epoch in range(epoch_cp, epochs):
-    print(f"Epoch {epoch+1}\n-------------------------------")
+    print(f"Epoch {epoch + 1}\n" + "-" * 30)
 
     t1 = time.time()
     model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step)
     t2 = time.time()
-    
-    # Format the epoch time to be more readable
+
     epoch_time = t2 - t1
     hours = int(epoch_time // 3600)
     minutes = int((epoch_time % 3600) // 60)
     seconds = epoch_time % 60
-    
-    if hours > 0:
-        time_str = f"{hours}h {minutes}m {seconds:.2f}s"
-    elif minutes > 0:
-        time_str = f"{minutes}m {seconds:.2f}s"
-    else:
-        time_str = f"{seconds:.2f}s"
-    
-    print(f"Epoch time: {time_str}")
+    time_str = f"{hours}h {minutes}m {seconds:.2f}s" if hours > 0 else f"{minutes}m {seconds:.2f}s" if minutes > 0 else f"{seconds:.2f}s"
 
     val_ce_losses, val_total_losses, val_kld_losses, val_accs, val_mses = test(dict_val_loader)
+
     train_loss = mean(train_total_losses)
     val_loss = mean(val_total_losses)
     train_kld_loss = mean(train_kld_losses)
@@ -460,12 +452,13 @@ for epoch in range(epoch_cp, epochs):
     train_mse = mean(train_mses)
     val_mse = mean(val_mses)
 
-    # Update learning rate based on validation loss
+    # Update learning rate
     scheduler.step(val_loss)
     current_lr = optimizer.param_groups[0]['lr']
+    print(f"Epoch time: {time_str}")
     print(f"Current learning rate: {current_lr:.6f}")
-        
-    # Create a model dictionary after validation
+
+    # Save checkpoint
     model_dict = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -476,51 +469,37 @@ for epoch in range(epoch_cp, epochs):
         'global_step': global_step,
         'monotonic_step': monotonic_step,
     }
-    
-    # Always check and save best model regardless of beta schedule
-    earlystopping(val_loss, model_dict)
-    
-    # Save the latest checkpoint (overwrites every time)
     torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
-    
-    # Print checkpoint status
-    print(f"Saved latest checkpoint at epoch {epoch}")
+    print(f"Saved latest checkpoint *after* epoch {epoch + 1}")
+
+    # Check and save best model
     if hasattr(earlystopping, 'best_score') and earlystopping.best_score == val_loss:
-        print(f"New best model saved with validation loss: {val_loss:.5f}")
-    
-    # Perform early stopping check only if beta schedule is complete
+        print(f"[INFO] New best model saved with validation loss: {val_loss:.5f}")
+    earlystopping(val_loss, model_dict)
+
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
-        print("Early stopping!")
+        print("Early stopping triggered.")
         break
-    
+
     if math.isnan(train_loss):
-        print("Network diverged!")
+        print("Network diverged! Training aborted.")
         break
-    
-    # Replace this messy print with a more consistent format
+
     print("-" * 70)
-    print(f"Epoch: {epoch+1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
+    print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
     print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f} | Val Acc: {val_acc:.5f} | Val MSE: {val_mse:.5f}")
     print(f"Current Beta: {model.beta:.5f} | Current Alpha: {model.alpha:.5f}")
     print("-" * 70)
-    
+
+    # Store loss dicts
     train_loss_dict[epoch] = (train_total_losses, train_kld_losses, train_accs)
     val_loss_dict[epoch] = (val_total_losses, val_kld_losses, val_accs)
-    
-    # Save metrics to CSV
-    train_metrics = {
-        'loss': train_loss,
-        'kld': train_kld_loss,
-        'acc': train_acc,
-        'mse': train_mse
-    }
-    val_metrics = {
-        'loss': val_loss,
-        'kld': val_kld_loss,
-        'acc': val_acc,
-        'mse': val_mse
-    }
-    save_epoch_metrics_to_csv(epoch+1, train_metrics, val_metrics, directory_path, resume_training)
+
+    # Save epoch metrics
+    train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
+    val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
+    save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_training)
+
 
 # Save the training loss values - only overwrite if starting fresh
 file_mode = 'wb'  # Always use write mode - we're saving the full dictionaries

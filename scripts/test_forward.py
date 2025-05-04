@@ -18,6 +18,8 @@ import numpy as np
 import argparse
 import pickle
 
+
+
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -49,6 +51,7 @@ parser.add_argument("--epsilon", type=float, default=1)
 parser.add_argument("--batch_size", type=int, default=64, help="Batch size for testing")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 
+
 args = parser.parse_args()
 seed = args.seed
 
@@ -62,6 +65,7 @@ elif args.add_latent ==0:
 dataset_type = "train"
 data_augment = "old" # new or old
 dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+
 
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
@@ -212,11 +216,11 @@ if os.path.isfile(filepath):
             if augment=='augmented' and dataset_type=='train': # otherwise it takes too long for train dataset
                 if i>=500: 
                     break
-            data = dict_test_loader[str(batch)][0]  # Using test_loader correctly
+            data = dict_test_loader[str(batch)][0]  # Using test_loader for test data
             data.to(device)
-            dest_is_origin_matrix = dict_test_loader[str(batch)][1]
+            dest_is_origin_matrix = dict_test_loader[str(batch)][1]  # Using test_loader
             dest_is_origin_matrix.to(device)
-            inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
+            inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]  # Using test_loader
             inc_edges_to_atom_matrix.to(device)
 
             # Perform a single forward pass.
@@ -260,6 +264,7 @@ if os.path.isfile(filepath):
         np.save(f, y2_all)
     with open(os.path.join(dir_name, 'yp_all_'+dataset_type+'.npy'), 'wb') as f:
         np.save(f, y_p_all)
+
 
     print(f"Testset: Total Loss: {test_total:.5f} | KLD: {test_kld:.5f} | ACC: {test_acc:.5f}")
 

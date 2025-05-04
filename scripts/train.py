@@ -124,7 +124,7 @@ def train(dict_train_loader, global_step, monotonic_step):
         accs.append(acc.item())
         mses.append(mse.item())
         if i % 10 == 0:
-            print(f"\nBatch [{i} / {len(order_batches)}]")
+            print(f"\nBatch [{i:4d} / {len(order_batches):4d}]")
             print("-" * 70)
             print(f"Recon: {recon_loss.item():.6f} | Total: {loss.item():.6f} | KLD: {kl_loss.item():.6f} | Acc: {acc.item():.6f} | MSE: {mse.item():.6f} | Beta: {model.beta:.6f} | Alpha: {model.alpha:.6f}")
             print("-" * 70)
@@ -411,10 +411,26 @@ else:
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch+1}\n-------------------------------")
+
     t1 = time.time()
     model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step)
     t2 = time.time()
-    print(f'epoch time: {t2-t1}\n')
+    
+    # Format the epoch time to be more readable
+    epoch_time = t2 - t1
+    hours = int(epoch_time // 3600)
+    minutes = int((epoch_time % 3600) // 60)
+    seconds = epoch_time % 60
+    
+    if hours > 0:
+        time_str = f"{hours}h {minutes}m {seconds:.2f}s"
+    elif minutes > 0:
+        time_str = f"{minutes}m {seconds:.2f}s"
+    else:
+        time_str = f"{seconds:.2f}s"
+    
+    print(f"Epoch time: {time_str}")
+
     val_ce_losses, val_total_losses, val_kld_losses, val_accs, val_mses = test(dict_val_loader)
     train_loss = mean(train_total_losses)
     val_loss = mean(val_total_losses)
@@ -428,8 +444,8 @@ for epoch in range(epoch_cp, epochs):
     # Update learning rate based on validation loss
     scheduler.step(val_loss)
     current_lr = optimizer.param_groups[0]['lr']
-    print(f"Current learning rate: {current_lr}")
-    
+    print(f"Current learning rate: {current_lr:.6f}")
+        
     # Early stopping check, but only if the cyclical annealing schedule is already done
     if global_step >= len(beta_schedule):
         model_dict = {
@@ -469,9 +485,14 @@ for epoch in range(epoch_cp, epochs):
     if math.isnan(train_loss):
         print("Network diverged!")
         break
-
-    print(f"Epoch: {epoch+1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} \n\
-                         | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}\n")
+    
+    # Replace this messy print with a more consistent format
+    print("-" * 70)
+    print(f"Epoch: {epoch+1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
+    print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f} | Val Acc: {val_acc:.5f} | Val MSE: {val_mse:.5f}")
+    print(f"Current Beta: {model.beta:.5f} | Current Alpha: {model.alpha:.5f}")
+    print("-" * 70)
+    
     train_loss_dict[epoch] = (train_total_losses, train_kld_losses, train_accs)
     val_loss_dict[epoch] = (val_total_losses, val_kld_losses, val_accs)
     

@@ -166,35 +166,26 @@ def test(dict_loader):
     return ce_losses, total_losses, kld_losses, accs, mses
 
 def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_training=False):
-    """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
+    flag_file = os.path.join(directory_path, '.csv_initialized')
+
+    first_time = not os.path.exists(flag_file)
     
-    # Track the first save operation with a flag file
-    flag_file = os.path.join(directory_path, '.csv_init_done')
-    first_save = not os.path.exists(flag_file)
-    
-    # Only reset file on the first save operation of a fresh training run
-    if first_save and not resume_training and os.path.exists(csv_file):
-        mode = 'w'  # Overwrite existing file
-        print(f"[INFO] Starting fresh training - creating new training log at {csv_file}")
-        # Create flag file to indicate we've initialized the CSV
+    if not resume_training and first_time and os.path.exists(csv_file):
+        mode = 'w'
+        print(f"[INFO] Fresh training — resetting log: {csv_file}")
         with open(flag_file, 'w') as f:
             f.write(str(time.time()))
     else:
-        mode = 'a'  # Append to existing file
-    
-    # Open file with appropriate mode
+        mode = 'a'
+
     with open(csv_file, mode, newline='') as f:
         writer = csv.writer(f)
-        
-        # Write headers if creating a new file or if file doesn't exist
         if mode == 'w' or not os.path.exists(csv_file):
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                 'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'
             ])
-        
-        # Write the current epoch's data
         writer.writerow([
             epoch,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],

@@ -170,19 +170,27 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     """Save training and validation metrics for each epoch to CSV"""
     csv_file = os.path.join(directory_path, 'training_log.csv')
     
-    # Create the CSV file and write headers if it doesn't exist or we're starting from scratch
-    if not os.path.exists(csv_file) or not resume_training:
-        # Write mode - overwrites existing file
+    # Check if we need to write headers (if file doesn't exist or we're starting fresh)
+    write_headers = not os.path.exists(csv_file) or not resume_training
+    
+    # If starting from scratch and file exists, clear it
+    if not resume_training and os.path.exists(csv_file):
+        # Open and close in 'w' mode to clear the file, but don't write anything yet
         with open(csv_file, 'w', newline='') as f:
-            writer = csv.writer(f)
+            pass
+    
+    # Open in append mode to add new data
+    with open(csv_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        
+        # Write headers if needed
+        if write_headers:
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                 'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'
             ])
-    
-    # Append the current epoch's metrics
-    with open(csv_file, 'a', newline='') as f:
-        writer = csv.writer(f)
+        
+        # Write the current epoch's data
         writer.writerow([
             epoch,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],

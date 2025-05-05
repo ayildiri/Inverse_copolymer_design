@@ -165,12 +165,12 @@ def test(dict_loader):
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
-def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_training=False):
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False):
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
     
     # For fresh training (not resuming), reset the CSV file once at the beginning
-    if not resume_training and not os.path.exists(flag_file):
+    if not resume_from_checkpoint and not os.path.exists(flag_file):
         mode = 'w'  # Write mode (overwrite)
         print(f"[INFO] Fresh training — resetting log: {csv_file}")
         # Create flag file to mark that we've initialized the CSV for this training run
@@ -379,7 +379,7 @@ es_patience = model_config['es_patience']
 earlystopping = EarlyStopping(dir=directory_path, patience=es_patience)
 
 # Optional: reset CSV flag if training from scratch
-if not resume_training:
+if not resume_from_checkpoint:
     flag_file = os.path.join(directory_path, '.csv_initialized')
     if os.path.exists(flag_file):
         print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
@@ -395,16 +395,16 @@ if args.resume_from_checkpoint is not None:
     if os.path.exists(args.resume_from_checkpoint):
         checkpoint_file = args.resume_from_checkpoint
         print(f"Resuming training from checkpoint: {checkpoint_file}")
-        resume_training = True  # Set to True ONLY when explicitly resuming from checkpoint
+        resume_from_checkpoint = True  # Set to True ONLY when explicitly resuming from checkpoint
     else:
         print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
-        resume_training = False
+        resume_from_checkpoint = False
 else:
     print("No checkpoint specified. Starting training from scratch.")
-    resume_training = False
+    resume_from_checkpoint = False
 
 # Optional: reset CSV flag if training from scratch
-if not resume_training:
+if not resume_from_checkpoint:
     flag_file = os.path.join(directory_path, '.csv_initialized')
     if os.path.exists(flag_file):
         print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
@@ -431,7 +431,7 @@ if checkpoint_file is not None:
         global_step = checkpoint['global_step']
         monotonic_step = checkpoint['monotonic_step']
         model.beta = model_config['max_beta']
-    resume_training = True
+    resume_from_checkpoint = True
 else:
     print("Starting training from scratch")
     train_loss_dict = {}
@@ -439,7 +439,7 @@ else:
     epoch_cp = 0
     global_step = 0
     monotonic_step = 0
-    resume_training = False
+    resume_from_checkpoint = False
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch + 1}\n" + "-" * 30)
@@ -511,7 +511,7 @@ for epoch in range(epoch_cp, epochs):
     # Save epoch metrics
     train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
     val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
-    save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_training)
+    save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint)
 
 
 # Save the training loss values - only overwrite if starting fresh

@@ -121,7 +121,8 @@ if os.path.isfile(filepath):
     test_mses = []
 
     model.eval()
-    model.beta = 1.0
+    model.beta = model_config['max_beta']
+    model.alpha = model_config['max_alpha']
     test_loss = 0
     # Iterate in batches over the training/test dataset.
     latents = []
@@ -201,7 +202,8 @@ if os.path.isfile(filepath):
     test_mses = []
 
     model.eval()
-    model.beta = 1.0
+    model.beta = model_config['max_beta']
+    model.alpha = model_config['max_alpha']
     test_loss = 0
     # Iterate in batches over the training/test dataset.
     latents = []

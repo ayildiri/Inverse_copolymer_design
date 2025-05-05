@@ -235,6 +235,9 @@ parser.add_argument("--save_dir", type=str, default=None, help="Custom directory
 
 
 args = parser.parse_args()
+# Define resume_from_checkpoint as a boolean for logic control
+resume_from_checkpoint = args.resume_from_checkpoint is not None and os.path.exists(args.resume_from_checkpoint)
+
 
 # First set the seed for reproducible results
 seed = args.seed
@@ -391,14 +394,11 @@ print(f'STARTING TRAINING')
 checkpoint_file = None
 
 # If resume_from_checkpoint is specified, use that checkpoint
-if args.resume_from_checkpoint is not None:
-    if os.path.exists(args.resume_from_checkpoint):
-        checkpoint_file = args.resume_from_checkpoint
-        print(f"Resuming training from checkpoint: {checkpoint_file}")
-        resume_from_checkpoint = True  # Set to True ONLY when explicitly resuming from checkpoint
-    else:
-        print(f"Warning: Specified checkpoint {args.resume_from_checkpoint} does not exist. Starting from scratch.")
-        resume_from_checkpoint = False
+if resume_from_checkpoint:
+    checkpoint_file = args.resume_from_checkpoint
+    print(f"Resuming training from checkpoint: {checkpoint_file}")
+else:
+    print("No valid checkpoint found. Starting from scratch.")
 else:
     print("No checkpoint specified. Starting training from scratch.")
     resume_from_checkpoint = False

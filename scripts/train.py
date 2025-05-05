@@ -393,17 +393,22 @@ print(f'STARTING TRAINING')
 
 checkpoint_file = None
 
-# If resume_from_checkpoint is specified, use that checkpoint
-if resume_from_checkpoint:
-    checkpoint_file = args.resume_from_checkpoint
-    print(f"Resuming training from checkpoint: {checkpoint_file}")
+# ------------------ Resume checkpoint logic ------------------
+checkpoint_file = None
+
+if args.resume_from_checkpoint:
+    if os.path.exists(args.resume_from_checkpoint):
+        checkpoint_file = args.resume_from_checkpoint
+        print(f"[INFO] Resuming training from checkpoint: {checkpoint_file}")
+        resume_from_checkpoint = True
+    else:
+        print(f"[WARNING] Checkpoint path not found: {args.resume_from_checkpoint}. Starting from scratch.")
+        resume_from_checkpoint = False
 else:
-    print("No valid checkpoint found. Starting from scratch.")
-else:
-    print("No checkpoint specified. Starting training from scratch.")
+    print("[INFO] No checkpoint specified. Starting from scratch.")
     resume_from_checkpoint = False
 
-# Optional: reset CSV flag if training from scratch
+# Reset CSV flag if starting from scratch
 if not resume_from_checkpoint:
     flag_file = os.path.join(directory_path, '.csv_initialized')
     if os.path.exists(flag_file):

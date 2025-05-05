@@ -168,24 +168,28 @@ def test(dict_loader):
 def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_training=False):
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
-
-    first_time = not os.path.exists(flag_file)
     
-    if not resume_training and first_time and os.path.exists(csv_file):
-        mode = 'w'
+    # For fresh training (not resuming), reset the CSV file once at the beginning
+    if not resume_training and not os.path.exists(flag_file):
+        mode = 'w'  # Write mode (overwrite)
         print(f"[INFO] Fresh training — resetting log: {csv_file}")
+        # Create flag file to mark that we've initialized the CSV for this training run
         with open(flag_file, 'w') as f:
             f.write(str(time.time()))
     else:
-        mode = 'a'
-
+        # Either resuming or not the first time writing to the CSV in this run
+        mode = 'a'  # Append mode
+    
+    # Write to the CSV file
     with open(csv_file, mode, newline='') as f:
         writer = csv.writer(f)
+        # Write header only if we're in write mode or the file doesn't exist yet
         if mode == 'w' or not os.path.exists(csv_file):
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                 'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'
             ])
+        # Always write the data row
         writer.writerow([
             epoch,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],
@@ -373,6 +377,13 @@ if not os.path.exists(directory_path):
 
 es_patience = model_config['es_patience']
 earlystopping = EarlyStopping(dir=directory_path, patience=es_patience)
+
+# Optional: reset CSV flag if training from scratch
+if not resume_training:
+    flag_file = os.path.join(directory_path, '.csv_initialized')
+    if os.path.exists(flag_file):
+        print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
+        os.remove(flag_file)
 
 print(f'STARTING TRAINING')
 # Prepare dictionaries for training or load checkpoint

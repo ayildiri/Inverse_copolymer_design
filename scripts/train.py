@@ -438,7 +438,6 @@ if checkpoint_file is not None:
         model.beta = model_config['max_beta']
     resume_from_checkpoint = True
 else:
-    print("Starting training from scratch")
     train_loss_dict = {}
     val_loss_dict = {}
     epoch_cp = 0

@@ -18,7 +18,76 @@ import numpy as np
 import argparse
 import pickle
 
+# Add these diagnostic functions after your imports
 
+def analyze_nan_patterns(dict_loader):
+    """Analyze patterns of NaN values in dataset without modifying data"""
+    problematic_batches = []
+    for i in range(len(dict_loader)):
+        data = dict_loader[str(i)][0]
+        y1_has_nan = torch.isnan(data.y1).any().item()
+        y2_has_nan = torch.isnan(data.y2).any().item()
+        
+        if y1_has_nan or y2_has_nan:
+            problematic_batches.append(i)
+            print(f"Batch {i} has NaNs:")
+            print(f"  - y1 has NaN: {y1_has_nan}")
+            print(f"  - y2 has NaN: {y2_has_nan}")
+            if hasattr(data, 'monomer_smiles'):
+                print(f"  - SMILES examples: {data.monomer_smiles[:2]}")
+    
+    print(f"Total problematic batches: {len(problematic_batches)}/{len(dict_loader)}")
+    return problematic_batches
+
+def count_nan_values(tensor):
+    """Count how many NaN values are in a tensor"""
+    if tensor is None:
+        return 0
+    return torch.isnan(tensor).sum().item()
+
+def detailed_nan_analysis(dict_loader, batch_ids=None):
+    """Perform detailed analysis of NaN values in specific batches"""
+    if batch_ids is None:
+        # If no batch IDs provided, analyze first batch with NaNs
+        for i in range(len(dict_loader)):
+            data = dict_loader[str(i)][0]
+            if torch.isnan(data.y1).any() or torch.isnan(data.y2).any():
+                batch_ids = [i]
+                break
+    
+    for batch_id in batch_ids:
+        if str(batch_id) not in dict_loader:
+            print(f"Batch {batch_id} not found in loader")
+            continue
+            
+        data = dict_loader[str(batch_id)][0]
+        print(f"\n===== DETAILED ANALYSIS OF BATCH {batch_id} =====")
+        
+        # Analyze y1
+        y1_nan_count = count_nan_values(data.y1)
+        print(f"y1 shape: {data.y1.shape}, NaN count: {y1_nan_count}")
+        if y1_nan_count > 0:
+            # Find which samples in batch have NaNs
+            nan_sample_indices = torch.where(torch.isnan(data.y1).any(dim=1))[0]
+            print(f"Samples with NaN in y1: {nan_sample_indices.tolist()}")
+            
+            for idx in nan_sample_indices[:3]:  # Show first 3 examples
+                print(f"  Sample {idx} y1: {data.y1[idx]}")
+                if hasattr(data, 'monomer_smiles'):
+                    print(f"  Sample {idx} SMILES: {data.monomer_smiles[idx]}")
+        
+        # Analyze y2
+        y2_nan_count = count_nan_values(data.y2)
+        print(f"y2 shape: {data.y2.shape}, NaN count: {y2_nan_count}")
+        if y2_nan_count > 0:
+            # Find which samples in batch have NaNs
+            nan_sample_indices = torch.where(torch.isnan(data.y2).any(dim=1))[0]
+            print(f"Samples with NaN in y2: {nan_sample_indices.tolist()}")
+            
+            for idx in nan_sample_indices[:3]:  # Show first 3 examples
+                print(f"  Sample {idx} y2: {data.y2[idx]}")
+                if hasattr(data, 'monomer_smiles'):
+                    print(f"  Sample {idx} SMILES: {data.monomer_smiles[idx]}")
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

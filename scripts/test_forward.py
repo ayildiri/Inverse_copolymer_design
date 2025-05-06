@@ -68,7 +68,7 @@ def detailed_nan_analysis(dict_loader, batch_ids=None):
         print(f"y1 shape: {data.y1.shape}, NaN count: {y1_nan_count}")
         if y1_nan_count > 0:
             # Find which samples in batch have NaNs
-            nan_sample_indices = torch.where(torch.isnan(data.y1).any(dim=1))[0]
+            nan_sample_indices = torch.where(torch.isnan(data.y1))[0]
             print(f"Samples with NaN in y1: {nan_sample_indices.tolist()}")
             
             for idx in nan_sample_indices[:3]:  # Show first 3 examples
@@ -81,7 +81,7 @@ def detailed_nan_analysis(dict_loader, batch_ids=None):
         print(f"y2 shape: {data.y2.shape}, NaN count: {y2_nan_count}")
         if y2_nan_count > 0:
             # Find which samples in batch have NaNs
-            nan_sample_indices = torch.where(torch.isnan(data.y2).any(dim=1))[0]
+            nan_sample_indices = torch.where(torch.isnan(data.y1))[0]
             print(f"Samples with NaN in y2: {nan_sample_indices.tolist()}")
             
             for idx in nan_sample_indices[:3]:  # Show first 3 examples

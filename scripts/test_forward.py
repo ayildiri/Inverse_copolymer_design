@@ -222,6 +222,9 @@ if os.path.isfile(filepath):
                 if i>=500: 
                     break
             data = dict_test_loader[str(batch)][0]  # Using test_loader for test data
+            if torch.isnan(data.y1).any() or torch.isnan(data.y2).any():
+                print(f"⚠️ Skipping TEST batch {i} due to NaNs in labels.")
+                continue
             data.to(device)
             dest_is_origin_matrix = dict_test_loader[str(batch)][1]  # Using test_loader
             dest_is_origin_matrix.to(device)

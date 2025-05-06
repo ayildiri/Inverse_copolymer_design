@@ -135,6 +135,16 @@ dataset_type = "train"
 data_augment = "old" # new or old
 dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
 
+# INSERT HERE:
+print("\n==== ANALYZING TRAIN DATASET FOR NaNs ====")
+problematic_train_batches = analyze_nan_patterns(dict_train_loader)
+if problematic_train_batches:
+    # Analyze first problematic batch in detail
+    detailed_nan_analysis(dict_train_loader, [problematic_train_batches[0]])
+
+num_node_features = dict_train_loader['0'][0].num_node_features
+num_edge_features = dict_train_loader['0'][0].num_edge_features
+
 
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
@@ -262,6 +272,15 @@ if os.path.isfile(filepath):
     dataset_type = "test"
     data_augment = "old" # new or old
     dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+
+
+    # INSERT HERE:
+    print("\n==== ANALYZING TEST DATASET FOR NaNs ====")
+    problematic_test_batches = analyze_nan_patterns(dict_test_loader)
+    if problematic_test_batches:
+        # Analyze first problematic batch in detail
+        detailed_nan_analysis(dict_test_loader, [problematic_test_batches[0]])
+    
     #  Run over all epoch
     batches = list(range(len(dict_test_loader)))
     test_ce_losses = []

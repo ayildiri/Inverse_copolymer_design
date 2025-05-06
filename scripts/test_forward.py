@@ -232,7 +232,6 @@ if os.path.isfile(filepath):
             if torch.isnan(data.y1).any() or torch.isnan(data.y2).any():
                 print(f"NaNs in target labels at batch {i}")
 
-
             # Perform a single forward pass.
             loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y_pred = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
             latents.append(z.cpu().numpy())
@@ -252,13 +251,18 @@ if os.path.isfile(filepath):
             test_accs.append(acc.item())
             test_mses.append(mse.item())
 
-
             if torch.isnan(recon_loss):
                 print(f"❌ recon_loss is NaN at batch {i}")
                 print("Target:", target)
                 print("Predictions:", predictions)
+                
+            if torch.isnan(predictions).any():
+                print(f"❗NaNs detected in model predictions at batch {i}")
+            
+            if torch.isnan(recon_loss) or torch.isnan(loss) or torch.isnan(kl_loss) or torch.isnan(acc):
+                print(f"⚠️ Skipping batch {i} due to NaN")
+                continue
 
-  
     test_total = mean(test_total_losses)
     test_kld = mean(test_kld_losses)
     test_acc = mean(test_accs)

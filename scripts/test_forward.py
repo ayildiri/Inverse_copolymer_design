@@ -230,6 +230,9 @@ if os.path.isfile(filepath):
             if torch.isnan(data.edge_attr).any():
                 print(f"NaNs in edge features at batch {i}")
             if torch.isnan(data.y1).any() or torch.isnan(data.y2).any():
+                print("Monomer SMILES (sample):", data.monomer_smiles[0])
+                print("y1:", data.y1)
+                print("y2:", data.y2)
                 print(f"NaNs in target labels at batch {i}")
 
             # Perform a single forward pass.

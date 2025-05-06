@@ -225,6 +225,14 @@ if os.path.isfile(filepath):
             inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]  # Using test_loader
             inc_edges_to_atom_matrix.to(device)
 
+            if torch.isnan(data.x).any():
+                print(f"NaNs in input features at batch {i}")
+            if torch.isnan(data.edge_attr).any():
+                print(f"NaNs in edge features at batch {i}")
+            if torch.isnan(data.y1).any() or torch.isnan(data.y2).any():
+                print(f"NaNs in target labels at batch {i}")
+
+
             # Perform a single forward pass.
             loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y_pred = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
             latents.append(z.cpu().numpy())
@@ -244,6 +252,13 @@ if os.path.isfile(filepath):
             test_accs.append(acc.item())
             test_mses.append(mse.item())
 
+
+            if torch.isnan(recon_loss):
+                print(f"❌ recon_loss is NaN at batch {i}")
+                print("Target:", target)
+                print("Predictions:", predictions)
+
+  
     test_total = mean(test_total_losses)
     test_kld = mean(test_kld_losses)
     test_acc = mean(test_accs)

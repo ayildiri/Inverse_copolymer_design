@@ -140,9 +140,6 @@ if os.path.isfile(filepath):
                 if i>=500: 
                     break
             data = dict_train_loader[str(batch)][0]
-            if torch.isnan(data.y1).any() or torch.isnan(data.y2).any():
-                print(f"⚠️ Skipping TRAIN batch {i} due to NaNs in labels.")
-                continue
             data.to(device)
             dest_is_origin_matrix = dict_train_loader[str(batch)][1]
             dest_is_origin_matrix.to(device)

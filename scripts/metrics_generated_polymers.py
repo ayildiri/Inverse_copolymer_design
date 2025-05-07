@@ -20,12 +20,15 @@ def poly_smiles_to_molecule(poly_input):
     '''
     Turns adjusted polymer smiles string into PyG data objects
     '''
-
-    # Turn into RDKIT mol object
-    mols = make_monomer_mols(poly_input.split("|")[0], 0, 0,  # smiles
-                            fragment_weights=poly_input.split("|")[1:-1])
-    
-    return mols
+    try:
+        # Turn into RDKIT mol object
+        mols = make_monomer_mols(poly_input.split("|")[0], 0, 0,  # smiles
+                                fragment_weights=poly_input.split("|")[1:-1])
+        return mols
+    except Exception as e:
+        print(f"Error processing polymer: {poly_input}")
+        print(f"Error details: {e}")
+        return [None, None]  # Return None for both monomers to indicate invalid
 
 def valid_scores(smiles):
     return np.array(list(map(make_polymer_mol, smiles)), dtype=np.float32)

@@ -40,6 +40,8 @@ if device.type == 'cuda':
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
@@ -77,8 +79,8 @@ num_edge_features = dict_test_loader['0'][0].num_edge_features
 
 # Load model
 # Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-filepath = os.path.join(main_dir_path,'Checkpoints/', model_name,"model_best_loss.pt")
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
 if os.path.isfile(filepath):
     if args.ppguided:
         model_type = G2S_VAE_PPguided
@@ -100,7 +102,7 @@ if os.path.isfile(filepath):
     model.to(device)
 
     # Directory to save results
-    dir_name=  os.path.join(main_dir_path,'Checkpoints/', model_name)
+    dir_name = os.path.join(args.save_dir, model_name)
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 

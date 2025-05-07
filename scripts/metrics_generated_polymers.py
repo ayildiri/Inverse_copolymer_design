@@ -227,3 +227,7 @@ with open(dir_name+'generated_polymers.txt', 'w') as f:
 with open(dir_name+'generated_polymers_examples.txt', 'w') as f:
     for e in all_predictions:
         f.write(f"{e}\n")
+
+print(f"\nFiles saved successfully to:")
+print(f"1. {dir_name}generated_polymers.txt - Contains all metrics")
+print(f"2. {dir_name}generated_polymers_examples.txt - Contains examples of generated polymers")

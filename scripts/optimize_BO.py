@@ -43,6 +43,7 @@ if device.type == 'cuda':
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
+parser.add_argument("--alpha", default="schedule", help="option: <any number>, schedule", choices=["normalVAE", "schedule"])
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="RT_tokenized", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default="schedule", help="option: <any number>, schedule", choices=["normalVAE","schedule"])
@@ -60,7 +61,7 @@ parser.add_argument("--max_iter", type=int, default=1000)
 parser.add_argument("--max_time", type=int, default=3600)
 parser.add_argument("--stopping_type", type=str, default="iter", choices=["iter","time"])
 parser.add_argument("--opt_run", type=int, default=1)
-
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 
 
 args = parser.parse_args()
@@ -82,13 +83,15 @@ num_edge_features = dict_train_loader['0'][0].num_edge_features
 
 # Load model
 # Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-filepath = os.path.join(main_dir_path,'Checkpoints/', model_name,"model_best_loss.pt")
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+
 if os.path.isfile(filepath):
     if args.ppguided:
         model_type = G2S_VAE_PPguided
     else: 
-        model_type = G2S_VAE
+        model_type = G2S_VAE_PPguideddisabled
+        
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
     batch_size = model_config['batch_size']

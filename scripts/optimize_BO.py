@@ -354,7 +354,7 @@ rec_mols=[]
 
 for eval, res in results_custom.items():
     eval_int= int(eval)
-    L_bo= res["latents_BO"].detach().numpy()
+    L_bo = res["latents_BO"].detach().cpu().numpy()
     L_re=res["latents_reencoded"][0]
     print(L_bo)
     print(L_re)

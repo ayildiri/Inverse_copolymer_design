@@ -261,7 +261,7 @@ class PropertyPrediction():
         return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
 
 # Determine the boundaries for the latent dimensions from training dataset
-dir_name = os.path.join(main_dir_path,'Checkpoints/', model_name)
+dir_name = os.path.join(args.save_dir, model_name)
 
 with open(dir_name+'latent_space_'+dataset_type+'.npy', 'rb') as f:
     latent_space = np.load(f)

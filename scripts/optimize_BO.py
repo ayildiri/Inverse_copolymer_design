@@ -29,10 +29,9 @@ import time
 
 # setting device on GPU if available, else CPU
 # setting device on GPU if available, else CPU
-#device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device = torch.device('cpu')
 print('Using device:', device)
-print()
 
 # Additional Info when using cuda
 if device.type == 'cuda':

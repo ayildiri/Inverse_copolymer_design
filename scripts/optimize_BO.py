@@ -45,7 +45,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
 parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="RT_tokenized", choices=["oldtok", "RT_tokenized"])
-parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
+parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32) # NOTE: Ignored — loaded from checkpoint['model_config']['embedding_dim']
 parser.add_argument("--beta", default="schedule", help="option: <any number>, schedule", choices=["normalVAE","schedule"])
 parser.add_argument("--loss", default="wce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')

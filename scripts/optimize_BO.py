@@ -395,10 +395,10 @@ print(np.mean(latent_inconsistencies), np.std(latent_inconsistencies))
 import matplotlib.pyplot as plt
 
 iterations = range(len(pred_BO))
-EA_bo= [arr[0] for arr in pred_BO]
-IP_bo = [arr[1] for arr in pred_BO]
-EA_re= [arr[0] for arr in pred_RE]
-IP_re = [arr[1] for arr in pred_RE]
+EA_bo = [x.cpu().numpy()[0] if torch.is_tensor(x) else x for x in EA_bo]
+IP_bo = [x.cpu().numpy()[1] if torch.is_tensor(x) else x for x in IP_bo]
+EA_re = [x[0] for x in pred_RE]
+IP_re = [x[1] for x in pred_RE]
 
 # Create plot
 plt.figure(0)

@@ -791,7 +791,7 @@ prediction_validityB =[]
 data_dir = os.path.join(main_dir_path,'data/')
 
 
-"""
+
 if augment=="augmented":
     df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop_v2.csv')
 elif augment=="augmented_canonical":
@@ -823,15 +823,12 @@ for m in monomers_all:
 all_mons_can = list(set(all_mons_can))
 print(len(all_mons_can), all_mons_can[1:3])
 
-
-
-
 with open(data_dir+'all_train_pols_can'+'.pkl', 'wb') as f:
     pickle.dump(all_train_can, f)
 with open(data_dir+'all_pols_data_can'+'.pkl', 'wb') as f:
     pickle.dump(all_pols_data_can, f)
 with open(data_dir+'all_mons_train_can'+'.pkl', 'wb') as f:
-    pickle.dump(all_mons_can, f) """
+    pickle.dump(all_mons_can, f)
 
 with open(data_dir+'all_train_pols_can'+'.pkl', 'rb') as f:
     all_train_can = pickle.load(f)

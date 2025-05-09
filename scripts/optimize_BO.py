@@ -431,8 +431,11 @@ for x in pred_BO:
     else:
         x_np = np.array(x) if not isinstance(x, np.ndarray) else x
     
-    # Access elements safely
-    if x_np.size >= 2:  # Check if array has at least 2 elements
+    # Access elements safely - handle (1,2) shaped arrays
+    if x_np.ndim > 1 and x_np.shape[1] >= 2:  # Handle (1,2) shaped arrays
+        EA_bo.append(x_np[0, 0])
+        IP_bo.append(x_np[0, 1])
+    elif x_np.size >= 2:  # Check if flat array has at least 2 elements
         EA_bo.append(x_np[0])
         IP_bo.append(x_np[1])
     elif x_np.size == 1:  # Handle arrays with only 1 element
@@ -447,7 +450,10 @@ EA_re = []
 IP_re = []
 for x in pred_RE:
     if isinstance(x, np.ndarray):
-        if x.size >= 2:
+        if x.ndim > 1 and x.shape[1] >= 2:  # Handle (1,2) shaped arrays
+            EA_re.append(x[0, 0])
+            IP_re.append(x[0, 1])
+        elif x.size >= 2:  # Check if flat array has at least 2 elements
             EA_re.append(x[0])
             IP_re.append(x[1])
         elif x.size == 1:

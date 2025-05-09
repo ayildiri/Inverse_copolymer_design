@@ -793,7 +793,7 @@ data_dir = os.path.join(main_dir_path,'data/')
 
 
 if augment=="augmented":
-    df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop_v2.csv')
+    df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop.csv')
 elif augment=="augmented_canonical":
     df = pd.read_csv(main_dir_path+'/data/dataset-combined-canonical-poly_chemprop.csv')
 elif augment=="augmented_enum":

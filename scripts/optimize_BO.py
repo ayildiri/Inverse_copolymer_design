@@ -575,16 +575,33 @@ def top_n_molecule_indices(objective_values, n_idx=10):
 
 # Extract data for the curves
 if objective_type=='mimick_peak':
-    objective_values = [-(np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) for arr in pred_RE]
+    objective_values = [-(np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
 elif objective_type=='mimick_best':
-    objective_values = [-((np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61))) for arr in pred_RE]
+    objective_values = [-((np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61))) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
 elif objective_type=='EAmin': 
-    objective_values = [-(arr[0]+np.abs(arr[1]-1)) for arr in pred_RE]
+    objective_values = [-(arr[0]+np.abs(arr[1]-1)) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
 elif objective_type =='max_gap':
-    objective_values = [-(arr[0]-arr[1]) for arr in pred_RE]
+    objective_values = [-(arr[0]-arr[1]) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
 
-indices_of_increases = indices_of_improvement(objective_values)
+# Find valid indices (where we have non-NaN values)
+valid_indices = [i for i, val in enumerate(objective_values) if val != float('-inf')]
 
+# If we have valid indices, use the normal improvement function
+if valid_indices:
+    indices_of_increases = indices_of_improvement(objective_values)
+# If no valid improvements are found, just use the index of the one valid result
+if not valid_indices or not indices_of_increases:
+    # Find the index of the single valid entry or valid entry with max value
+    try:
+        # First try to find the best valid value
+        max_idx = max((i for i, val in enumerate(objective_values) if val != float('-inf')), 
+                      key=lambda i: objective_values[i])
+        indices_of_increases = [max_idx]
+    except ValueError:
+        # If there are no valid values, just use index 0
+        indices_of_increases = [0]
+
+# Now proceed with using the indices
 EA_bo_imp = [EA_bo[i] for i in indices_of_increases]
 IP_bo_imp = [IP_bo[i] for i in indices_of_increases]
 EA_re_imp = [EA_re[i] for i in indices_of_increases]
@@ -593,6 +610,8 @@ best_z_re = [Latents_RE[i] for i in indices_of_increases]
 best_mols = {i+1: decoded_mols[i] for i in indices_of_increases}
 best_props = {i+1: [EA_re[i], EA_bo[i], IP_re[i], IP_bo[i]] for i in indices_of_increases}
 best_mols_rec = {i+1: rec_mols[i] for i in indices_of_increases}
+
+
 with open(dir_name+'best_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
     print(best_mols, file=fl)
     print(best_props, file=fl)

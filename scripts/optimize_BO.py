@@ -401,26 +401,60 @@ print(np.mean(latent_inconsistencies), np.std(latent_inconsistencies))
 
 import matplotlib.pyplot as plt
 
+# Extract data for the curves
 iterations = range(len(pred_BO))
-# Handle different possible formats safely
+
+# Handle different possible formats safely with proper error checking
 EA_bo = []
 IP_bo = []
 for x in pred_BO:
+    # First ensure x is a numpy array that we can work with
     if torch.is_tensor(x):
-        EA_bo.append(x.detach().cpu().numpy()[0])
-        IP_bo.append(x.detach().cpu().numpy()[1])
-    elif isinstance(x, np.ndarray):
-        EA_bo.append(x[0])
-        IP_bo.append(x[1])
+        x_np = x.detach().cpu().numpy()
     else:
-        # Fallback for other formats
+        x_np = np.array(x) if not isinstance(x, np.ndarray) else x
+    
+    # Access elements safely
+    if x_np.size >= 2:  # Check if array has at least 2 elements
+        EA_bo.append(x_np[0])
+        IP_bo.append(x_np[1])
+    elif x_np.size == 1:  # Handle arrays with only 1 element
+        EA_bo.append(x_np[0])
+        IP_bo.append(float('nan'))  # Use NaN as a placeholder
+    else:  # Handle empty arrays
+        EA_bo.append(float('nan'))
+        IP_bo.append(float('nan'))
+
+# Similarly handle pred_RE with proper error checking
+EA_re = []
+IP_re = []
+for x in pred_RE:
+    if isinstance(x, np.ndarray):
+        if x.size >= 2:
+            EA_re.append(x[0])
+            IP_re.append(x[1])
+        elif x.size == 1:
+            EA_re.append(x[0])
+            IP_re.append(float('nan'))
+        else:
+            EA_re.append(float('nan'))
+            IP_re.append(float('nan'))
+    else:
+        # Try to handle as a list or other indexable object
         try:
-            EA_bo.append(x[0])
-            IP_bo.append(x[1])
+            if len(x) >= 2:
+                EA_re.append(x[0])
+                IP_re.append(x[1])
+            elif len(x) == 1:
+                EA_re.append(x[0])
+                IP_re.append(float('nan'))
+            else:
+                EA_re.append(float('nan'))
+                IP_re.append(float('nan'))
         except:
-            EA_bo.append(float('nan'))  # Use NaN for plotting gaps
-            IP_bo.append(float('nan'))
-            
+            EA_re.append(float('nan'))
+            IP_re.append(float('nan'))
+
 EA_re = [x[0] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
 IP_re = [x[1] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
 

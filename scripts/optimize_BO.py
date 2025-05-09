@@ -376,6 +376,23 @@ for eval, res in results_custom.items():
         rec_mols.append(res["string_reconstructed"][0])
     else: rec_mols.append("Invalid decoded molecule")
 
+# Add debug print statements here:
+print("Debug information for pred_BO and pred_RE:")
+for i, (bo_pred, re_pred) in enumerate(zip(pred_BO, pred_RE)):
+    print(f"Item {i}:")
+    print(f"  pred_BO: type={type(bo_pred)}, ", end="")
+    if torch.is_tensor(bo_pred):
+        print(f"shape={bo_pred.shape}, device={bo_pred.device}, value={bo_pred}")
+    elif hasattr(bo_pred, 'shape'):  # numpy arrays
+        print(f"shape={bo_pred.shape}, value={bo_pred}")
+    else:
+        print(f"value={bo_pred}")
+        
+    print(f"  pred_RE: type={type(re_pred)}, ", end="")
+    if hasattr(re_pred, 'shape'):  # numpy arrays
+        print(f"shape={re_pred.shape}, value={re_pred}")
+    else:
+        print(f"value={re_pred}")
 
 def distance_matrix(arrays):
     num_arrays = len(arrays)

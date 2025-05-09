@@ -352,18 +352,25 @@ pred_RE = []
 decoded_mols= []
 rec_mols=[]
 
+# Where you're collecting results from optimization
 for eval, res in results_custom.items():
-    eval_int= int(eval)
+    eval_int = int(eval)
     L_bo = res["latents_BO"].detach().cpu().numpy()
-    L_re=res["latents_reencoded"][0]
-    print(L_bo)
-    print(L_re)
+    L_re = res["latents_reencoded"][0]
     latent_inconsistency = np.linalg.norm(L_bo-L_re)
     latent_inconsistencies.append(latent_inconsistency)
     Latents_BO.append(L_bo)
     Latents_RE.append(L_re)
-    pred_BO.append(res["predictions_BO"][0])
-    pred_RE.append(res["predictions_reencoded"][0])
+    
+    # Store the prediction values - make sure to detach and move to CPU if they're tensors
+    bo_pred = res["predictions_BO"]
+    if torch.is_tensor(bo_pred):
+        bo_pred = bo_pred.detach().cpu().numpy()
+    pred_BO.append(bo_pred)
+    
+    re_pred = res["predictions_reencoded"][0]
+    pred_RE.append(re_pred)
+    
     decoded_mols.append(res["string_decoded"][0])
     if not len(res["string_reconstructed"])==0:
         rec_mols.append(res["string_reconstructed"][0])
@@ -395,10 +402,27 @@ print(np.mean(latent_inconsistencies), np.std(latent_inconsistencies))
 import matplotlib.pyplot as plt
 
 iterations = range(len(pred_BO))
-EA_bo = [x.cpu().numpy()[0] if torch.is_tensor(x) else x for x in EA_bo]
-IP_bo = [x.cpu().numpy()[1] if torch.is_tensor(x) else x for x in IP_bo]
-EA_re = [x[0] for x in pred_RE]
-IP_re = [x[1] for x in pred_RE]
+# Handle different possible formats safely
+EA_bo = []
+IP_bo = []
+for x in pred_BO:
+    if torch.is_tensor(x):
+        EA_bo.append(x.detach().cpu().numpy()[0])
+        IP_bo.append(x.detach().cpu().numpy()[1])
+    elif isinstance(x, np.ndarray):
+        EA_bo.append(x[0])
+        IP_bo.append(x[1])
+    else:
+        # Fallback for other formats
+        try:
+            EA_bo.append(x[0])
+            IP_bo.append(x[1])
+        except:
+            EA_bo.append(float('nan'))  # Use NaN for plotting gaps
+            IP_bo.append(float('nan'))
+            
+EA_re = [x[0] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
+IP_re = [x[1] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
 
 # Create plot
 plt.figure(0)

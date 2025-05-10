@@ -134,8 +134,6 @@ class PropertyPrediction():
         print(params)
         _vector = [params[f'x{i}'] for i in range(self.nr_vars)]
         print(_vector)
-
-
         
         x = torch.from_numpy(np.array(_vector)).to(device).to(torch.float32)
         with torch.no_grad():
@@ -186,10 +184,6 @@ class PropertyPrediction():
         self.results_custom[str(self.eval_calls)] = results_dict
         
         # Remove the verbose printing that interferes with default output
-        # Only print essential info on specific iterations
-        if self.eval_calls % 20 == 0:  # Print summary every 20 evaluations
-            print(f"\nEvaluation {self.eval_calls}: Objective = {aggr_obj:.4f}")
-            print(f"Decoded molecule: {prediction_strings[0][:50]}...")  # Show first 50 chars
         
         return aggr_obj
 

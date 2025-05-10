@@ -411,7 +411,7 @@ if stopping_type == "time":
     stopping_criterion = stopping_type+"_"+str(max_time)
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
-    max_time = float('inf')
+    max_time = float('inf')  
 
 # Custom optimization loop with checkpointing
 start_time = time.time()
@@ -436,10 +436,10 @@ for iter_num in range(start_iteration, total_iterations):
         # Perform the optimization FIRST
         if iter_num < init_points:
             # Initial exploration
-            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility)
+            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility, max_time=max_time)
         else:
             # Regular optimization
-            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
+            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility, max_time=max_time)
         
         # Monitor progress AFTER optimization (this ensures optimizer.max exists)
         if iter_num % monitor_every == 0 or (iter_num == 0 and len(optimizer.res) > 0):

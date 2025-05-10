@@ -16,7 +16,7 @@ import pickle
 import json
 import pandas as pd
 import math
-
+import glob
 from data_processing.data_utils import *
 from data_processing.rdkit_poly import *
 from data_processing.Smiles_enum_canon import SmilesEnumCanon
@@ -27,6 +27,9 @@ from data_processing.Function_Featurization_Own import poly_smiles_to_graph
 from data_processing.rdkit_poly import make_polymer_mol
 
 import time
+import json
+from datetime import datetime
+import shutil  # for backup operations
 
 # setting device on GPU if available, else CPU
 # setting device on GPU if available, else CPU
@@ -61,6 +64,9 @@ parser.add_argument("--max_time", type=int, default=3600)
 parser.add_argument("--stopping_type", type=str, default="iter", choices=["iter","time"])
 parser.add_argument("--opt_run", type=int, default=1)
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
+parser.add_argument("--checkpoint_every", type=int, default=200, help="Save checkpoint every N iterations")
+parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume from")
+parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
 
 
 args = parser.parse_args()
@@ -259,8 +265,63 @@ class PropertyPrediction():
 
         return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
 
+# Add this function AFTER the PropertyPrediction class definition:
+def save_checkpoint(optimizer, prop_predictor, iteration, checkpoint_dir, opt_run):
+    """Save optimization checkpoint"""
+    checkpoint_data = {
+        'iteration': iteration,
+        'optimizer_state': {
+            'res': optimizer.res,
+            'space': optimizer.space,
+            'random_state': optimizer.random_state,
+            'gp': {
+                'X_': optimizer._gp.X_.tolist() if hasattr(optimizer._gp, 'X_') else [],
+                'y_': optimizer._gp.y_.tolist() if hasattr(optimizer._gp, 'y_') else [],
+                'kernel_': str(optimizer._gp.kernel_) if hasattr(optimizer._gp, 'kernel_') else ""
+            }
+        },
+        'custom_results': prop_predictor.results_custom,
+        'eval_calls': prop_predictor.eval_calls,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    checkpoint_file = os.path.join(checkpoint_dir, f'checkpoint_iter_{iteration}_run{opt_run}.pkl')
+    with open(checkpoint_file, 'wb') as f:
+        pickle.dump(checkpoint_data, f)
+    
+    # Keep backup of last checkpoint
+    if iteration > 200:
+        prev_checkpoint = os.path.join(checkpoint_dir, f'checkpoint_iter_{iteration-200}_run{opt_run}.pkl')
+        if os.path.exists(prev_checkpoint):
+            backup_file = os.path.join(checkpoint_dir, f'backup_iter_{iteration-200}_run{opt_run}.pkl')
+            shutil.copy2(prev_checkpoint, backup_file)
+    
+    return checkpoint_file
+
+def load_checkpoint(checkpoint_file):
+    """Load optimization checkpoint"""
+    with open(checkpoint_file, 'rb') as f:
+        checkpoint_data = pickle.load(f)
+    return checkpoint_data
+
+def log_progress(message, log_file):
+    """Log progress to file and print"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_message = f"[{timestamp}] {message}"
+    print(log_message)
+    with open(log_file, 'a') as f:
+        f.write(log_message + '\n')
+
 # Determine the boundaries for the latent dimensions from training dataset
 dir_name = os.path.join(args.save_dir, model_name)
+
+# Create checkpoint directory
+checkpoint_dir = os.path.join(dir_name, 'checkpoints')
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+# Setup log file for monitoring
+log_file = os.path.join(dir_name, f'optimization_log_{args.opt_run}.txt')
+
 
 with open(dir_name+'latent_space_'+dataset_type+'.npy', 'rb') as f:
     latent_space = np.load(f)
@@ -289,12 +350,31 @@ elif cutoff==0:
 
 opt_run = args.opt_run
 
+# Replace with:
 nr_vars = 32
 objective_type='EAmin' # options: max_gap, EAmin, mimick_peak, mimick_best
 prop_predictor = PropertyPrediction(model, nr_vars, objective_type)
 
-# Initialize BayesianOptimization
-optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
+# Check if resuming from checkpoint
+start_iteration = 0
+if args.resume_from:
+    log_progress(f"Resuming from checkpoint: {args.resume_from}", log_file)
+    checkpoint_data = load_checkpoint(args.resume_from)
+    
+    # Initialize optimizer
+    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
+    
+    # Restore optimizer state
+    optimizer.res = checkpoint_data['optimizer_state']['res']
+    prop_predictor.results_custom = checkpoint_data['custom_results']
+    prop_predictor.eval_calls = checkpoint_data['eval_calls']
+    start_iteration = checkpoint_data['iteration']
+    
+    log_progress(f"Restored state from iteration {start_iteration}", log_file)
+else:
+    # Initialize new optimization
+    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
+    log_progress("Starting new optimization", log_file)
 
 # Perform optimization
 # Perform optimization
@@ -311,12 +391,86 @@ elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
     max_time = None
 
-# Run the optimizer with the callback
-# Custom modification of the maximize function: If the max_time argument is specified, the 
+# Custom optimization loop with checkpointing
 start_time = time.time()
-optimizer.maximize(init_points=20, n_iter=max_iter-10, acquisition_function=utility, max_time=max_time)
+log_progress(f"Starting optimization with {max_iter} iterations", log_file)
+
+# Initial exploration if not resuming
+if not args.resume_from:
+    log_progress("Performing initial exploration...", log_file)
+    init_points = 20
+else:
+    init_points = 0  # Skip initial exploration if resuming
+
+# Modified optimization loop
+total_iterations = max_iter
+checkpoint_every = args.checkpoint_every
+monitor_every = args.monitor_every
+
+for iter_num in range(start_iteration, total_iterations):
+    try:
+        if iter_num < init_points:
+            # Initial exploration
+            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility)
+        else:
+            # Regular optimization
+            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
+        
+        # Monitor progress
+        if iter_num % monitor_every == 0:
+            current_best = optimizer.max['target']
+            current_params = optimizer.max['params']
+            elapsed = time.time() - start_time
+            log_progress(f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s", log_file)
+        
+        # Save checkpoint
+        if iter_num % checkpoint_every == 0 and iter_num > 0:
+            checkpoint_file = save_checkpoint(optimizer, prop_predictor, iter_num, checkpoint_dir, args.opt_run)
+            log_progress(f"Checkpoint saved at iteration {iter_num}: {checkpoint_file}", log_file)
+        
+        # Check time limit if specified
+        if max_time and (time.time() - start_time) > max_time:
+            log_progress(f"Time limit reached. Stopping at iteration {iter_num}", log_file)
+            break
+            
+    except Exception as e:
+        log_progress(f"Error at iteration {iter_num}: {str(e)}", log_file)
+        # Save emergency checkpoint
+        emergency_file = save_checkpoint(optimizer, prop_predictor, iter_num, checkpoint_dir, args.opt_run)
+        log_progress(f"Emergency checkpoint saved: {emergency_file}", log_file)
+        raise e
+
 elapsed_time = time.time() - start_time
-print(f"Elapsed time: {elapsed_time:.2f} seconds")
+log_progress(f"Optimization completed. Total time: {elapsed_time:.2f} seconds", log_file)
+
+
+# Save final checkpoint
+final_checkpoint = save_checkpoint(optimizer, prop_predictor, total_iterations, checkpoint_dir, args.opt_run)
+log_progress(f"Final checkpoint saved: {final_checkpoint}", log_file)
+
+
+# List all checkpoints
+def list_checkpoints(checkpoint_dir, opt_run):
+    """List all checkpoints for a given run"""
+    pattern = os.path.join(checkpoint_dir, f'checkpoint_iter_*_run{opt_run}.pkl')
+    checkpoints = glob.glob(pattern)
+    checkpoints.sort()
+    return checkpoints
+
+# Save checkpoint summary
+checkpoint_summary = {
+    'total_iterations': total_iterations,
+    'final_objective': optimizer.max['target'],
+    'final_params': optimizer.max['params'],
+    'checkpoints': list_checkpoints(checkpoint_dir, args.opt_run),
+    'log_file': log_file
+}
+
+summary_file = os.path.join(checkpoint_dir, f'checkpoint_summary_run{args.opt_run}.json')
+with open(summary_file, 'w') as f:
+    json.dump(checkpoint_summary, f, indent=2, default=str)
+
+log_progress(f"Checkpoint summary saved: {summary_file}", log_file)
 
 #optimizer.maximize(init_points=20, n_iter=500, acquisition_function=utility)
 results = optimizer.res
@@ -765,11 +919,6 @@ if all_y_p:
     print(f"First 3 y_p values: {all_y_p[:3]}")
     print(f"Types in all_y_p: {[type(x) for x in all_y_p[:3]]}")
 print(f'Saving generated strings')
-
-i=0
-with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
-    f.write("Seed string decoded: " + seed_string[0] + "\n")
-    f.write("Prediction: "+ str(y_seed[0]))
 
 i=0
 with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:

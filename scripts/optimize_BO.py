@@ -996,78 +996,13 @@ print(f"Data for KDE y2: {yp2_all_seed}")
 print(f"Length of y1 data: {len(yp1_all_seed)}")
 print(f"Length of y2 data: {len(yp2_all_seed)}")
 
-# Do a KDE to check if the distributions of properties are similar (predicted vs. real lables)
+# Replace the entire KDE plotting section with this fixed version:
+
 """ y1 """
-print(f"\nSTARTING KDE PLOT 1:")
-plt.figure(4)
-try:
-    real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
-    print(f"real_distribution shape: {real_distribution.shape}")
-    
-    augmented_distribution = np.array([p for p in yp1_all])
-    print(f"augmented_distribution shape: {augmented_distribution.shape}")
-    
-    seed_distribution = np.array([s for s in yp1_all_seed])
-    print(f"seed_distribution shape: {seed_distribution.shape}")
-    
-    if len(seed_distribution) == 0:
-        print("WARNING: seed_distribution is empty!")
-    
-except Exception as e:
-    print(f"Error creating distributions: {e}")
-    import traceback
-    traceback.print_exc()
-
-
-# Reshape the data
-real_distribution = real_distribution.reshape(-1, 1)
-augmented_distribution = augmented_distribution.reshape(-1, 1)
-seed_distribution = seed_distribution.reshape(-1, 1)
-
-# Define bandwidth (bandwidth controls the smoothness of the kernel density estimate)
-bandwidth = 0.1
-
-# Fit kernel density estimator for real data
-kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_real.fit(real_distribution)
-# Fit kernel density estimator for augmented data
-kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_augmented.fit(augmented_distribution)
-# Fit kernel density estimator for sampled data
-kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-
-if len(seed_distribution) < 2:
-    print(f"WARNING: Cannot create KDE with {len(seed_distribution)} data points")
-    print("Skipping KDE for seed distribution")
-else:
-    kde_sampled_seed.fit(seed_distribution)
-
-
-# Create a range of values for the x-axis
-x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
-# Evaluate the KDE on the range of values
-real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
-augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
-seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
-
-# Plotting
-plt.plot(x_values, real_density, label='Real Data')
-plt.plot(x_values, augmented_density, label='Augmented Data')
-plt.plot(x_values, seed_density, label='Sampled around optimal molecule')
-
-plt.xlabel('EA (eV)')
-plt.ylabel('Density')
-plt.title('Kernel Density Estimation (Electron affinity)')
-plt.legend()
-plt.show()
-plt.savefig(dir_name+'KDEy1_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png')
-
-""" y2 """
-plt.figure(5)
-real_distribution = np.array([r for r in y2_all if not np.isnan(r)])
-augmented_distribution = np.array([p for p in yp2_all])
-seed_distribution = np.array([s for s in yp2_all_seed])
-
+plt.figure(figsize=(10, 8))  # Specify figure size
+real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
+augmented_distribution = np.array([p for p in yp1_all])
+seed_distribution = np.array([s for s in yp1_all_seed])
 
 # Reshape the data
 real_distribution = real_distribution.reshape(-1, 1)
@@ -1088,28 +1023,85 @@ kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
 kde_sampled_seed.fit(seed_distribution)
 
 # Create a range of values for the x-axis
-x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
+x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), 
+                      max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
 # Evaluate the KDE on the range of values
 real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
 augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
 seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
 
 # Plotting
-plt.plot(x_values, real_density, label='Real Data')
-plt.plot(x_values, augmented_density, label='Augmented Data')
-plt.plot(x_values, seed_density, label='Sampled around optimal molecule')
+plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
+
+plt.xlabel('EA (eV)')
+plt.ylabel('Density')
+plt.title('Kernel Density Estimation (Electron affinity)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# Save BEFORE show()
+plt.savefig(dir_name+'KDEy1_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
+plt.close()  # Close the figure to free memory
+
+""" y2 """
+plt.figure(figsize=(10, 8))  # Specify figure size
+real_distribution = np.array([r for r in y2_all if not np.isnan(r)])
+augmented_distribution = np.array([p for p in yp2_all])
+seed_distribution = np.array([s for s in yp2_all_seed])
+
+# Reshape the data
+real_distribution = real_distribution.reshape(-1, 1)
+augmented_distribution = augmented_distribution.reshape(-1, 1)
+seed_distribution = seed_distribution.reshape(-1, 1)
+
+# Define bandwidth (bandwidth controls the smoothness of the kernel density estimate)
+bandwidth = 0.1
+
+# Fit kernel density estimator for real data
+kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+kde_real.fit(real_distribution)
+# Fit kernel density estimator for augmented data
+kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+kde_augmented.fit(augmented_distribution)
+# Fit kernel density estimator for sampled data
+kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+kde_sampled_seed.fit(seed_distribution)
+
+# Create a range of values for the x-axis
+x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), 
+                      max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
+# Evaluate the KDE on the range of values
+real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
+augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
+seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
+
+# Plotting
+plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
+
 plt.xlabel('IP (eV)')
 plt.ylabel('Density')
 plt.title('Kernel Density Estimation (Ionization potential)')
 plt.legend()
-plt.show()
-plt.savefig(dir_name+'KDEy2_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png')
+plt.grid(True, alpha=0.3)
 
-# Add this at the very end of your script:
-print(f"\nFINAL DEBUG INFO:")
-print(f"Files created in {dir_name}:")
-import glob
-result_files = glob.glob(os.path.join(dir_name, f"*{stopping_criterion}*{opt_run}*"))
-for file in result_files:
-    size = os.path.getsize(file)
-    print(f"  {os.path.basename(file)}: {size} bytes")
+# Save BEFORE show()
+plt.savefig(dir_name+'KDEy2_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
+plt.close()  # Close the figure to free memory
+
+# Add a final verification
+print(f"\nKDE plot files created:")
+import os
+kde_file1 = dir_name+'KDEy1_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+kde_file2 = dir_name+'KDEy2_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+
+if os.path.exists(kde_file1):
+    size1 = os.path.getsize(kde_file1)
+    print(f"KDEy1 file: {size1} bytes")
+    
+if os.path.exists(kde_file2):
+    size2 = os.path.getsize(kde_file2)
+    print(f"KDEy2 file: {size2} bytes")

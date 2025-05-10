@@ -450,17 +450,33 @@ for iter_num in range(start_iteration, total_iterations):
             # Calculate current validity rate
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
             
-            # Create the message
-            message = f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
+            # Add separator line before the clean format
+            print("\n" + "="*80)  # Separator line
             
-            # Log with validity info
-            log_progress(message, log_file)
+            # Create clean format message
+            clean_message = f"""
+Iteration: {iter_num}/{total_iterations}
+Best Objective: {current_best:.4f}
+Elapsed Time: {elapsed:.1f}s
+Validity Rate: {valid_count}/{total_count} ({validity_rate:.1f}%)
+"""
             
-            # Add blank line after each iteration report
-            print()  # Blank line to console
+            # Print the clean format to console
+            print(clean_message)
+            print("="*80)  # Closing separator
+            
+            # Still log the original format to file for consistency
+            file_message = f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
+            log_progress(file_message, log_file)
+            
+            # Add blank line to log file
             with open(log_file, 'a') as f:
                 f.write('\n')  # Blank line to log file
-        
+
+        # Add periodic progress update (every 10 iterations)
+        if iter_num % 10 == 0:
+            print(f"[PROGRESS] Iteration {iter_num}/{total_iterations} - Total evaluations: {prop_predictor.eval_calls}")
+            
         # Save checkpoint
         if iter_num % checkpoint_every == 0 and iter_num > 0:
             checkpoint_file = save_checkpoint(optimizer, prop_predictor, iter_num, checkpoint_dir, args.opt_run)

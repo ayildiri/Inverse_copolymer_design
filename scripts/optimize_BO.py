@@ -446,9 +446,10 @@ for iter_num in range(start_iteration, total_iterations):
             # Log with validity info and add blank line
             log_progress(f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
             
-            # Add blank line to log file (not to console)
+            # Add blank line to both console and log file
+            print()  # Blank line to console
             with open(log_file, 'a') as f:
-                f.write('\n')
+                f.write('\n')  # Blank line to log file
         
         # Save checkpoint
         if iter_num % checkpoint_every == 0 and iter_num > 0:

@@ -175,19 +175,22 @@ class PropertyPrediction():
         # results
 
         results_dict = {
-            "objective":aggr_obj,
-            "latents_BO": x,
-            "latents_reencoded": expanded_z_p, 
-            "predictions_BO": y,
-            "predictions_reencoded": expanded_y_p,
-            "string_decoded": prediction_strings, 
-            "string_reconstructed": all_reconstructions_valid,
+        "objective":aggr_obj,
+        "latents_BO": x,
+        "latents_reencoded": expanded_z_p, 
+        "predictions_BO": y,
+        "predictions_reencoded": expanded_y_p,
+        "string_decoded": prediction_strings, 
+        "string_reconstructed": all_reconstructions_valid,
         }
         self.results_custom[str(self.eval_calls)] = results_dict
-        print(results_dict)
-        print()  # Add blank line after each evaluation
         
-        #Aggregate the objectives to do SOO with bayesian optimization
+        # Remove the verbose printing that interferes with default output
+        # Only print essential info on specific iterations
+        if self.eval_calls % 20 == 0:  # Print summary every 20 evaluations
+            print(f"\nEvaluation {self.eval_calls}: Objective = {aggr_obj:.4f}")
+            print(f"Decoded molecule: {prediction_strings[0][:50]}...")  # Show first 50 chars
+        
         return aggr_obj
 
     def _make_polymer_mol(self,poly_input):
@@ -381,7 +384,7 @@ if args.resume_from:
     checkpoint_data = load_checkpoint(args.resume_from)
     
     # Initialize optimizer
-    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
+    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run, verbose=2)
     
     # Restore optimizer state
     optimizer.res = checkpoint_data['optimizer_state']['res']
@@ -395,7 +398,7 @@ if args.resume_from:
     log_progress(f"Restored state from iteration {start_iteration} - Checkpoint validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
 else:
     # Initialize new optimization
-    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
+    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run, verbose=2)
     log_progress("Starting new optimization", log_file)
 
 
@@ -429,61 +432,47 @@ total_iterations = max_iter
 checkpoint_every = args.checkpoint_every
 monitor_every = args.monitor_every
 
-# Or, if you want to keep it simple, just revert to the original order:
-
 for iter_num in range(start_iteration, total_iterations):
     try:
-        # Perform the optimization FIRST
+        # Let user know we're starting (only once at beginning)
+        if iter_num == start_iteration:
+            print(f"\nStarting Bayesian Optimization with {total_iterations} iterations...\n")
+        
+        # Run the optimization (this will print the default BO output)
         if iter_num < init_points:
             # Initial exploration
             optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility, max_time=max_time)
         else:
-            # Regular optimization
+            # Regular optimization  
             optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility, max_time=max_time)
         
-        # Monitor progress AFTER optimization (this ensures optimizer.max exists)
-        if iter_num % monitor_every == 0 or (iter_num == 0 and len(optimizer.res) > 0):
-            current_best = optimizer.max['target']
-            current_params = optimizer.max['params']
+        # After every few iterations, add our custom summary
+        if iter_num % monitor_every == 0 and iter_num > 0:
             elapsed = time.time() - start_time
-            
-            # Calculate current validity rate
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
             
-            # Add separator line before the clean format
-            print("\n" + "="*80)  # Separator line
+            # Add our custom summary below the BO output
+            print("\n" + "="*80)
+            print(f"SUMMARY AT ITERATION {iter_num}")
+            print(f"Elapsed Time: {elapsed:.1f}s")
+            print(f"Validity Rate: {valid_count}/{total_count} ({validity_rate:.1f}%)")
+            print("="*80 + "\n")
             
-            # Create clean format message
-            clean_message = f"""
-Iteration: {iter_num}/{total_iterations}
-Best Objective: {current_best:.4f}
-Elapsed Time: {elapsed:.1f}s
-Validity Rate: {valid_count}/{total_count} ({validity_rate:.1f}%)
-"""
-            
-            # Print the clean format to console
-            print(clean_message)
-            print("="*80)  # Closing separator
-            
-            # Still log the original format to file for consistency
-            file_message = f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
+            # Log to file
+            file_message = f"Iteration {iter_num}/{total_iterations} - Best objective: {optimizer.max['target']:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
             log_progress(file_message, log_file)
             
             # Add blank line to log file
             with open(log_file, 'a') as f:
-                f.write('\n')  # Blank line to log file
-
-        # Add periodic progress update (every 10 iterations)
-        if iter_num % 10 == 0:
-            print(f"[PROGRESS] Iteration {iter_num}/{total_iterations} - Total evaluations: {prop_predictor.eval_calls}")
-            
+                f.write('\n')
+        
         # Save checkpoint
         if iter_num % checkpoint_every == 0 and iter_num > 0:
             checkpoint_file = save_checkpoint(optimizer, prop_predictor, iter_num, checkpoint_dir, args.opt_run)
             log_progress(f"Checkpoint saved at iteration {iter_num}: {checkpoint_file}", log_file)
         
         # Check time limit if specified
-        if max_time and (time.time() - start_time) > max_time:
+        if max_time != float('inf') and (time.time() - start_time) > max_time:
             log_progress(f"Time limit reached. Stopping at iteration {iter_num}", log_file)
             break
             
@@ -496,7 +485,6 @@ Validity Rate: {valid_count}/{total_count} ({validity_rate:.1f}%)
 
 elapsed_time = time.time() - start_time
 log_progress(f"Optimization completed. Total time: {elapsed_time:.2f} seconds", log_file)
-
 
 # Save final checkpoint
 final_checkpoint = save_checkpoint(optimizer, prop_predictor, total_iterations, checkpoint_dir, args.opt_run)

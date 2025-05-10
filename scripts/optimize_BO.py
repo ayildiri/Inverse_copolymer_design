@@ -432,34 +432,36 @@ total_iterations = max_iter
 checkpoint_every = args.checkpoint_every
 monitor_every = args.monitor_every
 
+# Run initial exploration phase separately
+if not args.resume_from:
+    print("Performing initial exploration...")
+    optimizer.maximize(init_points=init_points, n_iter=0, acquisition_function=utility)
+    
+# Adjust start_iteration if we just did init_points
+if not args.resume_from and init_points > 0:
+    start_iteration = init_points
+
+# Run the main optimization with proper iteration tracking
 for iter_num in range(start_iteration, total_iterations):
     try:
-        # Let user know we're starting (only once at beginning)
-        if iter_num == start_iteration:
-            print(f"\nStarting Bayesian Optimization with {total_iterations} iterations...\n")
-        
-        # Run the optimization (this will print the default BO output)
-        if iter_num < init_points:
-            # Initial exploration
-            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility, max_time=max_time)
-        else:
-            # Regular optimization  
-            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility, max_time=max_time)
-
+        # Add debug prints
         print(f"=== DEBUG START ===")
         print(f"iter_num: {iter_num}")
         print(f"monitor_every: {monitor_every}")
         print(f"iter_num % monitor_every: {iter_num % monitor_every}")
-        print(f"Condition check: {iter_num % monitor_every == 0} and {iter_num > 0}")
         print(f"=== DEBUG END ===")
         
-        # After every few iterations, add our custom summary
+        # Run one iteration (skip if we're still in init phase)
+        if iter_num >= init_points:
+            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
+        
+        # Check for summary display
         if iter_num % monitor_every == 0 and iter_num > 0:
             print("*** ENTERING SUMMARY BLOCK ***")
             elapsed = time.time() - start_time
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
             
-            # Add our custom summary below the BO output
+            # Add our custom summary
             print("\n" + "="*80)
             print(f"SUMMARY AT ITERATION {iter_num}")
             print(f"Elapsed Time: {elapsed:.1f}s")
@@ -470,7 +472,6 @@ for iter_num in range(start_iteration, total_iterations):
             file_message = f"Iteration {iter_num}/{total_iterations} - Best objective: {optimizer.max['target']:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
             log_progress(file_message, log_file)
             
-            # Add blank line to log file
             with open(log_file, 'a') as f:
                 f.write('\n')
         

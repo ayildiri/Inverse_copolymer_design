@@ -134,6 +134,9 @@ class PropertyPrediction():
         print(params)
         _vector = [params[f'x{i}'] for i in range(self.nr_vars)]
         print(_vector)
+
+
+        
         x = torch.from_numpy(np.array(_vector)).to(device).to(torch.float32)
         with torch.no_grad():
             predictions, _, _, _, y = self.model_predictor.inference(data=x, device=device, sample=False, log_var=None)
@@ -182,7 +185,8 @@ class PropertyPrediction():
         }
         self.results_custom[str(self.eval_calls)] = results_dict
         print(results_dict)
-
+        print()  # Add blank line after each evaluation
+        
         #Aggregate the objectives to do SOO with bayesian optimization
         return aggr_obj
 

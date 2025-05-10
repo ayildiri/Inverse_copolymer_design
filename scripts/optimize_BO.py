@@ -271,7 +271,6 @@ class PropertyPrediction():
 
         return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
 
-
 def save_checkpoint(optimizer, prop_predictor, iteration, checkpoint_dir, opt_run):
     """Save optimization checkpoint"""
     checkpoint_data = {
@@ -279,7 +278,7 @@ def save_checkpoint(optimizer, prop_predictor, iteration, checkpoint_dir, opt_ru
         'optimizer_state': {
             'res': optimizer.res,
             'space': optimizer.space,
-            'random_state': optimizer._random_state,  # FIX: Changed to _random_state
+            'random_state': optimizer._random_state,  
             'gp': {
                 'X_': optimizer._gp.X_.tolist() if hasattr(optimizer._gp, 'X_') else [],
                 'y_': optimizer._gp.y_.tolist() if hasattr(optimizer._gp, 'y_') else [],
@@ -368,8 +367,6 @@ if not cutoff==0.0:
 elif cutoff==0: 
     bounds = {'x{}'.format(i): (j, k) for i,(j,k) in enumerate(zip(min_values,max_values))}
 
-
-
 opt_run = args.opt_run
 
 # Replace with:
@@ -443,14 +440,7 @@ if not args.resume_from and init_points > 0:
 
 # Run the main optimization with proper iteration tracking
 for iter_num in range(start_iteration, total_iterations):
-    try:
-        # Add debug prints
-        print(f"=== DEBUG START ===")
-        print(f"iter_num: {iter_num}")
-        print(f"monitor_every: {monitor_every}")
-        print(f"iter_num % monitor_every: {iter_num % monitor_every}")
-        print(f"=== DEBUG END ===")
-        
+    try:      
         # Run one iteration (skip if we're still in init phase)
         if iter_num >= init_points:
             optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)

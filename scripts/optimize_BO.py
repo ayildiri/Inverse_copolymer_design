@@ -764,12 +764,12 @@ if all_y_p:
     print(f"First 3 y_p values: {all_y_p[:3]}")
     print(f"Types in all_y_p: {[type(x) for x in all_y_p[:3]]}")
 print(f'Saving generated strings')
+
 i=0
 with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
     f.write("Seed string decoded: " + seed_string[0] + "\n")
     f.write("Prediction: "+ str(y_seed[0]))
 
-print(f'Saving generated strings')
 i=0
 with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
     f.write("Seed string decoded: " + seed_string[0] + "\n")

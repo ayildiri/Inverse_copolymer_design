@@ -6,6 +6,7 @@ import numpy as np
 from optimization_custom.bayesian_optimization import BayesianOptimization
 from bayes_opt.util import UtilityFunction
 from bayes_opt.event import DEFAULT_EVENTS, Events
+from sklearn.neighbors import KernelDensity
 
 import argparse
 import torch

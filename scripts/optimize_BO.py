@@ -27,7 +27,6 @@ from data_processing.Function_Featurization_Own import poly_smiles_to_graph
 from data_processing.rdkit_poly import make_polymer_mol
 
 import time
-import json
 from datetime import datetime
 import shutil  # for backup operations
 
@@ -312,6 +311,22 @@ def log_progress(message, log_file):
     with open(log_file, 'a') as f:
         f.write(log_message + '\n')
 
+def calculate_current_validity_rate(results_custom):
+    """Calculate current validity rate from optimization results"""
+    total = 0
+    valid = 0
+    
+    for eval_call, results in results_custom.items():
+        total += 1
+        # Check if objective is not penalty value
+        if results['objective'] != -10:
+            valid += 1
+    
+    if total > 0:
+        validity_rate = (valid / total) * 100
+        return validity_rate, valid, total
+    return 0, 0, 0
+
 # Determine the boundaries for the latent dimensions from training dataset
 dir_name = os.path.join(args.save_dir, model_name)
 
@@ -370,13 +385,16 @@ if args.resume_from:
     prop_predictor.eval_calls = checkpoint_data['eval_calls']
     start_iteration = checkpoint_data['iteration']
     
-    log_progress(f"Restored state from iteration {start_iteration}", log_file)
+    # Check validity rate at checkpoint
+    validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
+    
+    log_progress(f"Restored state from iteration {start_iteration} - Checkpoint validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
 else:
     # Initialize new optimization
     optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
     log_progress("Starting new optimization", log_file)
 
-# Perform optimization
+
 # Perform optimization
 #utility = UtilityFunction(kind="ei", kappa=2.5, xi=0.01)
 utility = UtilityFunction(kind="ucb")
@@ -421,7 +439,16 @@ for iter_num in range(start_iteration, total_iterations):
             current_best = optimizer.max['target']
             current_params = optimizer.max['params']
             elapsed = time.time() - start_time
-            log_progress(f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s", log_file)
+            
+            # Calculate current validity rate
+            validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
+            
+            # Log with validity info and add blank line
+            log_progress(f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
+            
+            # Add blank line to log file (not to console)
+            with open(log_file, 'a') as f:
+                f.write('\n')
         
         # Save checkpoint
         if iter_num % checkpoint_every == 0 and iter_num > 0:

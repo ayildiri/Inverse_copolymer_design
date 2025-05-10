@@ -445,6 +445,9 @@ for iter_num in range(start_iteration, total_iterations):
         else:
             # Regular optimization  
             optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility, max_time=max_time)
+
+        # ADD DEBUG PRINT HERE:
+        print(f"DEBUG: iter_num={iter_num}, monitor_every={monitor_every}, modulo={iter_num % monitor_every}")
         
         # After every few iterations, add our custom summary
         if iter_num % monitor_every == 0 and iter_num > 0:

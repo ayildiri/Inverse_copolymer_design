@@ -436,7 +436,7 @@ for iter_num in range(start_iteration, total_iterations):
             optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
         
         # Check for summary display
-        if iter_num % monitor_every == 0 and iter_num > 0:
+        if len(optimizer.res) % monitor_every == 0 and len(optimizer.res) > 0:
             print("*** ENTERING SUMMARY BLOCK ***")
             elapsed = time.time() - start_time
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)

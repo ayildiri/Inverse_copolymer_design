@@ -446,11 +446,16 @@ for iter_num in range(start_iteration, total_iterations):
             # Regular optimization  
             optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility, max_time=max_time)
 
-        # ADD DEBUG PRINT HERE:
-        print(f"DEBUG: iter_num={iter_num}, monitor_every={monitor_every}, modulo={iter_num % monitor_every}")
+        print(f"=== DEBUG START ===")
+        print(f"iter_num: {iter_num}")
+        print(f"monitor_every: {monitor_every}")
+        print(f"iter_num % monitor_every: {iter_num % monitor_every}")
+        print(f"Condition check: {iter_num % monitor_every == 0} and {iter_num > 0}")
+        print(f"=== DEBUG END ===")
         
         # After every few iterations, add our custom summary
         if iter_num % monitor_every == 0 and iter_num > 0:
+            print("*** ENTERING SUMMARY BLOCK ***")
             elapsed = time.time() - start_time
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
             

@@ -268,7 +268,7 @@ class PropertyPrediction():
 
         return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
 
-# Add this function AFTER the PropertyPrediction class definition:
+
 def save_checkpoint(optimizer, prop_predictor, iteration, checkpoint_dir, opt_run):
     """Save optimization checkpoint"""
     checkpoint_data = {
@@ -276,7 +276,7 @@ def save_checkpoint(optimizer, prop_predictor, iteration, checkpoint_dir, opt_ru
         'optimizer_state': {
             'res': optimizer.res,
             'space': optimizer.space,
-            'random_state': optimizer.random_state,
+            'random_state': optimizer._random_state,  # FIX: Changed to _random_state
             'gp': {
                 'X_': optimizer._gp.X_.tolist() if hasattr(optimizer._gp, 'X_') else [],
                 'y_': optimizer._gp.y_.tolist() if hasattr(optimizer._gp, 'y_') else [],

@@ -384,7 +384,7 @@ if args.resume_from:
     checkpoint_data = load_checkpoint(args.resume_from)
     
     # Initialize optimizer
-    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run, verbose=2)
+    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
     
     # Restore optimizer state
     optimizer.res = checkpoint_data['optimizer_state']['res']
@@ -398,7 +398,7 @@ if args.resume_from:
     log_progress(f"Restored state from iteration {start_iteration} - Checkpoint validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
 else:
     # Initialize new optimization
-    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run, verbose=2)
+    optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
     log_progress("Starting new optimization", log_file)
 
 

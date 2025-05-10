@@ -413,20 +413,16 @@ log_progress(f"Starting optimization with {max_iter} iterations", log_file)
 
 # Initial exploration if not resuming
 if not args.resume_from:
-    log_progress("Performing initial exploration...", log_file)
     init_points = 20
+    print("Performing initial exploration...")
+    optimizer.maximize(init_points=init_points, n_iter=init_points, acquisition_function=utility)
 else:
-    init_points = 0  # Skip initial exploration if resuming
+    init_points = 0  # Safe fallback
 
 # Modified optimization loop
 total_iterations = max_iter
 checkpoint_every = args.checkpoint_every
 monitor_every = args.monitor_every
-
-# Run initial exploration phase separately
-if not args.resume_from:
-    print("Performing initial exploration...")
-    optimizer.maximize(init_points=init_points, n_iter=0, acquisition_function=utility)
     
 # Adjust start_iteration if we just did init_points
 if not args.resume_from and init_points > 0:
@@ -668,7 +664,13 @@ for x in pred_RE:
             EA_re.append(float('nan'))
             IP_re.append(float('nan'))
 
-EA_re = [x[0] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
+EA_re = [x[0] if isinstance(x, np.ndarray) and x.size > 0 else 
+         
+         
+         
+         
+         
+         ('nan') for x in pred_RE]
 IP_re = [x[1] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
 
 # Create plot

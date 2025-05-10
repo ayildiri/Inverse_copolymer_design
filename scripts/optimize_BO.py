@@ -411,7 +411,7 @@ if stopping_type == "time":
     stopping_criterion = stopping_type+"_"+str(max_time)
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
-    max_time = None
+    max_time = float('inf')
 
 # Custom optimization loop with checkpointing
 start_time = time.time()
@@ -431,14 +431,7 @@ monitor_every = args.monitor_every
 
 for iter_num in range(start_iteration, total_iterations):
     try:
-        if iter_num < init_points:
-            # Initial exploration
-            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility)
-        else:
-            # Regular optimization
-            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
-        
-        # Monitor progress
+        # Monitor progress - MOVED HERE (BEFORE the optimization step)
         if iter_num % monitor_every == 0:
             current_best = optimizer.max['target']
             current_params = optimizer.max['params']
@@ -447,13 +440,21 @@ for iter_num in range(start_iteration, total_iterations):
             # Calculate current validity rate
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
             
-            # Log with validity info and add blank line
+            # Log with validity info
             log_progress(f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
             
-            # Add blank line to both console and log file
+            # Add blank line after each iteration report
             print()  # Blank line to console
             with open(log_file, 'a') as f:
                 f.write('\n')  # Blank line to log file
+        
+        # NOW perform the optimization (AFTER monitoring)
+        if iter_num < init_points:
+            # Initial exploration
+            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility)
+        else:
+            # Regular optimization
+            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
         
         # Save checkpoint
         if iter_num % checkpoint_every == 0 and iter_num > 0:

@@ -443,7 +443,7 @@ for iter_num in range(start_iteration, total_iterations):
             
             # Add our custom summary
             print("\n" + "="*80)
-            print(f"SUMMARY AT ITERATION {iter_num}")
+            print(f"SUMMARY AT ITERATION {len(optimizer.res)}")
             print(f"Elapsed Time: {elapsed:.1f}s")
             print(f"Validity Rate: {valid_count}/{total_count} ({validity_rate:.1f}%)")
             print("="*80 + "\n")

@@ -415,7 +415,7 @@ log_progress(f"Starting optimization with {max_iter} iterations", log_file)
 if not args.resume_from:
     init_points = 20
     print("Performing initial exploration...")
-    optimizer.maximize(init_points=init_points, n_iter=init_points, acquisition_function=utility)
+    optimizer.maximize(init_points=init_points, n_iter=0, acquisition_function=utility)
 else:
     init_points = 0  # Safe fallback
 

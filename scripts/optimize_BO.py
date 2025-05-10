@@ -710,7 +710,19 @@ plt.savefig(dir_name+'BO_imp_projected_to_pca_onlyred_'+str(cutoff)+'_'+str(obje
 
 all_prediction_strings=[]
 all_reconstruction_strings=[]
+
+
+# Add these debug prints BEFORE the above line:
+print(f"\nCHECKING BEST MOLECULE:")
+print(f"best_z_re length: {len(best_z_re) if 'best_z_re' in locals() else 'not found'}")
+print(f"best_z_re type: {type(best_z_re) if 'best_z_re' in locals() else 'not found'}")
+if 'best_z_re' in locals() and len(best_z_re) > 0:
+    print(f"Last best_z_re: {best_z_re[-1]}")
+else:
+    print("No valid best molecules found!")
+
 seed_z = best_z_re[-1] # last reencoded best molecule
+
 # extract the predictions of best molecule together with the latents of best molecule(by encoding? or BO one)
 seed_z = torch.from_numpy(np.array(seed_z)).unsqueeze(0).repeat(64,1).to(device).to(torch.float32)
 print(seed_z)
@@ -742,6 +754,20 @@ with torch.no_grad():
         all_reconstruction_strings.extend(reconstructions_valid)
         all_y_p.extend(y_p_after_encoding_valid)
 
+
+# Add these debug prints BEFORE the above lines:
+print(f"\nSAMPLING RESULTS CHECK:")
+print(f"all_prediction_strings length: {len(all_prediction_strings)}")
+print(f"all_reconstruction_strings length: {len(all_reconstruction_strings)}")
+print(f"all_y_p length: {len(all_y_p)}")
+if all_y_p:
+    print(f"First 3 y_p values: {all_y_p[:3]}")
+    print(f"Types in all_y_p: {[type(x) for x in all_y_p[:3]]}")
+print(f'Saving generated strings')
+i=0
+with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
+    f.write("Seed string decoded: " + seed_string[0] + "\n")
+    f.write("Prediction: "+ str(y_seed[0]))
 
 print(f'Saving generated strings')
 i=0
@@ -789,7 +815,6 @@ all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
 prediction_validityA= []
 prediction_validityB =[]
 data_dir = os.path.join(main_dir_path,'data/')
-
 
 
 if augment=="augmented":
@@ -962,12 +987,36 @@ yp1_all = [yp[0] for yp in yp_all]
 yp2_all = [yp[1] for yp in yp_all]
 yp1_all_seed = [yp[0] for yp in all_y_p]
 yp2_all_seed = [yp[1] for yp in all_y_p]
+
+# debug prints:
+print(f"\nBEFORE KDE PLOTTING:")
+print(f"Length of all_y_p: {len(all_y_p)}")
+print(f"Data for KDE y1: {yp1_all_seed}")
+print(f"Data for KDE y2: {yp2_all_seed}")
+print(f"Length of y1 data: {len(yp1_all_seed)}")
+print(f"Length of y2 data: {len(yp2_all_seed)}")
+
 # Do a KDE to check if the distributions of properties are similar (predicted vs. real lables)
 """ y1 """
+print(f"\nSTARTING KDE PLOT 1:")
 plt.figure(4)
-real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
-augmented_distribution = np.array([p for p in yp1_all])
-seed_distribution = np.array([s for s in yp1_all_seed])
+try:
+    real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
+    print(f"real_distribution shape: {real_distribution.shape}")
+    
+    augmented_distribution = np.array([p for p in yp1_all])
+    print(f"augmented_distribution shape: {augmented_distribution.shape}")
+    
+    seed_distribution = np.array([s for s in yp1_all_seed])
+    print(f"seed_distribution shape: {seed_distribution.shape}")
+    
+    if len(seed_distribution) == 0:
+        print("WARNING: seed_distribution is empty!")
+    
+except Exception as e:
+    print(f"Error creating distributions: {e}")
+    import traceback
+    traceback.print_exc()
 
 
 # Reshape the data
@@ -986,7 +1035,13 @@ kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
 kde_augmented.fit(augmented_distribution)
 # Fit kernel density estimator for sampled data
 kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_sampled_seed.fit(seed_distribution)
+
+if len(seed_distribution) < 2:
+    print(f"WARNING: Cannot create KDE with {len(seed_distribution)} data points")
+    print("Skipping KDE for seed distribution")
+else:
+    kde_sampled_seed.fit(seed_distribution)
+
 
 # Create a range of values for the x-axis
 x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
@@ -1049,3 +1104,12 @@ plt.title('Kernel Density Estimation (Ionization potential)')
 plt.legend()
 plt.show()
 plt.savefig(dir_name+'KDEy2_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png')
+
+# Add this at the very end of your script:
+print(f"\nFINAL DEBUG INFO:")
+print(f"Files created in {dir_name}:")
+import glob
+result_files = glob.glob(os.path.join(dir_name, f"*{stopping_criterion}*{opt_run}*"))
+for file in result_files:
+    size = os.path.getsize(file)
+    print(f"  {os.path.basename(file)}: {size} bytes")

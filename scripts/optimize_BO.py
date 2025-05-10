@@ -429,10 +429,20 @@ total_iterations = max_iter
 checkpoint_every = args.checkpoint_every
 monitor_every = args.monitor_every
 
+# Or, if you want to keep it simple, just revert to the original order:
+
 for iter_num in range(start_iteration, total_iterations):
     try:
-        # Monitor progress - MOVED HERE (BEFORE the optimization step)
-        if iter_num % monitor_every == 0:
+        # Perform the optimization FIRST
+        if iter_num < init_points:
+            # Initial exploration
+            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility)
+        else:
+            # Regular optimization
+            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
+        
+        # Monitor progress AFTER optimization (this ensures optimizer.max exists)
+        if iter_num % monitor_every == 0 or (iter_num == 0 and len(optimizer.res) > 0):
             current_best = optimizer.max['target']
             current_params = optimizer.max['params']
             elapsed = time.time() - start_time
@@ -440,21 +450,16 @@ for iter_num in range(start_iteration, total_iterations):
             # Calculate current validity rate
             validity_rate, valid_count, total_count = calculate_current_validity_rate(prop_predictor.results_custom)
             
+            # Create the message
+            message = f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
+            
             # Log with validity info
-            log_progress(f"Iteration {iter_num}/{total_iterations} - Best objective: {current_best:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
+            log_progress(message, log_file)
             
             # Add blank line after each iteration report
             print()  # Blank line to console
             with open(log_file, 'a') as f:
                 f.write('\n')  # Blank line to log file
-        
-        # NOW perform the optimization (AFTER monitoring)
-        if iter_num < init_points:
-            # Initial exploration
-            optimizer.maximize(init_points=1, n_iter=0, acquisition_function=utility)
-        else:
-            # Regular optimization
-            optimizer.maximize(init_points=0, n_iter=1, acquisition_function=utility)
         
         # Save checkpoint
         if iter_num % checkpoint_every == 0 and iter_num > 0:

@@ -988,9 +988,9 @@ with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)
             f.write(l1 + "\n")
             f.write("The predicted properties from z(reencoded) are: " + str(all_y_p[i]) + "\n")
         else:
-            f.write("GA molecule: ")
+            f.write("Sampled molecule around BO seed: ")
             f.write(l2 + "\n")
-            f.write("Encoded and decoded GA molecule: ")
+            f.write("Encoded and decoded sampled molecule: ")
             f.write(l1 + "\n")
             f.write("The predicted properties from z(reencoded) are: " + str(all_y_p[i]) + "\n")
         i+=1

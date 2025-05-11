@@ -715,14 +715,34 @@ z_embedded_RE = reducer.transform(latents_RE_np)
 plt.figure(1)
 
 
+# PCA projection colored by EA
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis')
 clb = plt.colorbar()
 clb.ax.set_title('Electron affinity')
 plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
 plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
+plt.xlabel('PC1')
+plt.ylabel('PC2')
 plt.savefig(dir_name+'BO_projected_to_pca_'+str(cutoff)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
 plt.close()
 #pca = PCA(n_components=2)
+
+
+
+# PCA projection colored by IP
+plt.figure(1)
+plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y2_all_train, cmap='plasma')
+clb = plt.colorbar()
+clb.ax.set_title('Ionization potential')
+plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
+plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
+plt.xlabel('PC1')
+plt.ylabel('PC2')
+plt.title('PCA Projection Colored by Ionization Potential')
+plt.savefig(dir_name + 'BO_projected_to_pca_IP_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
+plt.close()
+
+
 
 
 ### Do the same but only for improved points

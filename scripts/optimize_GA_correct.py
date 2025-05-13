@@ -602,26 +602,106 @@ algorithm = NSGA2(pop_size=pop_size,
                   mutation=mutation,
                   eliminate_duplicates=True)
 
-# Optimize the problem
+# Check if resuming from checkpoint
+start_iteration = 0
+if args.resume_from:
+    log_progress(f"Resuming from checkpoint: {args.resume_from}", log_file)
+    checkpoint_data = load_checkpoint(args.resume_from)
+    
+    # Restore state (you'll need to implement this part based on how pymoo stores state)
+    problem.results_custom = checkpoint_data['custom_results']
+    problem.eval_calls = checkpoint_data['eval_calls']
+    start_iteration = checkpoint_data['iteration']
+    
+    # Check validity rate at checkpoint
+    validity_rate, valid_count, total_count = calculate_current_validity_rate(problem.results_custom)
+    
+    log_progress(f"Restored state from iteration {start_iteration} - Checkpoint validity: {valid_count}/{total_count} ({validity_rate:.1f}%)", log_file)
+else:
+    # Initialize new optimization
+    log_progress("Starting new optimization", log_file)
+
+# Now with checkpoint-aware optimization
 start_time = time.time()
 all_solutions = []
 best_solutions = []
-res = minimize(
-    problem,
-    algorithm,
-    termination,
-    seed=opt_run,
-    verbose=True,
-)
-elapsed_time = time.time() - start_time
-print(f"Elapsed time: {elapsed_time:.2f} seconds")
+log_progress(f"Starting optimization with maximum {max_iter} iterations", log_file)
 
-# Access the results
+# Create a custom callback function to save checkpoints
+class CheckpointCallback:
+    def __init__(self, algorithm, problem, checkpoint_dir, opt_run, checkpoint_every, monitor_every, log_file):
+        self.algorithm = algorithm
+        self.problem = problem
+        self.checkpoint_dir = checkpoint_dir
+        self.opt_run = opt_run
+        self.checkpoint_every = checkpoint_every
+        self.monitor_every = monitor_every
+        self.log_file = log_file
+        self.start_time = time.time()
+        
+    def __call__(self, algorithm):
+        iteration = algorithm.n_gen
+        
+        # Monitor progress regularly
+        if iteration % self.monitor_every == 0 and iteration > 0:
+            elapsed = time.time() - self.start_time
+            # Get current best solution
+            if hasattr(algorithm.pop, "get") and len(algorithm.pop) > 0:
+                best_idx = np.argmin(algorithm.pop.get("F")[:, 0])  # Use first objective for simplicity
+                best_obj = algorithm.pop.get("F")[best_idx, 0]
+                
+                validity_rate, valid_count, total_count = calculate_current_validity_rate(self.problem.results_custom)
+                
+                # Log to file
+                message = f"Generation {iteration} - Best objective: {best_obj:.4f} - Elapsed: {elapsed:.1f}s - Validity: {valid_count}/{total_count} ({validity_rate:.1f}%)"
+                log_progress(message, self.log_file)
+        
+        # Save checkpoint periodically
+        if iteration % self.checkpoint_every == 0 and iteration > 0:
+            checkpoint_file = save_checkpoint(algorithm, self.problem, iteration, self.checkpoint_dir, self.opt_run)
+            log_progress(f"Checkpoint saved at generation {iteration}: {checkpoint_file}", self.log_file)
+
+# Create the callback
+callback = CheckpointCallback(
+    algorithm, 
+    problem, 
+    checkpoint_dir, 
+    args.opt_run, 
+    args.checkpoint_every, 
+    args.monitor_every, 
+    log_file
+)
+
+# Run the optimization with callback
+try:
+    res = minimize(
+        problem,
+        algorithm,
+        termination,
+        seed=opt_run,
+        callback=callback,
+        verbose=True,
+    )
+    elapsed_time = time.time() - start_time
+    log_progress(f"Optimization completed. Total time: {elapsed_time:.2f} seconds", log_file)
+except Exception as e:
+    log_progress(f"Error during optimization: {str(e)}", log_file)
+    # Save emergency checkpoint
+    current_iteration = algorithm.n_gen if hasattr(algorithm, "n_gen") else "unknown"
+    emergency_file = save_checkpoint(algorithm, problem, current_iteration, checkpoint_dir, args.opt_run)
+    log_progress(f"Emergency checkpoint saved: {emergency_file}", log_file)
+    raise e
+
+# Save final checkpoint
+final_checkpoint = save_checkpoint(algorithm, problem, algorithm.n_gen, checkpoint_dir, args.opt_run)
+log_progress(f"Final checkpoint saved: {final_checkpoint}", log_file)
+
+# Access the results (keep these lines from your original code)
 best_solution = res.X
 #best_mod_solution = res.X_mod
 best_fitness = res.F
 results_custom = problem.results_custom
- 
+
 
 with open(dir_name+'res_optimization_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'wb') as f:
     pickle.dump(res, f)
@@ -630,12 +710,29 @@ with open(dir_name+'optimization_results_custom_GA_correct_'+str(objective_type)
 with open(dir_name+'optimization_results_custom_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
      print(results_custom, file=fl)
 
+log_progress(f"Saved optimization results to {dir_name}", log_file)
+
 #convergence = res.algorithm.termination
 with open(dir_name+'res_optimization_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'rb') as f:
     res = pickle.load(f)
 
 with open(dir_name+'optimization_results_custom_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'rb') as f:
     results_custom = pickle.load(f)
+
+# Save checkpoint summary
+checkpoint_summary = {
+    'total_iterations': algorithm.n_gen,
+    'final_objective': np.min(res.F[:, 0]) if hasattr(res, 'F') and res.F.size > 0 else None,  # Use first objective as summary
+    'final_params': res.X.tolist() if hasattr(res, 'X') else None,
+    'checkpoints': list_checkpoints(checkpoint_dir, args.opt_run),
+    'log_file': log_file
+}
+
+summary_file = os.path.join(checkpoint_dir, f'checkpoint_summary_GA_run{args.opt_run}.json')
+with open(summary_file, 'w') as f:
+    json.dump(checkpoint_summary, f, indent=2, default=str)
+
+log_progress(f"Checkpoint summary saved: {summary_file}", log_file)
 
 # Calculate distances between the BO and reencoded latents
 Latents_RE = []
@@ -674,6 +771,132 @@ plt.ylabel('Value')
 plt.legend()
 plt.savefig(dir_name+'GA_objectives_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
 plt.close()
+
+""" Plot the kde of the properties of training data and sampled data """
+try:
+    with open(dir_name+'y1_all_'+dataset_type+'.npy', 'rb') as f:
+        y1_all = np.load(f)
+    with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
+        y2_all = np.load(f)
+    with open(dir_name+'yp_all_'+dataset_type+'.npy', 'rb') as f:
+        yp_all = np.load(f)
+
+    y1_all = list(y1_all)
+    y2_all = list(y2_all)
+    yp1_all = [yp[0] for yp in yp_all]
+    yp2_all = [yp[1] for yp in yp_all]
+    
+    # Fix data types to ensure all are numpy arrays for KDE
+    def ensure_numpy_array(data_list):
+        result = []
+        for item in data_list:
+            if torch.is_tensor(item):
+                result.append(item.cpu().numpy())
+            elif isinstance(item, (int, float)):
+                result.append(item)
+            else:
+                try:
+                    result.append(float(item))
+                except:
+                    # Skip items that can't be converted
+                    continue
+        return np.array(result)
+
+    yp1_all_ga = ensure_numpy_array([x.cpu().numpy() if torch.is_tensor(x) else x for x in EA_re])
+    yp2_all_ga = ensure_numpy_array([x.cpu().numpy() if torch.is_tensor(x) else x for x in IP_re])
+
+    log_progress("Generating KDE plots for property distributions...", log_file)
+
+    """ y1 """
+    plt.figure(figsize=(10, 8))
+    real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
+    augmented_distribution = np.array([p for p in yp1_all])
+    ga_distribution = yp1_all_ga
+
+    # Reshape the data
+    real_distribution = real_distribution.reshape(-1, 1)
+    augmented_distribution = augmented_distribution.reshape(-1, 1)
+    ga_distribution = ga_distribution.reshape(-1, 1)
+
+    # Define bandwidth
+    bandwidth = 0.1
+
+    # Fit kernel density estimator for real data
+    kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_real.fit(real_distribution)
+    # Fit kernel density estimator for augmented data
+    kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_augmented.fit(augmented_distribution)
+    # Fit kernel density estimator for GA data
+    kde_ga = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_ga.fit(ga_distribution)
+
+    # Create a range of values for the x-axis
+    x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(ga_distribution)), 
+                          max(np.max(real_distribution), np.max(augmented_distribution), np.max(ga_distribution)), 1000)
+    # Evaluate the KDE
+    real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
+    augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
+    ga_density = np.exp(kde_ga.score_samples(x_values.reshape(-1, 1)))
+
+    # Plotting
+    plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+    plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+    plt.plot(x_values, ga_density, label='GA Optimized', linewidth=2)
+
+    plt.xlabel('EA (eV)')
+    plt.ylabel('Density')
+    plt.title('Kernel Density Estimation (Electron affinity)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    kde_file1 = dir_name+'KDEy1_GA_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+    plt.savefig(kde_file1, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    """ y2 """
+    plt.figure(figsize=(10, 8))
+    real_distribution = np.array([r for r in y2_all if not np.isnan(r)])
+    augmented_distribution = np.array([p for p in yp2_all])
+    ga_distribution = yp2_all_ga
+
+    # Reshape the data
+    real_distribution = real_distribution.reshape(-1, 1)
+    augmented_distribution = augmented_distribution.reshape(-1, 1)
+    ga_distribution = ga_distribution.reshape(-1, 1)
+
+    # Fit KDEs
+    kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_real.fit(real_distribution)
+    kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_augmented.fit(augmented_distribution)
+    kde_ga = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_ga.fit(ga_distribution)
+
+    # Create x values and evaluate
+    x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(ga_distribution)), 
+                          max(np.max(real_distribution), np.max(augmented_distribution), np.max(ga_distribution)), 1000)
+    real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
+    augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
+    ga_density = np.exp(kde_ga.score_samples(x_values.reshape(-1, 1)))
+
+    # Plot
+    plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+    plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+    plt.plot(x_values, ga_density, label='GA Optimized', linewidth=2)
+
+    plt.xlabel('IP (eV)')
+    plt.ylabel('Density')
+    plt.title('Kernel Density Estimation (Ionization potential)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    kde_file2 = dir_name+'KDEy2_GA_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+    plt.savefig(kde_file2, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    log_progress(f"KDE plots saved: {kde_file1} and {kde_file2}", log_file)
+except Exception as e:
+    log_progress(f"Error generating KDE plots: {str(e)}", log_file)
+
 
 import math 
 def indices_of_improvement(values):
@@ -755,3 +978,157 @@ with open(dir_name+'top20_mols_GA_correct_'+str(objective_type)+'_'+str(stopping
     print(best_objs_t20_c, file=fl)
     print(top_20_mols, file=fl)
 
+# AFTER (Add this at the end of your script)
+""" Check the molecules for validity and novelty """
+try:
+    log_progress("Analyzing molecule validity and novelty...", log_file)
+    
+    sm_can = SmilesEnumCanon()
+    # First, get the training data for comparison
+    all_polymers_data = []
+    all_train_polymers = []
+    for batch, graphs in enumerate(dict_train_loader):
+        data = dict_train_loader[str(batch)][0]
+        train_polymers_batch = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization).split('_')[0] for sample in range(len(data))]
+        all_train_polymers.extend(train_polymers_batch)
+    if augment=="augmented":
+        df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop.csv')
+    elif augment=="augmented_canonical":
+        df = pd.read_csv(main_dir_path+'/data/dataset-combined-canonical-poly_chemprop.csv')
+    elif augment=="augmented_enum":
+        df = pd.read_csv(main_dir_path+'/data/dataset-combined-enumerated2_poly_chemprop.csv')
+    for i in range(len(df.loc[:, 'poly_chemprop_input'])):
+        poly_input = df.loc[i, 'poly_chemprop_input']
+        all_polymers_data.append(poly_input)
+    
+    # Canonicalize all strings for comparison
+    all_predictions_can = [sm_can.canonicalize(s) for s in decoded_mols if s != 'invalid_polymer_string']
+    all_train_can = [sm_can.canonicalize(s) for s in all_train_polymers]
+    all_pols_data_can = [sm_can.canonicalize(s) for s in all_polymers_data]
+    
+    # Extract monomers
+    monomers = [s.split("|")[0].split(".") for s in all_train_polymers]
+    monomers_all = [mon for sub_list in monomers for mon in sub_list]
+    all_mons_can = []
+    for m in monomers_all:
+        m_can = sm_can.canonicalize(m, monomer_only=True, stoich_con_info=False)
+        modified_string = re.sub(r'\*\:\d+', '*', m_can)
+        all_mons_can.append(modified_string)
+    all_mons_can = list(set(all_mons_can))
+    
+    # Analyze generated molecules
+    monomer_smiles_predicted = [poly_smiles.split("|")[0].split('.') for poly_smiles in all_predictions_can]
+    monomer_comb_predicted = [poly_smiles.split("|")[0] for poly_smiles in all_predictions_can]
+    monomer_comb_train = [poly_smiles.split("|")[0] for poly_smiles in all_train_can]
+    
+    # Extract monomer A and B
+    monA_pred = [mon[0] for mon in monomer_smiles_predicted if len(mon) > 0]
+    monB_pred = [mon[1] for mon in monomer_smiles_predicted if len(mon) > 1]
+    monA_pred_gen = []
+    monB_pred_gen = []
+    
+    for m_c in monomer_smiles_predicted:
+        if len(m_c) > 0:
+            ma = m_c[0]
+            ma_can = sm_can.canonicalize(ma, monomer_only=True, stoich_con_info=False)
+            monA_pred_gen.append(re.sub(r'\*\:\d+', '*', ma_can))
+        
+        if len(m_c) > 1:
+            mb = m_c[1]
+            mb_can = sm_can.canonicalize(mb, monomer_only=True, stoich_con_info=False)
+            monB_pred_gen.append(re.sub(r'\*\:\d+', '*', mb_can))
+    
+    # Validity metrics
+    prediction_validityA = []
+    prediction_validityB = []
+    
+    def poly_smiles_to_molecule(poly_input):
+        '''Turns adjusted polymer smiles string into mols'''
+        try:
+            mols = make_monomer_mols(poly_input.split("|")[0], 0, 0, fragment_weights=poly_input.split("|")[1:-1])
+            return mols
+        except:
+            return None
+    
+    # Check validity of generated molecules
+    prediction_mols = []
+    for poly in all_predictions_can:
+        try:
+            mol = poly_smiles_to_molecule(poly)
+            prediction_mols.append(mol)
+        except:
+            prediction_mols.append(None)
+    
+    for mon in prediction_mols:
+        try: 
+            prediction_validityA.append(mon[0] is not None if mon else False)
+        except: 
+            prediction_validityA.append(False)
+        
+        try: 
+            prediction_validityB.append(mon[1] is not None if mon else False)
+        except: 
+            prediction_validityB.append(False)
+    
+    # Calculate validity rates
+    validityA = sum(prediction_validityA)/len(prediction_validityA) if prediction_validityA else 0
+    validityB = sum(prediction_validityB)/len(prediction_validityB) if prediction_validityB else 0
+    validity = len(monomer_smiles_predicted)/len(decoded_mols) if decoded_mols else 0
+    
+    # Novelty metrics
+    novel = 0
+    novel_pols = []
+    for pol in monomer_comb_predicted:
+        if pol not in monomer_comb_train:
+            novel += 1
+            novel_pols.append(pol)
+    novelty_mon_comb = novel/len(monomer_comb_predicted) if monomer_comb_predicted else 0
+    
+    novel = 0
+    for pol in all_predictions_can:
+        if pol not in all_train_can:
+            novel += 1
+    novelty = novel/len(all_predictions_can) if all_predictions_can else 0
+    
+    novel = 0
+    for pol in all_predictions_can:
+        if pol not in all_pols_data_can:
+            novel += 1
+    novelty_full_dataset = novel/len(all_predictions_can) if all_predictions_can else 0
+    
+    # Monomer novelty
+    novelA = 0
+    novelAs = []
+    for monA in monA_pred_gen:
+        if monA not in all_mons_can:
+            novelA += 1
+            novelAs.append(monA)
+    novelty_A = novelA/len(monA_pred_gen) if monA_pred_gen else 0
+    
+    novelB = 0
+    novelBs = []
+    for monB in monB_pred_gen:
+        if monB not in all_mons_can:
+            novelB += 1
+            novelBs.append(monB)
+    novelty_B = novelB/len(monB_pred_gen) if monB_pred_gen else 0
+    
+    # Diversity metrics
+    diversity = len(set(all_predictions_can))/len(all_predictions_can) if all_predictions_can else 0
+    diversity_novel = len(set(novel_pols))/len(novel_pols) if novel_pols else 0
+    
+    # Save the novelty and validity metrics
+    with open(dir_name+f'novelty_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt', 'w') as f:
+        f.write(f"Gen Mon A validity: {100*validityA:.4f}% Gen Mon B validity: {100*validityB:.4f}%\n")
+        f.write(f"Gen validity: {100*validity:.4f}%\n")
+        f.write(f"Novelty: {100*novelty:.4f}%\n")
+        f.write(f"Novelty (mon_comb): {100*novelty_mon_comb:.4f}%\n")
+        f.write(f"Novelty MonA full dataset: {100*novelty_A:.4f}%\n")
+        f.write(f"Novelty MonB full dataset: {100*novelty_B:.4f}%\n")
+        f.write(f"Novelty in full dataset: {100*novelty_full_dataset:.4f}%\n")
+        f.write(f"Diversity: {100*diversity:.4f}%\n")
+        f.write(f"Diversity (novel polymers): {100*diversity_novel:.4f}%\n")
+    
+    log_progress(f"Novelty analysis completed and saved to {dir_name}novelty_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt", log_file)
+except Exception as e:
+    log_progress(f"Error during novelty analysis: {str(e)}", log_file)

@@ -1,3 +1,4 @@
+
 import numpy as np
 from pymoo.core.problem import Problem
 from pymoo.algorithms.moo.nsga2 import NSGA2
@@ -15,8 +16,15 @@ from torch.utils.data import Dataset
 from scipy.spatial import distance
 import pickle
 import time
-from datetime import timedelta
-
+from datetime import timedelta, datetime
+import glob
+import json
+import shutil
+import pandas as pd
+import math
+import re
+from data_processing.Smiles_enum_canon import SmilesEnumCanon
+from sklearn.neighbors import KernelDensity
 
 import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -41,8 +49,10 @@ if device.type == 'cuda':
     print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3, 1), 'GB')
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
 
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="RT_tokenized", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default="schedule", help="option: <any number>, schedule", choices=["normalVAE","schedule"])
@@ -60,7 +70,12 @@ parser.add_argument("--max_iter", type=int, default=1000)
 parser.add_argument("--max_time", type=int, default=3600)
 parser.add_argument("--stopping_type", type=str, default="iter", choices=["iter","time", "convergence"])
 parser.add_argument("--opt_run", type=int, default=1)
-
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
+parser.add_argument("--checkpoint_every", type=int, default=200, help="Save checkpoint every N iterations")
+parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume from")
+parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
+parser.add_argument("--objective_type", type=str, default="EAmin", choices=["EAmin", "mimick_peak", "mimick_best", "max_gap"], 
+                    help="Type of objective function to use")
 
 args = parser.parse_args()
 
@@ -81,8 +96,15 @@ num_edge_features = dict_train_loader['0'][0].num_edge_features
 
 # Load model
 # Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-filepath = os.path.join(main_dir_path,'Checkpoints/', model_name,"model_best_loss.pt")
+
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+
+if args.save_dir:
+    filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+else:
+    filepath = os.path.join(main_dir_path,'Checkpoints/', model_name, "model_best_loss.pt")
+
+
 if os.path.isfile(filepath):
     if args.ppguided:
         model_type = G2S_VAE_PPguided
@@ -105,7 +127,17 @@ if os.path.isfile(filepath):
     model.to(device)
     model.eval()
 
-dir_name = os.path.join(main_dir_path,'Checkpoints/', model_name)
+if args.save_dir:
+    dir_name = os.path.join(args.save_dir, model_name)
+else:
+    dir_name = os.path.join(main_dir_path,'Checkpoints/', model_name)
+
+# Create checkpoint directory
+checkpoint_dir = os.path.join(dir_name, 'checkpoints_GA')
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+# Setup log file for monitoring
+log_file = os.path.join(dir_name, f'optimization_log_GA_{args.opt_run}.txt')
 
 class Property_optimization_problem(Problem):
     def __init__(self, model, x_min, x_max, objective_type):

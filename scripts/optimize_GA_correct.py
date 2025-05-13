@@ -315,6 +315,10 @@ class Property_optimization_problem(Problem):
 
 def save_checkpoint(algorithm, problem, iteration, checkpoint_dir, opt_run):
     """Save optimization checkpoint"""
+    # Fix for NoneType comparison error
+    if iteration is None:
+        iteration = 0  # Default to 0 if iteration is None
+        
     checkpoint_data = {
         'iteration': iteration,
         'algorithm_state': {
@@ -330,8 +334,8 @@ def save_checkpoint(algorithm, problem, iteration, checkpoint_dir, opt_run):
     with open(checkpoint_file, 'wb') as f:
         pickle.dump(checkpoint_data, f)
     
-    # Keep backup of last checkpoint
-    if iteration > 200:
+    # Keep backup of last checkpoint, but only if iteration is a valid number
+    if iteration is not None and iteration > 200:
         prev_checkpoint = os.path.join(checkpoint_dir, f'checkpoint_GA_iter_{iteration-200}_run{opt_run}.pkl')
         if os.path.exists(prev_checkpoint):
             backup_file = os.path.join(checkpoint_dir, f'backup_GA_iter_{iteration-200}_run{opt_run}.pkl')
@@ -695,7 +699,16 @@ except Exception as e:
     raise e
 
 # Save final checkpoint
-final_checkpoint = save_checkpoint(algorithm, problem, algorithm.n_gen, checkpoint_dir, args.opt_run)
+# Use a sensible default if algorithm.n_gen is None
+final_iteration = getattr(algorithm, 'n_gen', None)
+if final_iteration is None:
+    # Try to get an iteration value from somewhere else
+    if hasattr(problem, 'eval_calls') and problem.eval_calls > 0:
+        final_iteration = problem.eval_calls
+    else:
+        final_iteration = "final"  # Use a string as fallback
+        
+final_checkpoint = save_checkpoint(algorithm, problem, final_iteration, checkpoint_dir, args.opt_run)
 log_progress(f"Final checkpoint saved: {final_checkpoint}", log_file)
 
 # Access the results (keep these lines from your original code)

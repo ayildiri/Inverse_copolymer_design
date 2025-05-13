@@ -1,4 +1,8 @@
 
+import sys, os
+main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(main_dir_path)
+
 import numpy as np
 from pymoo.core.problem import Problem
 from pymoo.algorithms.moo.nsga2 import NSGA2
@@ -27,10 +31,6 @@ from data_processing.data_utils import *
 from data_processing.rdkit_poly import *
 from data_processing.Smiles_enum_canon import SmilesEnumCanon
 from sklearn.neighbors import KernelDensity
-
-import sys, os
-main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(main_dir_path)
 
 from model.G2S_clean import *
 from data_processing.data_utils import *

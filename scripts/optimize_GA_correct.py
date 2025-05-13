@@ -311,6 +311,72 @@ class Property_optimization_problem(Problem):
 
         return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
 
+def save_checkpoint(algorithm, problem, iteration, checkpoint_dir, opt_run):
+    """Save optimization checkpoint"""
+    checkpoint_data = {
+        'iteration': iteration,
+        'algorithm_state': {
+            'pop': algorithm.pop.get("X").tolist() if hasattr(algorithm.pop, "get") else [],
+            'F': algorithm.pop.get("F").tolist() if hasattr(algorithm.pop, "get") else [],
+        },
+        'custom_results': problem.results_custom,
+        'eval_calls': problem.eval_calls,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    checkpoint_file = os.path.join(checkpoint_dir, f'checkpoint_GA_iter_{iteration}_run{opt_run}.pkl')
+    with open(checkpoint_file, 'wb') as f:
+        pickle.dump(checkpoint_data, f)
+    
+    # Keep backup of last checkpoint
+    if iteration > 200:
+        prev_checkpoint = os.path.join(checkpoint_dir, f'checkpoint_GA_iter_{iteration-200}_run{opt_run}.pkl')
+        if os.path.exists(prev_checkpoint):
+            backup_file = os.path.join(checkpoint_dir, f'backup_GA_iter_{iteration-200}_run{opt_run}.pkl')
+            shutil.copy2(prev_checkpoint, backup_file)
+    
+    return checkpoint_file
+
+def load_checkpoint(checkpoint_file):
+    """Load optimization checkpoint"""
+    with open(checkpoint_file, 'rb') as f:
+        checkpoint_data = pickle.load(f)
+    return checkpoint_data
+
+def log_progress(message, log_file):
+    """Log progress to file and print"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_message = f"[{timestamp}] {message}"
+    print(log_message)
+    with open(log_file, 'a') as f:
+        f.write(log_message + '\n')
+
+def calculate_current_validity_rate(results_custom):
+    """Calculate current validity rate from optimization results"""
+    total = 0
+    valid = 0
+    
+    for eval_call, results in results_custom.items():
+        for obj in results["objective"]:
+            total += 1
+            # Check if objective is not penalty value (assuming penalty_value is 100)
+            if obj < 100:  # Using an approximation since GA uses penalty differently than BO
+                valid += 1
+    
+    if total > 0:
+        validity_rate = (valid / total) * 100
+        return validity_rate, valid, total
+    return 0, 0, 0
+
+def list_checkpoints(checkpoint_dir, opt_run):
+    """List all checkpoints for a given run"""
+    pattern = os.path.join(checkpoint_dir, f'checkpoint_GA_iter_*_run{opt_run}.pkl')
+    checkpoints = glob.glob(pattern)
+    checkpoints.sort()
+    return checkpoints
+
+
+
 # Define a convergence termination class
 class ConvergenceTermination(Termination):
     def __init__(self, conv_threshold, conv_generations, n_max_gen):
@@ -374,12 +440,10 @@ if not cutoff==0.0:
     min_values = transformed_min_values
     max_values = transformed_max_values
 
-    
 
 # Initialize the problem
-# options: max_gap, EAmin, mimick_peak, mimick_best
 opt_run = args.opt_run
-objective_type='mimick_best'
+objective_type = args.objective_type
 problem = Property_optimization_problem(model, min_values, max_values, objective_type)
 
 # Termination criterium

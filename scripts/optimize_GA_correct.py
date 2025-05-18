@@ -294,7 +294,7 @@ class Property_optimization_problem(Problem):
         expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan,np.nan] for val in list(validity)])
         expanded_z_p = np.array([z_p_after_encoding_valid.pop(0) if val == 1 else [0] * 32 for val in list(validity)])
         all_reconstructions = [all_reconstructions_valid.pop(0) if val == 1 else "" for val in list(validity)]
-        print("evaluation should not change")
+        print("Evaluation should not change")
         print(expanded_z_p)
 
 

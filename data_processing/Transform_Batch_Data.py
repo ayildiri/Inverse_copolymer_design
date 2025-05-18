@@ -14,6 +14,7 @@ from torch_geometric.utils import to_networkx
 import random
 from torch_geometric.loader import DataLoader
 from sklearn.model_selection import train_test_split
+from data_processing.Function_Featurization_Own import poly_smiles_to_graph_flexible
 import argparse
 
 # %% Hyperparameters
@@ -79,17 +80,12 @@ for i in range(len(df.loc[:, 'poly_chemprop_input'])):
         prop_value = df.loc[i, prop_col]
         property_values.append(prop_value)
     
-    # Create graph with flexible property values
-    # Note: This assumes poly_smiles_to_graph function can handle variable number of properties
-    # If not, we may need to update that function as well
-    if property_count == 1:
-        graphs = poly_smiles_to_graph(poly_input, property_values[0], None, poly_input_nocan)
-    elif property_count == 2:
-        graphs = poly_smiles_to_graph(poly_input, property_values[0], property_values[1], poly_input_nocan)
-    else:
-        # For more than 2 properties, we need to modify the poly_smiles_to_graph function
-        # or create a flexible version
-        graphs = poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan)
+    # Create graph with flexible property values using the updated Function_Featurization_Own.py
+    # Import the flexible function if not already imported
+    from data_processing.Function_Featurization_Own import poly_smiles_to_graph_flexible
+    
+    # Use the flexible function for all cases
+    graphs = poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan)
     
     #if string_format == "gbigsmileslike":
     #    poly_input_gbigsmileslike = df.loc[i, 'poly_chemprop_input_GbigSMILESlike']
@@ -277,18 +273,3 @@ print(f'Saved data files with property suffix: {property_suffix}')
 # Note: You may also need to create a flexible version of poly_smiles_to_graph 
 # that can handle variable number of properties. Here's a suggested interface:
 
-def poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan=None):
-    """
-    Flexible version of poly_smiles_to_graph that can handle variable number of properties.
-    
-    Args:
-        poly_input: Polymer SMILES string
-        property_values: List of property values (can be any length)
-        poly_input_nocan: Non-canonical version (optional)
-    
-    Returns:
-        Graph object with flexible property attributes
-    """
-    # This function would need to be implemented in Function_Featurization_Own.py
-    # For now, it's a placeholder to indicate what's needed
-    pass

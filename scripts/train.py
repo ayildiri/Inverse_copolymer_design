@@ -232,12 +232,31 @@ parser.add_argument("--batch_size", type=int, default=64, help="Batch size for t
 parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume training from")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
 
-
+# Add flexible property arguments (same as BO and GA scripts)
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+                    help="Names of the properties to train the model to predict")
+parser.add_argument("--property_count", type=int, default=None,
+                    help="Number of properties (auto-detected from property_names if not specified)")
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to custom dataset files (will use default naming pattern if not specified)")
 
 args = parser.parse_args()
+
+# Handle property configuration
+property_names = args.property_names
+if args.property_count is not None:
+    property_count = args.property_count
+else:
+    property_count = len(property_names)
+    
+# Validate that property count matches property names
+if len(property_names) != property_count:
+    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
+
+print(f"Training model to predict {property_count} properties: {property_names}")
+
 # Define resume_from_checkpoint as a boolean for logic control
 resume_from_checkpoint = args.resume_from_checkpoint is not None and os.path.exists(args.resume_from_checkpoint)
-
 
 # First set the seed for reproducible results
 seed = args.seed
@@ -258,7 +277,15 @@ elif args.add_latent ==0:
     add_latent=False
 
 # Model config and vocab
-vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+if args.dataset_path:
+    # Use custom dataset path
+    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
+    data_path_prefix = os.path.join(args.dataset_path, f'dict_{{}}_loader_{augment}_{tokenization}.pt')
+else:
+    # Use default paths
+    vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    data_path_prefix = main_dir_path+'/data/dict_{}_loader_'+augment+'_'+tokenization+'.pt'
+
 print(f"DEBUG: Constructed vocab file path: {vocab_file_path}")
 print(f"DEBUG: File exists: {os.path.exists(vocab_file_path)}")
 print(f"DEBUG: Current working directory: {os.getcwd()}")
@@ -282,7 +309,10 @@ model_config = {
     'es_patience': args.es_patience,
     'loss': args.loss, # focal or ce
     'max_alpha': args.max_alpha,
-    'alpha': args.alpha
+    'alpha': args.alpha,
+    # Add property configuration to model config
+    'property_count': property_count,
+    'property_names': property_names
 }
 batch_size = model_config['batch_size']
 epochs = model_config['epochs']
@@ -291,9 +321,9 @@ embedding_dim = model_config['embedding_dim']
 loss = model_config['loss']
 
 # %% Call data
-dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
-dict_val_loader = torch.load(main_dir_path+'/data/dict_val_loader_'+augment+'_'+tokenization+'.pt')
-dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+dict_train_loader = torch.load(data_path_prefix.format('train'))
+dict_val_loader = torch.load(data_path_prefix.format('val'))
+dict_test_loader = torch.load(data_path_prefix.format('test'))
 
 num_train_graphs = len(list(dict_train_loader.keys())[
     :-2])*batch_size + dict_train_loader[list(dict_train_loader.keys())[-1]][0].num_graphs
@@ -305,13 +335,12 @@ assert dict_train_loader['0'][0].num_graphs == batch_size, 'Batch_sizes of data 
 # %% Create an instance of the G2S model
 # only for wce loss we calculate the token weights from vocabulary
 if model_config['loss']=="wce":
-    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
-    class_weights = token_weights(vocab_file)
+    class_weights = token_weights(vocab_file_path)
     class_weights = torch.FloatTensor(class_weights)
 if model_config['loss']=="ce":
     class_weights=None
 
-# Initialize model
+# Initialize model with property count
 if args.ppguided:
     model_type = G2S_VAE_PPguided
 else:
@@ -366,7 +395,9 @@ scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.s
 # Log directory creation
 
 data_augment="old"
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+# Include property info in model name for better organization
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
 # Always use model_name in the path structure, regardless of save_dir
 if args.save_dir is not None:
@@ -389,6 +420,7 @@ if not resume_from_checkpoint:
         os.remove(flag_file)
 
 print(f'STARTING TRAINING')
+print(f'Model will predict {property_count} properties: {property_names}')
 # Prepare dictionaries for training or load checkpoint
 
 checkpoint_file = None
@@ -414,14 +446,6 @@ if not resume_from_checkpoint:
     if os.path.exists(flag_file):
         print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
         os.remove(flag_file)
-
-
-# Otherwise, try to load best model first, then latest from the default directory
-# elif os.path.exists(directory_path):
-#     if os.path.exists(os.path.join(directory_path, "model_best_loss.pt")):
-#         checkpoint_file = os.path.join(directory_path, "model_best_loss.pt")
-#     elif os.path.exists(os.path.join(directory_path, "model_latest.pt")):
-#         checkpoint_file = os.path.join(directory_path, "model_latest.pt")
 
 # Load the checkpoint if one was found
 if checkpoint_file is not None:
@@ -517,7 +541,6 @@ for epoch in range(epoch_cp, epochs):
     val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
     save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint)
 
-
 # Save the training loss values - only overwrite if starting fresh
 file_mode = 'wb'  # Always use write mode - we're saving the full dictionaries
 with open(os.path.join(directory_path,'train_loss.pkl'), file_mode) as file:
@@ -528,4 +551,6 @@ with open(os.path.join(directory_path,'val_loss.pkl'), file_mode) as file:
     pickle.dump(val_loss_dict, file)
 
 print('Done!\n')
+print(f'Model trained to predict {property_count} properties: {property_names}')
+print(f'Checkpoints saved to: {directory_path}')
 #experiment.end()

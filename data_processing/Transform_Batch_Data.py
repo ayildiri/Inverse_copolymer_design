@@ -6,7 +6,6 @@ sys.path.append(main_dir_path)
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from data_processing.Function_Featurization_Own import poly_smiles_to_graph
 from data_processing.data_utils import *
 import pandas as pd
 import networkx as nx

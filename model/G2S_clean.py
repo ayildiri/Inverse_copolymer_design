@@ -594,6 +594,10 @@ class G2S_VAE_PPguided(nn.Module):
             self.beta=1.0
         self.config = model_config
         self.vocab = vocab
+        
+        # Get property count from model config - default to 2 for backward compatibility
+        self.property_count = model_config.get('property_count', 2)
+        
         #self.max_n=data_config['max_num_nodes']
         #if model_config['pooling']=='custom':
         #    self.Encoder = GraphEncoder_GMT(node_dim, edge_dim, hidden_dim, device, model_config)
@@ -608,7 +612,8 @@ class G2S_VAE_PPguided(nn.Module):
         #self.alpha=0.1
         #self.max_n=data_config['max_num_nodes']
         self.PP_lin1 = Sequential(Linear(embedding_dim, self.pp_ffn_hidden), ReLU(), ).to(device)
-        self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, 2)).to(device)
+        # Make property prediction layer flexible
+        self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, self.property_count)).to(device)
         self.dropout = nn.Dropout(0.2)
 
     def sample(self, mean, log_var, eps_scale=0.01):
@@ -626,7 +631,6 @@ class G2S_VAE_PPguided(nn.Module):
         eps = torch.randn_like(std) * eps_scale
         return eps.mul(std).add_(mean)   
 
-
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
@@ -636,14 +640,30 @@ class G2S_VAE_PPguided(nn.Module):
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
 
-        # Property predictions 
+        # Property predictions with flexible number of properties
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]
         pp_hidden = self.dropout(pp_hidden)
-        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, 2] for 2 properties
-        y1 = torch.unsqueeze(batch_list.y1.float(),1)
-        y2 = torch.unsqueeze(batch_list.y2.float(),1)
-        y_true = torch.cat((y1,y2), dim=1)
-        mse = self.masked_mse(y_true,y)
+        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, property_count]
+        
+        # Dynamically handle property targets based on property count
+        y_true_list = []
+        for i in range(self.property_count):
+            if i == 0:
+                y_prop = torch.unsqueeze(batch_list.y1.float(), 1)
+            elif i == 1:
+                y_prop = torch.unsqueeze(batch_list.y2.float(), 1)
+            else:
+                # For additional properties beyond y1 and y2, check if they exist
+                prop_attr = f'y{i+1}'
+                if hasattr(batch_list, prop_attr):
+                    y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
+                else:
+                    # If property doesn't exist, create NaN tensor
+                    y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
+            y_true_list.append(y_prop)
+        
+        y_true = torch.cat(y_true_list, dim=1)
+        mse = self.masked_mse(y_true, y)
 
         # decode
         recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
@@ -652,13 +672,16 @@ class G2S_VAE_PPguided(nn.Module):
 
     def masked_mse(self, y_true, y_pred):
         # Create a mask where the true values are not NaN
-        mask = ~torch.isnan(y_true).any(dim=1)
+        mask = ~torch.isnan(y_true)
         
-        # Calculate MSE only for non-missing values
-        mse = F.mse_loss(y_pred[mask], y_true[mask], reduction='none')
-        
-        # Take the mean over the non-missing values
-        return torch.mean(mse)
+        # Only calculate MSE for non-NaN values
+        if mask.any():
+            # Calculate MSE only for non-missing values
+            mse = F.mse_loss(y_pred[mask], y_true[mask], reduction='mean')
+            return mse
+        else:
+            # If all values are NaN, return zero loss
+            return torch.tensor(0.0, device=y_true.device, requires_grad=True)
     
     def inference(self, data, device, dest_is_origin_matrix=None, inc_edges_to_atom_matrix=None, sample=False, log_var=None):
         #TODO: Function arguments (test batch?, single graph?, latent representation?), right encoder call
@@ -682,7 +705,7 @@ class G2S_VAE_PPguided(nn.Module):
             log_var = 0
        
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]
-        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, 2] for 2 properties
+        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, property_count]
 
         predictions = self.Decoder.inference(z)
         # Property predictions 
@@ -713,6 +736,10 @@ class G2S_VAE_PPguideddisabled(nn.Module):
             self.beta=1.0
         self.config = model_config
         self.vocab = vocab
+        
+        # Get property count from model config - default to 2 for backward compatibility
+        self.property_count = model_config.get('property_count', 2)
+        
         #self.max_n=data_config['max_num_nodes']
         #if model_config['pooling']=='custom':
         #    self.Encoder = GraphEncoder_GMT(node_dim, edge_dim, hidden_dim, device, model_config)
@@ -726,7 +753,8 @@ class G2S_VAE_PPguideddisabled(nn.Module):
         self.alpha = model_config['max_alpha'] if model_config['alpha'] == "fixed" else 0.0
         #self.max_n=data_config['max_num_nodes']
         self.PP_lin1 = Sequential(Linear(embedding_dim, self.pp_ffn_hidden), ReLU(), ).to(device)
-        self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, 2)).to(device)
+        # Make property prediction layer flexible
+        self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, self.property_count)).to(device)
         self.dropout = nn.Dropout(0.2)
 
     def sample(self, mean, log_var, eps_scale=0.01):
@@ -747,14 +775,30 @@ class G2S_VAE_PPguideddisabled(nn.Module):
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
 
-        # Property predictions 
+        # Property predictions with flexible number of properties
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]
         pp_hidden = self.dropout(pp_hidden)
-        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, 2] for 2 properties
-        y1 = torch.unsqueeze(batch_list.y1.float(),1)
-        y2 = torch.unsqueeze(batch_list.y2.float(),1)
-        y_true = torch.cat((y1,y2), dim=1)
-        mse = self.masked_mse(y_true,y)
+        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, property_count]
+        
+        # Dynamically handle property targets based on property count
+        y_true_list = []
+        for i in range(self.property_count):
+            if i == 0:
+                y_prop = torch.unsqueeze(batch_list.y1.float(), 1)
+            elif i == 1:
+                y_prop = torch.unsqueeze(batch_list.y2.float(), 1)
+            else:
+                # For additional properties beyond y1 and y2, check if they exist
+                prop_attr = f'y{i+1}'
+                if hasattr(batch_list, prop_attr):
+                    y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
+                else:
+                    # If property doesn't exist, create NaN tensor
+                    y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
+            y_true_list.append(y_prop)
+        
+        y_true = torch.cat(y_true_list, dim=1)
+        mse = self.masked_mse(y_true, y)
 
         # decode
         recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
@@ -764,13 +808,16 @@ class G2S_VAE_PPguideddisabled(nn.Module):
 
     def masked_mse(self, y_true, y_pred):
         # Create a mask where the true values are not NaN
-        mask = ~torch.isnan(y_true).any(dim=1)
+        mask = ~torch.isnan(y_true)
         
-        # Calculate MSE only for non-missing values
-        mse = F.mse_loss(y_pred[mask], y_true[mask], reduction='none')
-        
-        # Take the mean over the non-missing values
-        return torch.mean(mse)
+        # Only calculate MSE for non-NaN values
+        if mask.any():
+            # Calculate MSE only for non-missing values
+            mse = F.mse_loss(y_pred[mask], y_true[mask], reduction='mean')
+            return mse
+        else:
+            # If all values are NaN, return zero loss
+            return torch.tensor(0.0, device=y_true.device, requires_grad=True)
     
     def inference(self, data, device, dest_is_origin_matrix=None, inc_edges_to_atom_matrix=None, sample=False, log_var=None):
         #TODO: Function arguments (test batch?, single graph?, latent representation?), right encoder call
@@ -794,7 +841,7 @@ class G2S_VAE_PPguideddisabled(nn.Module):
             log_var = 0
        
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]
-        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, 2] for 2 properties
+        y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, property_count]
 
         predictions = self.Decoder.inference(z)
         # Property predictions 

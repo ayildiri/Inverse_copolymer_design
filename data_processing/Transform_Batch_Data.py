@@ -16,14 +16,17 @@ from torch_geometric.loader import DataLoader
 from sklearn.model_selection import train_test_split
 import argparse
 
-
 # %% Hyperparameters
 device = 'cpu'
 # %% Call data
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
 parser.add_argument("--batch_size", type=int, default=64)
-
+# Add flexible property arguments
+parser.add_argument("--property_columns", type=str, nargs='+', default=["EA vs SHE (eV)", "IP vs SHE (eV)"],
+                    help="Names of the property columns in the CSV file")
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+                    help="Short names for the properties (for file naming and processing)")
 
 args = parser.parse_args()
 
@@ -32,10 +35,29 @@ batch_size = args.batch_size
 tokenization = "RT_tokenized" # oldtok is the old tokenization scheme without numerical tokens
 string_format = "poly_chemprop" # "poly_chemprop" or "gbigsmileslike"
 smiles_enumeration = True
+
+# Get property configuration
+property_columns = args.property_columns
+property_names = args.property_names
+property_count = len(property_columns)
+
+# Validate property arguments
+if len(property_columns) != len(property_names):
+    raise ValueError(f"Number of property columns ({len(property_columns)}) must match number of property names ({len(property_names)})")
+
+print(f"Processing {property_count} properties: {property_names}")
+print(f"Property columns in CSV: {property_columns}")
+
 if augment == "original":
     df = pd.read_csv(main_dir_path+'/data/dataset-poly_chemprop.csv')
 elif augment == "augmented":
     df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop.csv')
+
+# Verify that all property columns exist in the dataframe
+missing_columns = [col for col in property_columns if col not in df.columns]
+if missing_columns:
+    raise ValueError(f"Missing property columns in CSV: {missing_columns}")
+
 # %% Lets create PyG data objects
 
 # uncomment if graphs_list.pt does not exist
@@ -50,9 +72,25 @@ for i in range(len(df.loc[:, 'poly_chemprop_input'])):
     poly_input = df.loc[i, 'poly_chemprop_input']
     try: poly_input_nocan = df.loc[i, 'poly_chemprop_input_nocan']
     except: poly_input_nocan=None
-    poly_label1 = df.loc[i, 'EA vs SHE (eV)']
-    poly_label2 = df.loc[i, 'IP vs SHE (eV)']
-    graphs = poly_smiles_to_graph(poly_input, poly_label1, poly_label2, poly_input_nocan)
+    
+    # Extract property values dynamically based on property_columns
+    property_values = []
+    for prop_col in property_columns:
+        prop_value = df.loc[i, prop_col]
+        property_values.append(prop_value)
+    
+    # Create graph with flexible property values
+    # Note: This assumes poly_smiles_to_graph function can handle variable number of properties
+    # If not, we may need to update that function as well
+    if property_count == 1:
+        graphs = poly_smiles_to_graph(poly_input, property_values[0], None, poly_input_nocan)
+    elif property_count == 2:
+        graphs = poly_smiles_to_graph(poly_input, property_values[0], property_values[1], poly_input_nocan)
+    else:
+        # For more than 2 properties, we need to modify the poly_smiles_to_graph function
+        # or create a flexible version
+        graphs = poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan)
+    
     #if string_format == "gbigsmileslike":
     #    poly_input_gbigsmileslike = df.loc[i, 'poly_chemprop_input_GbigSMILESlike']
     #    target_tokens = tokenize_poly_input_new(poly_input=poly_input_gbigsmileslike, tokenization=tokenization)
@@ -66,13 +104,17 @@ for i in range(len(df.loc[:, 'poly_chemprop_input'])):
     if i % 100 == 0:
         print(f"[{i} / {len(df.loc[:, 'poly_chemprop_input'])}]")
 
-# Create vocab file 
-make_vocab(target_tokens_list=target_tokens_list, vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt')
+# Create flexible file names that include property information
+property_suffix = "_".join(property_names)
+vocab_filename = f'poly_smiles_vocab_{augment}_{tokenization}_{property_suffix}.txt'
+graphs_filename = f'Graphs_list_{augment}_{tokenization}_{property_suffix}.pt'
 
+# Create vocab file with property suffix
+make_vocab(target_tokens_list=target_tokens_list, vocab_file=main_dir_path+'/data/'+vocab_filename)
 
 # convert the target_tokens_list to target_token_ids_list using the vocab file
 # load vocab dict (token:id)
-vocab = load_vocab(vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt')
+vocab = load_vocab(vocab_file=main_dir_path+'/data/'+vocab_filename)
 max_tgt_token_length = len(max(target_tokens_list, key=len))
 for tgt_tokens in target_tokens_list:
     tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=tgt_tokens, vocab=vocab, max_tgt_len=max_tgt_token_length)
@@ -84,8 +126,8 @@ for sample_idx, g in enumerate(Graphs_list):
     g.tgt_token_ids = target_tokens_ids_list[sample_idx]
     g.tgt_token_lens = target_tokens_lens_list[sample_idx]
 
-# Save graphs (and tgt token) data
-torch.save(Graphs_list, main_dir_path+'/data/Graphs_list_'+augment+'_'+tokenization+'.pt')
+# Save graphs (and tgt token) data with property suffix
+torch.save(Graphs_list, main_dir_path+'/data/'+graphs_filename)
 
 # Create training, self supervised and test sets
 
@@ -99,8 +141,8 @@ if augment == "original":
     stoichiometry_connectivity_combs = []
     for i in range(len(df.loc[:, 'poly_chemprop_input'])):
         poly_input = df.loc[i, 'poly_chemprop_input']
-        poly_label1 = df.loc[i, 'EA vs SHE (eV)']
-        poly_label2 = df.loc[i, 'IP vs SHE (eV)']
+        
+        # Property extraction is no longer needed here as we're just doing train/test split
         mon_combs.append(".".join(poly_input.split("|")[0].split('.')))
 
     mon_combs= list(set(mon_combs))
@@ -112,7 +154,7 @@ if augment == "original":
 
     
     #Go through graphs list and assign 
-    Graphs_list = torch.load(main_dir_path+'/data/Graphs_list_original'+'_'+tokenization+'.pt')
+    Graphs_list = torch.load(main_dir_path+'/data/'+graphs_filename)
     data_list_shuffle = random.sample(Graphs_list, len(Graphs_list))
     train_datalist=[]
     val_datalist=[]
@@ -130,8 +172,16 @@ if augment == "original":
     print(f'Number of test graphs: {len(test_datalist)}')
 
 if augment == "augmented":
-    Graphs_list = torch.load(main_dir_path+'/data/Graphs_list_original'+'_'+tokenization+'.pt')
-    Graphs_list_combined = torch.load(main_dir_path+'/data/Graphs_list_'+augment+'_'+tokenization+'.pt')
+    # Load original data with property suffix for consistency
+    original_graphs_file = f'Graphs_list_original_{tokenization}_{property_suffix}.pt'
+    try:
+        Graphs_list = torch.load(main_dir_path+'/data/'+original_graphs_file)
+    except FileNotFoundError:
+        # Fallback to old naming convention if new file doesn't exist
+        print(f"Warning: Could not find {original_graphs_file}, falling back to old naming convention")
+        Graphs_list = torch.load(main_dir_path+'/data/Graphs_list_original'+'_'+tokenization+'.pt')
+    
+    Graphs_list_combined = torch.load(main_dir_path+'/data/'+graphs_filename)
     org_polymers = Graphs_list_combined[:len(Graphs_list)]
     augm_polymers = Graphs_list_combined[len(Graphs_list):] 
     mon_combs=[]
@@ -211,17 +261,34 @@ for step, data in enumerate(train_loader):
 
 # %% Create Matrices needed for Message Passing
 
-
 # %% Create dictionary with bathed graphs and message passing matrices for supervised train set
 
+# Save with property suffix for consistency
 dict_train_loader = MP_Matrix_Creator(train_loader, device)
-torch.save(dict_train_loader, main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+torch.save(dict_train_loader, main_dir_path+f'/data/dict_train_loader_{augment}_{tokenization}_{property_suffix}.pt')
 dict_val_loader = MP_Matrix_Creator(val_loader, device)
-torch.save(dict_val_loader, main_dir_path+'/data/dict_val_loader_'+augment+'_'+tokenization+'.pt')
+torch.save(dict_val_loader, main_dir_path+f'/data/dict_val_loader_{augment}_{tokenization}_{property_suffix}.pt')
 dict_test_loader = MP_Matrix_Creator(test_loader, device)
-torch.save(dict_test_loader, main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
-
+torch.save(dict_test_loader, main_dir_path+f'/data/dict_test_loader_{augment}_{tokenization}_{property_suffix}.pt')
 
 print('Done')
+print(f'Saved data files with property suffix: {property_suffix}')
 
+# Note: You may also need to create a flexible version of poly_smiles_to_graph 
+# that can handle variable number of properties. Here's a suggested interface:
 
+def poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan=None):
+    """
+    Flexible version of poly_smiles_to_graph that can handle variable number of properties.
+    
+    Args:
+        poly_input: Polymer SMILES string
+        property_values: List of property values (can be any length)
+        poly_input_nocan: Non-canonical version (optional)
+    
+    Returns:
+        Graph object with flexible property attributes
+    """
+    # This function would need to be implemented in Function_Featurization_Own.py
+    # For now, it's a placeholder to indicate what's needed
+    pass

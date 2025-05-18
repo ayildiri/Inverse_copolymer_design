@@ -6,10 +6,34 @@ from copy import deepcopy
 from torch_geometric.data import Data
 import torch
 
-def poly_smiles_to_graph(poly_input, poly_label1, poly_label2, poly_input_nocan=None):
+def poly_smiles_to_graph(poly_input, poly_label1=None, poly_label2=None, poly_input_nocan=None, property_values=None):
     '''
     Turns adjusted polymer smiles string into PyG data objects
+    
+    Args:
+        poly_input: Polymer SMILES string
+        poly_label1: First property value (for backward compatibility)
+        poly_label2: Second property value (for backward compatibility)
+        poly_input_nocan: Non-canonical version (optional)
+        property_values: List of property values (new flexible approach)
+        
+    Returns:
+        PyG Data object with flexible property attributes
     '''
+
+    # Handle flexible property input
+    if property_values is not None:
+        # New flexible approach - use property_values list
+        if poly_label1 is not None or poly_label2 is not None:
+            print("Warning: Both property_values and individual labels provided. Using property_values.")
+        properties = property_values
+    else:
+        # Backward compatibility - use individual labels
+        properties = []
+        if poly_label1 is not None:
+            properties.append(poly_label1)
+        if poly_label2 is not None:
+            properties.append(poly_label2)
 
     # Turn into RDKIT mol object
     mol = (make_polymer_mol(poly_input.split("|")[0], 0, 0,  # smiles
@@ -222,11 +246,56 @@ def poly_smiles_to_graph(poly_input, poly_label1, poly_label2, poly_input_nocan=
         edge_attr_atom = torch.FloatTensor([f_bonds[bond] for bond in a2b[i]])
         edge_attr = torch.cat((edge_attr, edge_attr_atom), dim=0)
 
-    # create PyG Data object
-    graph = Data(x=X, edge_index=edge_index, edge_attr=edge_attr,
-                 y1=poly_label1, y2=poly_label2, monomer_smiles=monomer_smiles, 
-                 W_atoms=W_atoms, W_bonds=W_bonds, M_ensemble=M_ensemble, monomer_smiles_nocan=monomer_smiles_nocan)
+    # Create PyG Data object with flexible properties
+    graph_data = {
+        'x': X,
+        'edge_index': edge_index,
+        'edge_attr': edge_attr,
+        'monomer_smiles': monomer_smiles,
+        'W_atoms': W_atoms,
+        'W_bonds': W_bonds,
+        'M_ensemble': M_ensemble,
+        'monomer_smiles_nocan': monomer_smiles_nocan
+    }
+    
+    # Add properties dynamically
+    for i, prop_value in enumerate(properties):
+        if i == 0:
+            graph_data['y1'] = prop_value
+        elif i == 1:
+            graph_data['y2'] = prop_value
+        else:
+            # For properties beyond y2, use y3, y4, etc.
+            graph_data[f'y{i+1}'] = prop_value
+    
+    # Create the graph object
+    graph = Data(**graph_data)
 
     return graph
+
+
+# Legacy wrapper function for backward compatibility
+def poly_smiles_to_graph_legacy(poly_input, poly_label1, poly_label2, poly_input_nocan=None):
+    """
+    Legacy wrapper for backward compatibility.
+    Use poly_smiles_to_graph with property_values parameter for new code.
+    """
+    return poly_smiles_to_graph(poly_input, poly_label1, poly_label2, poly_input_nocan)
+
+
+# New flexible function for multiple properties
+def poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan=None):
+    """
+    Create polymer graph with flexible number of properties.
+    
+    Args:
+        poly_input: Polymer SMILES string
+        property_values: List of property values
+        poly_input_nocan: Non-canonical version (optional)
+    
+    Returns:
+        PyG Data object with flexible property attributes
+    """
+    return poly_smiles_to_graph(poly_input, None, None, poly_input_nocan, property_values)
 
 # %%

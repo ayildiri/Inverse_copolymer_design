@@ -66,6 +66,22 @@ parser.add_argument("--save_dir", type=str, default=None, help="Custom directory
 parser.add_argument("--checkpoint_every", type=int, default=200, help="Save checkpoint every N iterations")
 parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume from")
 parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+                    help="Names of the properties to optimize")
+parser.add_argument("--property_targets", type=float, nargs='+', default=None,
+                    help="Target values for each property (one per property)")
+parser.add_argument("--property_weights", type=float, nargs='+', default=None,
+                    help="Weights for each property in the objective function (one per property)")
+parser.add_argument("--property_objectives", type=str, nargs='+', default=None, 
+                    choices=["minimize", "maximize", "target"],
+                    help="Objective for each property: minimize, maximize, or target a specific value")
+parser.add_argument("--objective_type", type=str, default="EAmin",
+                    choices=["EAmin", "mimick_peak", "mimick_best", "max_gap", "custom"],
+                    help="Type of objective function to use (legacy option)")
+parser.add_argument("--custom_equation", type=str, default=None,
+                    help="Custom equation for objective function. Use 'p[i]' to reference property i. Example: '(1 + p[0] - p[1])*2'")
+parser.add_argument("--maximize_equation", action="store_true", 
+                    help="Maximize the custom equation instead of minimizing it")
 
 
 args = parser.parse_args()
@@ -113,18 +129,48 @@ if os.path.isfile(filepath):
     model.to(device)
     model.eval()
 
+# PropertyPrediction class - modified initialization
 class PropertyPrediction():
-    def __init__(self, model, nr_vars, objective_type):
+    def __init__(self, model, nr_vars, objective_type="EAmin", property_names=None, 
+                 property_targets=None, property_weights=None, property_objectives=None,
+                 custom_equation=None, maximize_equation=False):
         self.model_predictor = model
-        self.weight_electron_affinity = 1  # Adjust the weight for electron affinity
-        self.weight_ionization_potential = 1  # Adjust the weight for ionization potential
+        self.weight_electron_affinity = 1  # Legacy - weight for electron affinity
+        self.weight_ionization_potential = 1  # Legacy - weight for ionization potential
         self.weight_z_distances = 5  # Adjust the weight for distance between GA chosen z and reencoded z
         self.penalty_value = -10  # Adjust the weight for penalty of validity
         self.results_custom = {}
         self.nr_vars = nr_vars
         self.eval_calls = 0
         self.objective_type = objective_type
+        self.custom_equation = custom_equation
+        self.maximize_equation = maximize_equation
+        
+        # New flexible property configuration
+        self.property_names = property_names if property_names else ["EA", "IP"]
+        self.property_weights = property_weights if property_weights else [1.0] * len(self.property_names)
+        self.property_targets = property_targets
+        self.property_objectives = property_objectives if property_objectives else ["minimize"] * len(self.property_names)
+        
+        # Validate inputs
+        if self.property_weights and len(self.property_weights) != len(self.property_names):
+            raise ValueError("Number of property weights must match number of properties")
+        if self.property_targets and len(self.property_targets) != len(self.property_names):
+            raise ValueError("Number of property targets must match number of properties")
+        if self.property_objectives and len(self.property_objectives) != len(self.property_names):
+            raise ValueError("Number of property objectives must match number of properties")
+            
+        # Check that targets are provided for 'target' objectives
+        if self.property_objectives:
+            for i, obj in enumerate(self.property_objectives):
+                if obj == "target" and (not self.property_targets or self.property_targets[i] is None):
+                    raise ValueError(f"Target value must be provided for property {self.property_names[i]}")
+                    
+        # If using a custom equation, we need at least one property defined
+        if self.custom_equation and not property_names:
+            raise ValueError("Property names must be provided when using a custom equation")
 
+    
     def evaluate(self, **params):
         # Assuming x is a 1D array containing the 32 numerical parameters
 
@@ -148,27 +194,78 @@ class PropertyPrediction():
         expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan,np.nan] for val in list(validity)])
         expanded_z_p = np.array([z_p_after_encoding_valid.pop(0) if val == 1 else [0] * 32 for val in list(validity)])
         #print(x, expanded_z_p)
-        if self.objective_type=='EAmin':
-            obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-            obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1)
-        if self.objective_type=='mimick_peak':
-            obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
-            obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
-        if self.objective_type=='mimick_best':
-            obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
-            obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
-        if self.objective_type=='max_gap':
-            obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-            obj2 = - self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
-        #latent_inconsistency = np.linalg.norm(x.detach().numpy()-expanded_z_p)
-        #print(latent_inconsistency)
 
-        if validity[0]:
-            obj3=0
-            aggr_obj = -(obj1[0]+obj2[0]+obj3)#-latent_inconsistency
+        
+        # If using a custom equation
+        if self.objective_type == "custom" and self.custom_equation:
+            if validity[0]:
+                # Extract property values into a list
+                property_values = [expanded_y_p[~invalid_mask, i][0] for i in range(len(self.property_names))]
+                
+                # Create a safe evaluation environment
+                eval_locals = {'p': property_values, 'abs': abs, 'np': np, 'math': math}
+                
+                try:
+                    # Evaluate the custom equation with the property values
+                    equation_result = eval(self.custom_equation, {"__builtins__": {}}, eval_locals)
+                    
+                    # Apply maximization if requested
+                    if self.maximize_equation:
+                        equation_result = -equation_result
+                        
+                    aggr_obj = -equation_result  # The negative sign is because BO maximizes by default
+                except Exception as e:
+                    print(f"Error evaluating custom equation: {e}")
+                    aggr_obj = self.penalty_value
+            else:
+                aggr_obj = self.penalty_value
+        # If using legacy objective types, handle those
+        elif self.objective_type != "custom":
+            if self.objective_type=='EAmin':
+                obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
+                obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1)
+            elif self.objective_type=='mimick_peak':
+                obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
+                obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
+            elif self.objective_type=='mimick_best':
+                obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
+                obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
+            elif self.objective_type=='max_gap':
+                obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
+                obj2 = - self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
+            
+            if validity[0]:
+                obj3 = 0
+                aggr_obj = -(obj1[0] + obj2[0] + obj3)
+            else:
+                obj3 = self.penalty_value
+                aggr_obj = obj3
         else:
-            obj3 = self.penalty_value
-            aggr_obj = obj3#-latent_inconsistency
+            # New flexible property handling without custom equation
+            if validity[0]:
+                obj_values = []
+                
+                for i, prop_name in enumerate(self.property_names):
+                    prop_idx = i  # Index of the property in the predicted values
+                    
+                    if self.property_objectives[i] == "minimize":
+                        # For minimization, use the raw value
+                        obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
+                    elif self.property_objectives[i] == "maximize":
+                        # For maximization, negate the value
+                        obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
+                    elif self.property_objectives[i] == "target":
+                        # For targeting a specific value, use absolute difference
+                        obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
+                    
+                    # Apply the weight
+                    obj_value *= self.property_weights[i]
+                    obj_values.append(obj_value)
+                
+                # Sum up all objective components
+                aggr_obj = -sum(obj_values)
+            else:
+                aggr_obj = self.penalty_value
         
         # results
 
@@ -363,10 +460,29 @@ elif cutoff==0:
 
 opt_run = args.opt_run
 
-# Replace with:
+# Instantiating the PropertyPrediction class - updated
 nr_vars = 32
-objective_type='EAmin' # options: max_gap, EAmin, mimick_peak, mimick_best
-prop_predictor = PropertyPrediction(model, nr_vars, objective_type)
+
+# Get property configuration from arguments
+property_names = args.property_names
+property_targets = args.property_targets
+property_weights = args.property_weights
+property_objectives = args.property_objectives
+objective_type = args.objective_type
+custom_equation = args.custom_equation
+maximize_equation = args.maximize_equation
+
+prop_predictor = PropertyPrediction(
+    model, 
+    nr_vars, 
+    objective_type=objective_type,
+    property_names=property_names,
+    property_targets=property_targets,
+    property_weights=property_weights,
+    property_objectives=property_objectives,
+    custom_equation=custom_equation,
+    maximize_equation=maximize_equation
+)
 
 # Check if resuming from checkpoint
 start_iteration = 0

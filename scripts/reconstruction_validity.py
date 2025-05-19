@@ -1,20 +1,22 @@
+# %% Packages
 import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
 
+from model.G2S_clean import *
 from data_processing.data_utils import *
-from data_processing.rdkit_poly import *
-from data_processing.Smiles_enum_canon import SmilesEnumCanon
 
+import time
+from datetime import datetime
+import sys
+import random
+# deep learning packages
 import torch
-from rdkit import Chem
-from rdkit import DataStructs
-from rdkit.Chem.Fingerprints import FingerprintMols
-import pickle
 from statistics import mean
+import os
+import numpy as np
 import argparse
-from functools import partial
-
+import pickle
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -30,11 +32,10 @@ if device.type == 'cuda':
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
-parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
-parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
-parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
+parser.add_argument("--embedding_dim", type=int, help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -45,9 +46,29 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
+parser.add_argument("--batch_size", type=int, default=64, help="Batch size for testing")
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 
+# Add flexible property arguments
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+                    help="Names of the properties used in the model")
+parser.add_argument("--property_count", type=int, default=None,
+                    help="Number of properties (auto-detected from property_names if not specified)")
 
 args = parser.parse_args()
+
+# Handle property configuration
+property_names = args.property_names
+if args.property_count is not None:
+    property_count = args.property_count
+else:
+    property_count = len(property_names)
+
+# Validate that property count matches property names
+if len(property_names) != property_count:
+    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
+
+print(f"Testing model for {property_count} properties: {property_names}")
 
 seed = args.seed
 augment = args.augment #augmented or original
@@ -57,167 +78,236 @@ if args.add_latent ==1:
 elif args.add_latent ==0:
     add_latent=False
 
-dataset_type = "test"
-data_augment ="old"
-vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
-vocab = load_vocab(vocab_file=vocab_file)
+dataset_type = "train"
+data_augment = "old" # new or old
+dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
 
-# Directory to save results
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-dir_name = os.path.join(args.save_dir, model_name)
-if not os.path.exists(dir_name):
-    os.makedirs(dir_name)
+num_node_features = dict_train_loader['0'][0].num_node_features
+num_edge_features = dict_train_loader['0'][0].num_edge_features
 
-print(f'Validity check of validation set using inference decoding')
+# Include property info in model name
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
 
-with open(dir_name+'all_val_prediction_strings.pkl', 'rb') as f:
-    all_predictions=pickle.load(f)
-with open(dir_name+'all_val_real_strings.pkl', 'rb') as f:
-    all_real=pickle.load(f)
-# Remove all '_' from the strings (EOS token)
-all_predictions=[s.split('_', 1)[0] for s in all_predictions]
-all_real=[s.split('_', 1)[0] for s in all_real]
+# Updated path handling to use save_dir if provided
+if args.save_dir is not None:
+    filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+else:
+    filepath = os.path.join(main_dir_path, 'Checkpoints/', model_name, "model_best_loss.pt")
 
-
-with open(dir_name+'all_val_prediction_strings.txt', 'w') as f:
-    for s in all_predictions:
-        f.write(s+'\n')
-with open(dir_name+'all_val_real_strings.txt', 'w') as f:
-    for s in all_real:
-        f.write(s+'\n')
-
-# Canonicalize both the prediction and real string and check if they are the same
-sm_can = SmilesEnumCanon()
-all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
-all_real_can = list(map(sm_can.canonicalize, all_real))
-
-prediction_validityA = []
-prediction_validityB = []
-rec_A = []
-rec_B = []
-rec = []
-rec_stoich = []
-rec_con = []
-
-for s_r, s_p in zip(all_real, all_predictions):
-    #Both canonicalized strings are the same
-    if sm_can.canonicalize(s_r) == sm_can.canonicalize(s_p):
-        rec.append(True)
-        prediction_validityA.append(True)
-        prediction_validityB.append(True)
-        rec_A.append(True)
-        rec_B.append(True)
-        rec_stoich.append(True)
-        rec_con.append(True)
-    # check all the single elements
-    else:
-        rec.append(False)
-        if len(s_p.split("|")[0].split('.'))>1:
-            # only 2 monomers is considered valid 
-            monA_r_can=sm_can.canonicalize(s_r.split("|")[0].split('.')[0],monomer_only=True)
-            monB_r_can=sm_can.canonicalize(s_r.split("|")[0].split('.')[1],monomer_only=True)
-            monA_p_can=sm_can.canonicalize(s_p.split("|")[0].split('.')[0],monomer_only=True)
-            monB_p_can=sm_can.canonicalize(s_p.split("|")[0].split('.')[1],monomer_only=True)
-            # Monomer A
-            if not monA_p_can == 'invalid_monomer_string':
-                prediction_validityA.append(True)
-                if monA_p_can==monA_r_can:
-                    rec_A.append(True)
-                else: rec_A.append(False)
-            else:
-                prediction_validityA.append(False)
-                rec_A.append(False)
-            # Monomer B
-            if not monB_p_can == 'invalid_monomer_string':
-                prediction_validityB.append(True)
-                if monB_p_can==monB_r_can:
-                    rec_B.append(True)
-                else: rec_B.append(False)
-            else:
-                prediction_validityB.append(False)
-                rec_B.append(False)
-            # Stoichiometry
-            if s_p.split("|")[1:-1]==s_r.split("|")[1:-1]:
-                rec_stoich.append(True)
-            else: rec_stoich.append(False)
-            if s_p.split("<")[1:]==s_r.split("<")[1:]:
-                rec_con.append(True)
-            else: rec_con.append(False)
-        else: 
-            prediction_validityA.append(False)
-            prediction_validityB.append(False)
-            rec_A.append(False)
-            rec_B.append(False)
-            rec_stoich.append(False)
-            rec_con.append(False)
-
-# the following for loop only for datasets where monA and monB are not in the ordered position (canonicalized whole polymer strings)
-""" for s_r, s_p in zip(all_real_can, all_predictions_can):
-    if not s_p == "invalid_polymer_string":
-        #if the whole canonical string is the same then everything is correctly reconstructed
-        if s_r == s_p:
-            rec.append(True)
-            prediction_validityA.append(True)
-            prediction_validityB.append(True)
-            rec_A.append(True)
-            rec_B.append(True)
-            rec_stoich.append(True)
-            rec_con.append(True)
-
-        # check all the single elements
-        else:
-            prediction_validityA.append(True)
-            prediction_validityB.append(True)
-            if s_r.split("|")[0]==s_p.split("|")[0]:
-                rec_A.append(True)
-                rec_B.append(True)
-            else: 
-                monomerA_B_gen_p = [re.sub(r'\*\:\d+', '*:', s_p.split("|")[0].split('.')[0]), re.sub(r'\*\:\d+', '*:', s_p.split("|")[0].split('.')[1])]
-                monomerA_B_gen_r = [re.sub(r'\*\:\d+', '*:', s_r.split("|")[0].split('.')[0]), re.sub(r'\*\:\d+', '*:', s_r.split("|")[0].split('.')[1])]
-                matching_dict = {string: 1 if string in monomerA_B_gen_p else 0 for string in monomerA_B_gen_r}
-                matching = [matching_dict[key] for key in monomerA_B_gen_r]
-                if matching[0]:
-                    rec_A.append(True)
-                    rec_B.append(False)
-                elif matching[1]:
-                    rec_A.append(False)
-                    rec_B.append(True)
-                else: 
-                    rec_A.append(False)
-                    rec_B.append(False)
-            if s_p.split("|")[1:-1]==s_r.split("|")[1:-1]:
-                rec_stoich.append(True)
-            else: rec_stoich.append(False)
-            if s_p.split("<")[1:]==s_r.split("<")[1:]:
-                rec_con.append(True)
-            else: rec_con.append(False)
+if os.path.isfile(filepath):
+    if args.ppguided:
+        model_type = G2S_VAE_PPguided
     else: 
-        rec.append(False)
-        prediction_validityA.append(False)
-        prediction_validityB.append(False)
-        rec_A.append(False)
-        rec_B.append(False)
-        rec_stoich.append(False)
-        rec_con.append(False) """
+        model_type = G2S_VAE_PPguideddisabled
+
+    checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
+    model_config = checkpoint["model_config"]
+    
+    # Get property information from model config if available
+    model_property_count = model_config.get('property_count', 2)
+    model_property_names = model_config.get('property_names', ["EA", "IP"])
+    
+    # Validate that the specified properties match the model
+    if property_count != model_property_count:
+        print(f"Warning: Specified property count ({property_count}) doesn't match model property count ({model_property_count})")
+        print(f"Using model property count: {model_property_count}")
+        property_count = model_property_count
+    
+    if property_names != model_property_names:
+        print(f"Warning: Specified property names ({property_names}) don't match model property names ({model_property_names})")
+        print(f"Using model property names: {model_property_names}")
+        property_names = model_property_names
+    
+    print(f"Model trained for {property_count} properties: {property_names}")
+    
+    batch_size = model_config['batch_size']
+    hidden_dimension = model_config['hidden_dimension']
+    embedding_dimension = model_config['embedding_dim']
+    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    vocab = load_vocab(vocab_file=vocab_file)
+    
+    if model_config['loss']=="wce":
+        class_weights = token_weights(vocab_file)
+        class_weights = torch.FloatTensor(class_weights)
+        model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, loss_weights=class_weights, add_latent=add_latent)
+    else: 
+        model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, add_latent=add_latent)
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+
+    # Directory to save results - updated to use save_dir if provided
+    if args.save_dir is not None:
+        dir_name = os.path.join(args.save_dir, model_name)
+    else:
+        dir_name = os.path.join(main_dir_path, 'Checkpoints/', model_name)
         
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name)
 
-if len(rec)>0: 
-    rec_accuracy= sum(1 for entry in rec if entry) / len(rec)
-    rec_accuracyA = sum(1 for entry in rec_A if entry) / len(rec_A)
-    rec_accuracyB = sum(1 for entry in rec_B if entry) / len(rec_B)
-    rec_accuracy_stoich = sum(1 for entry in rec_stoich if entry) / len(rec_stoich)
-    rec_accuracy_con = sum(1 for entry in rec_con if entry) / len(rec_con)
+    def extract_properties_from_data(data):
+        """Extract property values from data object dynamically."""
+        properties = []
+        for i in range(property_count):
+            prop_attr = f'y{i+1}'
+            if hasattr(data, prop_attr):
+                properties.append(getattr(data, prop_attr).cpu().numpy())
+            else:
+                print(f"Warning: Property {prop_attr} not found in data")
+                properties.append(np.full(data.num_graphs, np.nan))
+        return properties
+
+    def run_forward_pass(data_loader, dataset_name):
+        """Run forward pass on dataset and extract results."""
+        print(f'\nRunning forward pass on {dataset_name} set')
+        
+        batches = list(range(len(data_loader)))
+        test_ce_losses = []
+        test_total_losses = []
+        test_kld_losses = []
+        test_accs = []
+        test_mses = []
+
+        model.eval()
+        model.beta = model_config['max_beta']
+        model.alpha = model_config['max_alpha']
+        
+        # Initialize lists for properties dynamically
+        latents = []
+        properties_real = [[] for _ in range(property_count)]  # List of lists for each property
+        y_p = []
+        monomers = []
+        stoichiometry = []
+        connectivity_pattern = []
+        
+        with torch.no_grad():
+            for i, batch in enumerate(batches):
+                # Limit to 500 batches for augmented train set to save time
+                if augment=='augmented' and dataset_name=='train': 
+                    if i>=500: 
+                        break
+                        
+                data = data_loader[str(batch)][0]
+                data.to(device)
+                dest_is_origin_matrix = data_loader[str(batch)][1]
+                dest_is_origin_matrix.to(device)
+                inc_edges_to_atom_matrix = data_loader[str(batch)][2]
+                inc_edges_to_atom_matrix.to(device)
+
+                # Check for NaNs in property labels
+                has_nan = False
+                for j in range(property_count):
+                    prop_attr = f'y{j+1}'
+                    if hasattr(data, prop_attr):
+                        if torch.isnan(getattr(data, prop_attr)).any():
+                            has_nan = True
+                            break
+                
+                if has_nan and dataset_name == 'test':
+                    print(f"⚠️ Skipping {dataset_name} batch {i} due to NaNs in labels.")
+                    continue
+
+                # Perform a single forward pass
+                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y_pred = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+                
+                # Check for NaN in outputs
+                if torch.isnan(recon_loss) or torch.isnan(loss) or torch.isnan(kl_loss) or torch.isnan(acc):
+                    print(f"⚠️ Skipping {dataset_name} batch {i} due to NaN in outputs")
+                    continue
+                
+                # Store results
+                latents.append(z.cpu().numpy())
+                y_p.append(y_pred.cpu().numpy())
+                
+                # Extract properties dynamically
+                prop_values = extract_properties_from_data(data)
+                for j, prop_val in enumerate(prop_values):
+                    properties_real[j].append(prop_val)
+                
+                # Extract monomers
+                if augment=="augmented_canonical":
+                    monomers.append(data.monomer_smiles_nocan)
+                else: 
+                    monomers.append(data.monomer_smiles)
+                
+                # Extract stoichiometry and connectivity
+                targ_list = target.tolist()
+                stoichiometry.extend(["|".join(combine_tokens(tokenids_to_vocab(targ_list_sub, vocab),tokenization=tokenization).split("|")[1:3]) for targ_list_sub in targ_list])
+                connectivity_pattern.extend([combine_tokens(tokenids_to_vocab(targ_list_sub, vocab), tokenization=tokenization).split("|")[-1].split(':')[1] for targ_list_sub in targ_list])
+                
+                # Store losses
+                test_ce_losses.append(recon_loss.item())
+                test_total_losses.append(loss.item())
+                test_kld_losses.append(kl_loss.item())
+                test_accs.append(acc.item())
+                test_mses.append(mse.item())
+
+        # Calculate average metrics
+        test_total = mean(test_total_losses) if test_total_losses else 0
+        test_kld = mean(test_kld_losses) if test_kld_losses else 0
+        test_acc = mean(test_accs) if test_accs else 0
+
+        # Concatenate results
+        latent_space = np.concatenate(latents, axis=0) if latents else np.array([])
+        y_p_all = np.concatenate(y_p, axis=0) if y_p else np.array([])
+        
+        # Concatenate properties dynamically
+        properties_all = []
+        for j in range(property_count):
+            if properties_real[j]:
+                prop_all = np.concatenate(properties_real[j], axis=0)
+                properties_all.append(prop_all)
+            else:
+                properties_all.append(np.array([]))
+
+        # Save results
+        print(f"Saving results for {dataset_name} set...")
+        
+        # Save common results
+        with open(os.path.join(dir_name, f'stoichiometry_{dataset_name}'), 'wb') as f:
+            pickle.dump(stoichiometry, f)
+        with open(os.path.join(dir_name, f'connectivity_{dataset_name}'), 'wb') as f:
+            pickle.dump(connectivity_pattern, f)
+        with open(os.path.join(dir_name, f'monomers_{dataset_name}'), 'wb') as f:
+            pickle.dump(monomers, f)
+        with open(os.path.join(dir_name, f'latent_space_{dataset_name}.npy'), 'wb') as f:
+            np.save(f, latent_space)
+        with open(os.path.join(dir_name, f'yp_all_{dataset_name}.npy'), 'wb') as f:
+            np.save(f, y_p_all)
+        
+        # Save properties dynamically (y1_all, y2_all, etc.)
+        for j, prop_all in enumerate(properties_all):
+            with open(os.path.join(dir_name, f'y{j+1}_all_{dataset_name}.npy'), 'wb') as f:
+                np.save(f, prop_all)
+        
+        print(f"{dataset_name.capitalize()}set: Total Loss: {test_total:.5f} | KLD: {test_kld:.5f} | ACC: {test_acc:.5f}")
+        
+        # Print data shapes for verification
+        print(f"Data shapes saved for {dataset_name}:")
+        print(f"  Latent space: {latent_space.shape}")
+        print(f"  Predictions: {y_p_all.shape}")
+        for j, prop_all in enumerate(properties_all):
+            print(f"  {property_names[j]} (y{j+1}): {prop_all.shape}")
+
+    # Run forward pass on training set
+    run_forward_pass(dict_train_loader, 'train')
+
+    # Run forward pass on test set
+    print('\n' + '='*60)
+    print('STARTING TEST')
+    print('='*60)
+    
+    dataset_type = "test"
+    dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+    run_forward_pass(dict_test_loader, 'test')
+
+    print('\n' + '='*60)
+    print('FORWARD PASS COMPLETED SUCCESSFULLY')
+    print('='*60)
+    print(f"Results saved to: {dir_name}")
+    print(f"Properties extracted: {property_names}")
+
 else: 
-    rec_accuracy = 0
-    rec_accuracyA = 0
-    rec_accuracyB = 0
-    rec_accuracy_stoich = 0
-    rec_accuracy_con = 0
-validityA = sum(1 for entry in prediction_validityA if entry) / len(prediction_validityA)
-validityB = sum(1 for entry in prediction_validityB if entry) / len(prediction_validityB)
-
-print(dir_name+'reconstruction_metrics.txt')
-with open(dir_name+'reconstruction_metrics.txt', 'w') as f:
-    f.write("Full rec: %.4f %% Rec MonA: %.4f %% Rec MonB: %.4f %% Rec Stoichiometry: %.4f %% Rec Conectivity: %.4f %%  " % (100*rec_accuracy, 100*rec_accuracyA, 100*rec_accuracyB, 100*rec_accuracy_stoich, 100*rec_accuracy_con))
-    f.write("Rec monomer A val: %.4f %% Rec monomer B val: %.4f %% "% (100*validityA, 100*validityB,))
-    f.write(str(len(rec)))
+    print("The model training diverged and there is no trained model file!")
+    print(f"Expected model file: {filepath}")

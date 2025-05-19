@@ -13,9 +13,6 @@ import argparse
 import random
 import numpy as np
 
-# lists
-all_predictions = []
-
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -29,9 +26,8 @@ if device.type == 'cuda':
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
 
 parser = argparse.ArgumentParser()
-
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
-parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
@@ -47,11 +43,30 @@ parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
 parser.add_argument("--save_dir", type=str, required=True, help="Path to save model and generated results")
 
-
+# Add flexible property arguments
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+                    help="Names of the properties used in the model")
+parser.add_argument("--property_count", type=int, default=None,
+                    help="Number of properties (auto-detected from property_names if not specified)")
+parser.add_argument("--save_properties", action="store_true",
+                    help="Save predicted properties of generated molecules")
 
 args = parser.parse_args()
-seed = args.seed
 
+# Handle property configuration
+property_names = args.property_names
+if args.property_count is not None:
+    property_count = args.property_count
+else:
+    property_count = len(property_names)
+
+# Validate that property count matches property names
+if len(property_names) != property_count:
+    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
+
+print(f"Loading model trained for {property_count} properties: {property_names}")
+
+seed = args.seed
 augment = args.augment #augmented or original
 tokenization = args.tokenization #oldtok or RT_tokenized
 if args.add_latent ==1:
@@ -59,18 +74,17 @@ if args.add_latent ==1:
 elif args.add_latent ==0:
     add_latent=False
 
-
 dataset_type = "test"
 data_augment = "old" # new or old
 dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
 
-
 num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
 
-# Load model
-# Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+# Include property info in model name
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
+
 filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
 
 if os.path.isfile(filepath):
@@ -78,19 +92,42 @@ if os.path.isfile(filepath):
         model_type = G2S_VAE_PPguided
     else: 
         model_type = G2S_VAE_PPguideddisabled
+        
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
+    
+    # Get property information from model config if available
+    model_property_count = model_config.get('property_count', 2)
+    model_property_names = model_config.get('property_names', ["EA", "IP"])
+    
+    # Validate that the specified properties match the model
+    if property_count != model_property_count:
+        print(f"Warning: Specified property count ({property_count}) doesn't match model property count ({model_property_count})")
+        print(f"Using model property count: {model_property_count}")
+        property_count = model_property_count
+        
+    if property_names != model_property_names:
+        print(f"Warning: Specified property names ({property_names}) don't match model property names ({model_property_names})")
+        print(f"Using model property names: {model_property_names}") 
+        property_names = model_property_names
+    
+    print(f"Model trained for {property_count} properties: {property_names}")
+    
     batch_size = model_config.get('batch_size', 64)
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
-    model_config["max_alpha"]=args.max_alpha
-    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    model_config["max_alpha"] = args.max_alpha
+    
+    vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
     vocab = load_vocab(vocab_file=vocab_file)
+    
     if model_config['loss']=="wce":
         class_weights = token_weights(vocab_file)
         class_weights = torch.FloatTensor(class_weights)
         model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, loss_weights=class_weights, add_latent=add_latent)
-    else: model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, add_latent=add_latent)
+    else: 
+        model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, add_latent=add_latent)
+    
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
 
@@ -99,36 +136,66 @@ if os.path.isfile(filepath):
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
+    print(f'📝 Results will be saved to: {dir_name}')
+    print(f'🎲 Generate random samples')
 
-    print(f'Generate random samples')
-
-    ### INFERENCE ###
+    ### RANDOM GENERATION ###
     torch.manual_seed(args.seed)
+    all_predictions = []
+    all_properties = [] if args.save_properties else None
+    
     with torch.no_grad():
-    ## generate samples from random noise
-    # only for first batch
         model.eval()
         for i in range(250):
-            z_rand = torch.randn((64,embedding_dimension), device=device)*args.epsilon
-            print(z_rand.shape)
+            z_rand = torch.randn((64, embedding_dimension), device=device) * args.epsilon
             predictions_rand, _, _, z, y = model.inference(data=z_rand, device=device, sample=False, log_var=None)
-            print('Generated batch %d/250'%i)
-            # save predicitons of first validation batch in text file
+            print(f'Generated batch {i+1}/250')
+            
+            # Convert predictions to strings
             prediction_strings = [combine_tokens(tokenids_to_vocab(predictions_rand[sample][0].tolist(), vocab), tokenization=tokenization).split('_')[0] for sample in range(len(predictions_rand))]
             all_predictions.extend(prediction_strings)
+            
+            # Save property predictions if requested
+            if args.save_properties:
+                if torch.is_tensor(y):
+                    properties_batch = y.cpu().numpy()
+                    all_properties.extend(properties_batch)
    
-    with open(dir_name+'generated_polymers.pkl', 'wb') as f:
+    # Save random generation results
+    with open(os.path.join(dir_name, 'generated_polymers.pkl'), 'wb') as f:
         pickle.dump(all_predictions, f)
+    print(f"✅ Saved {len(all_predictions)} random generations to generated_polymers.pkl")
+    
+    if args.save_properties and all_properties:
+        all_properties = np.array(all_properties)
+        with open(os.path.join(dir_name, 'generated_polymers_properties.npy'), 'wb') as f:
+            np.save(f, all_properties)
+        print(f"✅ Saved properties of generated polymers: {all_properties.shape}")
+        
+        # Save property summary
+        with open(os.path.join(dir_name, 'generated_polymers_property_summary.txt'), 'w') as f:
+            f.write(f"Property Summary for {len(all_predictions)} Generated Polymers\n")
+            f.write("="*60 + "\n\n")
+            f.write(f"Properties: {property_names}\n\n")
+            for i, prop_name in enumerate(property_names):
+                prop_values = all_properties[:, i]
+                f.write(f"{prop_name}:\n")
+                f.write(f"  Mean: {np.mean(prop_values):.4f}\n")
+                f.write(f"  Std:  {np.std(prop_values):.4f}\n")
+                f.write(f"  Min:  {np.min(prop_values):.4f}\n")
+                f.write(f"  Max:  {np.max(prop_values):.4f}\n\n")
 
-    ## generate samples around seed molecule
-
+    ### SEED-BASED GENERATION ###
+    print(f'🌱 Generate samples around seed molecule')
+    
     all_predictions_seed = []
+    all_properties_seed = [] if args.save_properties else None
+    
     batches = list(range(len(dict_test_loader)))
-    #randomly select batch
     random.seed(args.seed)
     batch = random.choice(batches)
+    
     with torch.no_grad():
-    # only for first batch
         model.eval()
 
         data = dict_test_loader[str(batch)][0]
@@ -137,74 +204,83 @@ if os.path.isfile(filepath):
         dest_is_origin_matrix.to(device)
         inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
         inc_edges_to_atom_matrix.to(device)
+        
         _, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
-        #seed_strings = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab),tokenization=tokenization) for ind in range(64)]
-        #print(seed_strings)
-        # randomly select a seed molecule
+        
+        # Randomly select a seed molecule
         ind = random.choice(list(range(64)))
         seed_z = z[ind]
-        print(seed_z)
-        seed_z = seed_z.unsqueeze(0).repeat(64,1)
-        print(seed_z[0])
+        seed_z = seed_z.unsqueeze(0).repeat(64, 1)
+        seed_string = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab), tokenization=tokenization)
+        
+        print(f"🌱 Seed molecule: {seed_string}")
+        
         sampled_z = []
         for r in range(8):
             # Define the mean and standard deviation of the Gaussian noise
             mean = 0
-            std = args.epsilon/2 #half of epsilon
+            std = args.epsilon / 2  # half of epsilon
+            
             # Create a tensor of the same size as the original tensor with random noise
-            print(seed_z)
-            print(seed_z.size())
             noise = torch.tensor(np.random.normal(mean, std, size=seed_z.size()), dtype=torch.float, device=device)
 
             # Add the noise to the original tensor
             seed_z_noise = seed_z + noise
             sampled_z.append(seed_z_noise.cpu().numpy())
-            predictions_seed, _, _, z, y = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
+            
+            predictions_seed, _, _, z_new, y_new = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
             prediction_strings = [combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions_seed))]
             all_predictions_seed.extend(prediction_strings)
-            seed_string = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab),tokenization=tokenization)
+            
+            # Save property predictions if requested
+            if args.save_properties and torch.is_tensor(y_new):
+                properties_batch = y_new.cpu().numpy()
+                all_properties_seed.extend(properties_batch)
 
+    # Save seed-based generation results
+    print(f'💾 Saving generated strings around seed molecule')
+    
+    with open(os.path.join(dir_name, 'seed_polymer.txt'), 'w') as f:
+        f.write(f'Seed molecule: {seed_string}\n')
+        f.write(f'Properties: {property_names}\n')
 
-    print(f'Saving generated strings')
-
-    #with open(dir_name+'generated_polymers.pkl', 'wb') as f:
-    #    pickle.dump(all_predictions, f)
-    with open(dir_name+'seed_polymer.txt', 'w') as f:
-        f.write('%s'%seed_string)
-
-    #with open(dir_name+'generated_polymers.pkl', 'wb') as f:
-    #    pickle.dump(all_predictions, f)
-    with open(dir_name+'seed_polymers_noise'+str(std)+'.txt', 'w') as f:
-        f.write("Seed molecule: %s " %seed_string)
+    std = args.epsilon / 2
+    with open(os.path.join(dir_name, f'seed_polymers_noise{std:.4f}.txt'), 'w') as f:
+        f.write(f"Seed molecule: {seed_string}\n")
+        f.write(f"Properties: {property_names}\n")
         f.write("The following are the generations from seed (mean) with noise\n")
-        for s in all_predictions_seed:
-            f.write(f"{s}\n")
-    with open(dir_name+'seed_polymers_latents_noise'+str(std)+'.npy', 'wb') as f:
-        print(sampled_z)
+        for i, s in enumerate(all_predictions_seed):
+            f.write(f"{i+1}: {s}\n")
+            
+    with open(os.path.join(dir_name, f'seed_polymers_latents_noise{std:.4f}.npy'), 'wb') as f:
         sampled_z = np.stack(sampled_z)
-        #print(sampled_z)
         np.save(f, sampled_z)
-    with open(dir_name+'seed_polymer_z.npy', 'wb') as f:
-        seed_z = seed_z.cpu().numpy()
-        np.save(f, seed_z)
-    with open(dir_name+'generated_polymers_from_seed_noise'+str(std)+'.pkl', 'wb') as f:
+        
+    with open(os.path.join(dir_name, 'seed_polymer_z.npy'), 'wb') as f:
+        seed_z_original = seed_z.cpu().numpy()
+        np.save(f, seed_z_original)
+        
+    with open(os.path.join(dir_name, f'generated_polymers_from_seed_noise{std:.4f}.pkl'), 'wb') as f:
         pickle.dump(all_predictions_seed, f)
+        
+    print(f"✅ Saved {len(all_predictions_seed)} seed-based generations")
+    
+    if args.save_properties and all_properties_seed:
+        all_properties_seed = np.array(all_properties_seed)
+        with open(os.path.join(dir_name, f'seed_polymers_properties_noise{std:.4f}.npy'), 'wb') as f:
+            np.save(f, all_properties_seed)
+        print(f"✅ Saved properties of seed-based generations: {all_properties_seed.shape}")
 
-
-    #Interpolation
-    ## generate samples interpolated between two seed molecules
-    dataset_type = "train"
-    data_augment = "old" # new or old
-    dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
-
-
-    all_predictions_interp = []
-    batches = list(range(len(dict_test_loader)))
-    #randomly select batch
+    ### INTERPOLATION ###
+    print(f'🔄 Generate interpolated samples between molecules')
+    
+    all_predictions_interp_all = []
+    all_properties_interp_all = [] if args.save_properties else None
+    
     random.seed(args.seed)
     batch = random.choice(batches)
+    
     with torch.no_grad():
-    # only for first batch
         model.eval()
 
         data = dict_test_loader[str(batch)][0]
@@ -213,47 +289,86 @@ if os.path.isfile(filepath):
         dest_is_origin_matrix.to(device)
         inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
         inc_edges_to_atom_matrix.to(device)
+        
         _, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
-        #seed_strings = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab),tokenization=tokenization) for ind in range(64)]
-        #print(seed_strings)
-        # randomly select a seed molecule
         
         examples = 10
         for e in range(examples):
             all_predictions_interp = []
+            all_properties_interp = [] if args.save_properties else None
+            
+            # Randomly select two different molecules
             ind1 = random.choice(list(range(64)))
             ind2 = random.choice(list(range(64)))
-            assert not (ind1==ind2)
-            start_mol = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind1], vocab),tokenization=tokenization)
-            end_mol = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind2], vocab),tokenization=tokenization)
-            print(z.shape)
+            while ind1 == ind2:  # Ensure they're different
+                ind2 = random.choice(list(range(64)))
+                
+            start_mol = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind1], vocab), tokenization=tokenization)
+            end_mol = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind2], vocab), tokenization=tokenization)
+            
             seed_z1 = z[ind1]
             seed_z2 = z[ind2]
-            print(start_mol, end_mol)
+            
+            print(f"🔄 Interpolation {e+1}/10: {start_mol} ↔ {end_mol}")
 
             # Number of steps for interpolation
             num_steps = 10
 
             # Calculate the step size for each dimension
-            step_sizes = (seed_z2 - seed_z1) / (num_steps + 1)  # Adding 1 to include the endpoints
+            step_sizes = (seed_z2 - seed_z1) / (num_steps + 1)
 
             # Generate interpolated vectors
             interpolated_vectors = [seed_z1 + i * step_sizes for i in range(1, num_steps + 1)]
 
             # Include the endpoints
-            interpolated_vectors = torch.stack([seed_z1]+ interpolated_vectors+ [seed_z2])
+            interpolated_vectors = torch.stack([seed_z1] + interpolated_vectors + [seed_z2])
 
-            # Display the interpolated vectors
+            # Generate molecules for each interpolated vector
             for s in range(interpolated_vectors.shape[0]):
-                prediction_interp, _, _, _, y = model.inference(data=interpolated_vectors[s], device=device, sample=False, log_var=None)
+                prediction_interp, _, _, _, y_interp = model.inference(data=interpolated_vectors[s], device=device, sample=False, log_var=None)
                 prediction_string = combine_tokens(tokenids_to_vocab(prediction_interp[0][0].tolist(), vocab), tokenization=tokenization)
                 all_predictions_interp.append(prediction_string)
+                
+                # Save property predictions if requested
+                if args.save_properties and torch.is_tensor(y_interp):
+                    property_values = y_interp.cpu().numpy()
+                    all_properties_interp.append(property_values)
 
-            with open(dir_name+'interpolated_polymers_example'+str(e)+'.txt', 'w') as f:
-                f.write("Molecule1: %s \n" %start_mol)
-                f.write("Molecule2: %s \n" %end_mol)
-                f.write("The following are the stepwise interpolated molecules\n")
-                for s in all_predictions_interp:
-                    f.write(f"{s}\n")
+            # Save interpolation results for this example
+            with open(os.path.join(dir_name, f'interpolated_polymers_example{e}.txt'), 'w') as f:
+                f.write(f"Properties: {property_names}\n")
+                f.write(f"Molecule1: {start_mol}\n")
+                f.write(f"Molecule2: {end_mol}\n")
+                f.write("The following are the stepwise interpolated molecules:\n")
+                for s, mol in enumerate(all_predictions_interp):
+                    f.write(f"Step {s}: {mol}\n")
+                    
+            all_predictions_interp_all.extend(all_predictions_interp)
+            if args.save_properties and all_properties_interp:
+                all_properties_interp_all.extend(all_properties_interp)
 
-else: print("The model training diverged and there are is no trained model file!")
+    print(f"✅ Saved {examples} interpolation examples with {len(all_predictions_interp_all)} total interpolated molecules")
+    
+    if args.save_properties and all_properties_interp_all:
+        all_properties_interp_all = np.array(all_properties_interp_all)
+        with open(os.path.join(dir_name, 'interpolated_polymers_properties.npy'), 'wb') as f:
+            np.save(f, all_properties_interp_all)
+        print(f"✅ Saved properties of interpolated molecules: {all_properties_interp_all.shape}")
+
+    # Final summary
+    print('\n' + '='*60)
+    print('🎉 GENERATION COMPLETED SUCCESSFULLY')
+    print('='*60)
+    print(f"📊 Generation Summary:")
+    print(f"  Random generations: {len(all_predictions)}")
+    print(f"  Seed-based generations: {len(all_predictions_seed)}")
+    print(f"  Interpolated molecules: {len(all_predictions_interp_all)}")
+    print(f"  Total molecules generated: {len(all_predictions) + len(all_predictions_seed) + len(all_predictions_interp_all)}")
+    print(f"📁 Results saved to: {dir_name}")
+    if args.save_properties:
+        print(f"🔬 Property predictions saved for all generated molecules")
+        print(f"📋 Properties: {property_names}")
+
+else: 
+    print("❌ The model training diverged and there is no trained model file!")
+    print(f"Expected model file: {filepath}")

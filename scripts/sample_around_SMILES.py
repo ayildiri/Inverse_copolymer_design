@@ -1,194 +1,309 @@
-# %% Packages
-import sys, os
-main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(main_dir_path)
-
-from model.G2S_clean import *
-from data_processing.data_utils import *
-from data_processing.Function_Featurization_Own import poly_smiles_to_graph
-
-# deep learning packages
-import torch
-from torch_geometric.loader import DataLoader
-import pickle
-import argparse
-import random
+from rdkit import Chem
+from rdkit.Chem import Draw
+from rdkit.Chem.Draw import rdMolDraw2D
+from rdkit.Chem import AllChem
+import matplotlib.pyplot as plt
 import numpy as np
+from rdkit.Chem import Draw
+from math import ceil
+import ast
+import argparse
+import json
+import os
+import re
+import glob
 
 
-all_predictions = []
+# Function to create a placeholder image with Matplotlib
+def create_placeholder_image(size=(200, 200), text="Invalid"):
+    fig, ax = plt.subplots(figsize=(size[0]/100, size[1]/100), dpi=100)
+    ax.text(0.5, 0.5, text, fontsize=20, ha='center', va='center')
+    ax.axis('off')
+    fig.canvas.draw()
+    
+    # Convert the plot to an image
+    image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+    image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    
+    plt.close(fig)
+    return image
 
-# setting device on GPU if available, else CPU
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print('Using device:', device)
-print()
+# Function to convert SMILES to image or placeholder if invalid
+def smiles_to_image(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        return Draw.MolToImage(mol)
+    else:
+        return None
 
-# Additional Info when using cuda
-if device.type == 'cuda':
-    print(torch.cuda.get_device_name(0))
-    print('Memory Usage:')
-    print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3, 1), 'GB')
-    print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
+def parse_filename_for_properties(filename):
+    """Extract property information from filename if available."""
+    # Try to extract property info from filename pattern like:
+    # top20_mols_EAmin_props=EA_IP_-0.05.txt
+    # top20_mols_custom_props=ThermalCond_MechStrength_-0.05.txt
+    
+    # Pattern with property names
+    match_with_props = re.search(r"top20_mols_([A-Za-z0-9]+)_props=([A-Za-z0-9_]+)_(-?\d+\.?\d*)", filename)
+    if match_with_props:
+        objective_type = match_with_props.group(1)
+        property_names = match_with_props.group(2).split('_')
+        cutoff = match_with_props.group(3)
+        return objective_type, property_names, cutoff
+    
+    # Legacy pattern without explicit property names - assume EA/IP
+    match_legacy = re.search(r"top20_mols_(-?\d+\.?\d*)", filename)
+    if match_legacy:
+        objective_type = "EAmin"  # Default for backward compatibility
+        property_names = ["EA", "IP"]
+        cutoff = match_legacy.group(1)
+        return objective_type, property_names, cutoff
+    
+    return None, None, None
 
+def calculate_legacy_objective(property_values, objective_type):
+    """Calculate objective value for legacy EA/IP objectives."""
+    if len(property_values) < 2:
+        return sum(abs(val) for val in property_values)
+    
+    val_EA, val_IP = property_values[0], property_values[1]
+    
+    if objective_type == 'mimick_peak':
+        return abs(val_EA + 2.0) + abs(val_IP - 1.2)
+    elif objective_type == 'mimick_best':
+        return abs(val_EA + 2.64) + abs(val_IP - 1.61)
+    elif objective_type == 'EAmin':
+        return val_EA + abs(val_IP - 1.0)
+    elif objective_type == 'max_gap':
+        return val_EA - val_IP
+    else:
+        # For unknown objectives, just return the sum
+        return sum(abs(val) for val in property_values)
+
+def format_property_display(property_names, property_values):
+    """Format property values for display."""
+    lines = []
+    for i, (name, value) in enumerate(zip(property_names, property_values)):
+        if name in ["EA", "IP"]:
+            # Add units for known properties
+            lines.append(f"{name} (eV): {value:.3f}")
+        else:
+            # Use generic formatting for other properties
+            lines.append(f"{name}: {value:.3f}")
+    return "\n".join(lines)
+
+# Parse command line arguments
 parser = argparse.ArgumentParser()
-parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
-parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
-parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
-parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
-parser.add_argument("--loss", default="ce", choices=["ce","wce"])
-parser.add_argument("--AE_Warmup", default=False, action='store_true')
-parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--initialization", default="random", choices=["random"])
-parser.add_argument("--add_latent", type=int, default=1)
-parser.add_argument("--ppguided", type=int, default=0)
-parser.add_argument("--dec_layers", type=int, default=4)
-parser.add_argument("--max_beta", type=float, default=0.1)
-parser.add_argument("--max_alpha", type=float, default=0.1)
-parser.add_argument("--epsilon", type=float, default=1)
-
-
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+                    help="Names of the properties")
+parser.add_argument("--results_path", type=str, default=".",
+                    help="Path to results directory")
+parser.add_argument("--file_pattern", type=str, default="top20_mols_*.txt",
+                    help="File pattern to search for")
+parser.add_argument("--input_file", type=str, default=None,
+                    help="Specific input file (overrides file_pattern)")
+parser.add_argument("--grid_x", type=int, default=2, help="Grid size in x direction")
+parser.add_argument("--grid_y", type=int, default=5, help="Grid size in y direction")
+parser.add_argument("--output_prefix", type=str, default="optimal_mols_BO",
+                    help="Output file prefix")
 
 args = parser.parse_args()
-seed = args.seed
 
-augment = args.augment #augmented or original
-tokenization = args.tokenization #oldtok or RT_tokenized
-if args.add_latent ==1:
-    add_latent=True
-elif args.add_latent ==0:
-    add_latent=False
+classes_stoich = [['0.5','0.5'],['0.25','0.75'],['0.75','0.25']]
+classes_con = ['<1-3:0.25:0.25<1-4:0.25:0.25<2-3:0.25:0.25<2-4:0.25:0.25<1-2:0.25:0.25<3-4:0.25:0.25<1-1:0.25:0.25<2-2:0.25:0.25<3-3:0.25:0.25<4-4:0.25:0.25','<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5','<1-2:0.375:0.375<1-1:0.375:0.375<2-2:0.375:0.375<3-4:0.375:0.375<3-3:0.375:0.375<4-4:0.375:0.375<1-3:0.125:0.125<1-4:0.125:0.125<2-3:0.125:0.125<2-4:0.125:0.125']
 
+labels_stoich = {'0.5|0.5':'1:1','0.25|0.75':'1:3','0.75|0.25':'3:1'}
+labels_con = {'0.5':'A','0.25':'R','0.375':'B'}
 
-dataset_type = "test"
-data_augment = "old" # new or old
-dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+smiles_list = []
+stoich_con_list = []
+obj_val_list = []
+property_lists = [[] for _ in args.property_names]  # Dynamic list for each property
+poly_strings = []
 
+scaling_factor = 1.0
 
-num_node_features = dict_test_loader['0'][0].num_node_features
-num_edge_features = dict_test_loader['0'][0].num_edge_features
+# Determine input file
+if args.input_file:
+    # Use specific file if provided
+    if os.path.exists(args.input_file):
+        input_files = [args.input_file]
+    else:
+        print(f"Error: Specified file {args.input_file} not found!")
+        exit(1)
+else:
+    # Search for files using pattern
+    search_path = os.path.join(args.results_path, args.file_pattern)
+    input_files = glob.glob(search_path)
+    
+    if not input_files:
+        # Fallback to legacy filename
+        legacy_file = os.path.join(args.results_path, 'top20_mols_-0.05.txt')
+        if os.path.exists(legacy_file):
+            input_files = [legacy_file]
+        else:
+            print(f"Error: No files found matching pattern {search_path}")
+            exit(1)
 
-# Load model
-# Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
-filepath = os.path.join(main_dir_path,'Checkpoints/', model_name,"model_best_loss.pt")
-if os.path.isfile(filepath):
-    if args.ppguided:
-        model_type = G2S_VAE_PPguided
-    else: 
-        model_type = G2S_VAE_PPguideddisabled
-    checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
-    model_config = checkpoint["model_config"]
-    model_config["max_alpha"]=args.max_alpha
-    batch_size = model_config['batch_size']
-    hidden_dimension = model_config['hidden_dimension']
-    embedding_dimension = model_config['embedding_dim']
-    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
-    vocab = load_vocab(vocab_file=vocab_file)
-    if model_config['loss']=="wce":
-        class_weights = token_weights(vocab_file)
-        class_weights = torch.FloatTensor(class_weights)
-        model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, loss_weights=class_weights, add_latent=add_latent)
-    else: model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, add_latent=add_latent)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.to(device)
-
-    # Directory to save results
-    dir_name=  os.path.join(main_dir_path,'Checkpoints/', model_name)
-    if not os.path.exists(dir_name):
-        os.makedirs(dir_name)
-
-
-    ## generate samples around seed molecule with specified polymer SMILES
-    data_list = []
-    seed_smiles = "[*:1]c1ccc2c(c1)S(=O)(=O)c1cc([*:2])ccc1-2.[*:3]c1cccc2c1sc1c([*:4])cccc12|0.5|0.5|<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5"# "[*:1]c1ccc([*:2])cc1.[*:3]c1cc(C)c([*:4])cc1C|0.5|0.5|<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5" #
-    g = poly_smiles_to_graph(seed_smiles, np.nan, np.nan, None)
-    target_tokens = tokenize_poly_input_RTlike(poly_input=seed_smiles)
-    tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
-    g.tgt_token_ids = tgt_token_ids
-    g.tgt_token_lens = tgt_lens
-    g.to(device)
-    data_list.append(g)
-    data_loader = DataLoader(dataset=data_list, batch_size=64, shuffle=False)
-    dict_data_loader1 = MP_Matrix_Creator(data_loader, device)
-
-    data_list = []
-    seed_smiles_2 = "[*:1]c1ccc2c(c1)C(=C(C#N)C#N)c1cc([*:2])ccc1-2.[*:3]c1cc([*:4])cc(C(C)C)c1N|0.75|0.25|<1-2:0.375:0.375<1-1:0.375:0.375<2-2:0.375:0.375<3-4:0.375:0.375<3-3:0.375:0.375<4-4:0.125:0.125<1-3:0.125:0.125<1-4:0.125:0.125<2-3:0.125:0.125<2-4:0.125:0.125"#"[*:1]c1ccc2c(c1)S(=O)(=O)c1cc([*:2])ccc1-2.[*:3]c1ccc2c3ccc([*:4])cc3c3ccccc3c2c1|0.5|0.5|<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5" # Second best polymer from Bai et. al paper
-    g = poly_smiles_to_graph(seed_smiles_2, np.nan, np.nan, None)
-    target_tokens = tokenize_poly_input_RTlike(poly_input=seed_smiles_2)
-    tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
-    g.tgt_token_ids = tgt_token_ids
-    g.tgt_token_lens = tgt_lens
-    g.to(device)
-    data_list.append(g)
-    data_loader = DataLoader(dataset=data_list, batch_size=64, shuffle=False)
-    dict_data_loader2 = MP_Matrix_Creator(data_loader, device)
-    dict_data_loaders = [dict_data_loader1,dict_data_loader2]
-
-    seed_literature_zs = []
-    for seednr, dict_data_loader in enumerate(dict_data_loaders):
-        all_predictions_seed = []
-        with torch.no_grad():
-        # only for first batch
-            model.eval()
-
-            data = dict_data_loader["0"][0]
-            data.to(device)
-            dest_is_origin_matrix = dict_data_loader["0"][1]
-            dest_is_origin_matrix.to(device)
-            inc_edges_to_atom_matrix = dict_data_loader["0"][2]
-            inc_edges_to_atom_matrix.to(device)
-            _, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
-            #seed_strings = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab),tokenization=tokenization) for ind in range(64)]
-            #print(seed_strings)
-            # randomly select a seed molecule
-            seed_z = z[0]
-            seed_literature_zs.append(seed_z)
-            print(seed_z)
-            seed_z = seed_z.unsqueeze(0).repeat(64,1)
-            print(seed_z[0])
-            sampled_z = []
-            for r in range(8):
-                # Define the mean and standard deviation of the Gaussian noise
-                mean = 0
-                std = args.epsilon/2 #stay close  of epsilon
-                # Create a tensor of the same size as the original tensor with random noise
-                print(seed_z)
-                print(seed_z.size())
-                noise = torch.tensor(np.random.normal(mean, std, size=seed_z.size()), dtype=torch.float, device=device)
-
-                # Add the noise to the original tensor
-                seed_z_noise = seed_z + noise
-                sampled_z.append(seed_z_noise.cpu().numpy())
-                predictions_seed, _, _, z, y = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
-                prediction_strings = [combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions_seed))]
-                all_predictions_seed.extend(prediction_strings)
-                seed_string = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[0], vocab),tokenization=tokenization)
-
-
-        print(f'Saving generated strings')
+# Process files
+for filepath in input_files:
+    filename = os.path.basename(filepath)
+    
+    # Extract information from filename
+    objective_type, file_property_names, cutoff = parse_filename_for_properties(filename)
+    
+    # Use property names from file if available, otherwise use command line args
+    if file_property_names:
+        property_names = file_property_names
+    else:
+        property_names = args.property_names
+    
+    print(f"Processing file: {filename}")
+    print(f"Objective: {objective_type}, Properties: {property_names}")
+    
+    with open(filepath, 'r') as file:
+        lines = file.readlines()
+        mols_dict = ast.literal_eval(lines[0])
+        line2 = re.sub(r'tensor\(([^)]+)\)', r'\1', lines[1])
+        props_dict = ast.literal_eval(line2)
         
-        #with open(dir_name+'generated_polymers.pkl', 'wb') as f:
-        #    pickle.dump(all_predictions, f)
-        with open(dir_name+'seed'+str(seednr)+'_literature.txt', 'w') as f:
-            f.write('%s'%seed_string)
+        for iteration, poly_string in mols_dict.items():
+            if not poly_string in poly_strings:
+                smiles = poly_string.split("|")[0]
+                con = poly_string.split("|")[-1].split(':')[1]
+                stoich = "|".join(poly_string.split("|")[1:3])
+                stoich_con_list.append("".join([labels_stoich[stoich], ' ', labels_con[con]]))
+                smiles_list.append(smiles)
+                
+                # Extract property values dynamically
+                property_values = []
+                try:
+                    prop_data = props_dict[iteration]
+                    print(f"Debug: prop_data for iteration {iteration}: {prop_data}")
+                    
+                    # Handle different data formats - sometimes properties might be at different indices
+                    for i in range(len(property_names)):
+                        if i < len(prop_data):
+                            property_values.append(float(prop_data[i]))
+                            property_lists[i].append(float(prop_data[i]))
+                        else:
+                            # Handle missing properties
+                            property_values.append(0.0)
+                            property_lists[i].append(0.0)
+                    
+                    # Calculate objective value
+                    if objective_type in ['mimick_peak', 'mimick_best', 'EAmin', 'max_gap']:
+                        # Legacy EA/IP objectives
+                        val_obj = calculate_legacy_objective(property_values, objective_type)
+                    else:
+                        # For custom objectives or unknown types, use sum of absolute values
+                        val_obj = sum(abs(val) for val in property_values)
+                    
+                    obj_val_list.append(round(val_obj, 3))
+                    
+                except (ValueError, IndexError) as e:
+                    print(f"Warning: Error processing properties for iteration {iteration}: {e}")
+                    # Add default values
+                    for i in range(len(property_names)):
+                        property_lists[i].append(0.0)
+                    obj_val_list.append(0.0)
+                
+                poly_strings.append(poly_string)
 
-        #with open(dir_name+'generated_polymers.pkl', 'wb') as f:
-        #    pickle.dump(all_predictions, f)
-        with open(dir_name+'seed'+str(seednr)+'_literature_polymers_noise'+str(std)+'.txt', 'w') as f:
-            f.write("Seed molecule: %s " %seed_string)
-            f.write("The following are the generations from seed (mean) with noise\n")
-            for s in all_predictions_seed:
-                f.write(f"{s}\n")
-        with open(dir_name+'seed'+str(seednr)+'_literature_polymers_latents_noise'+str(std)+'.npy', 'wb') as f:
-            print(sampled_z)
-            sampled_z = np.stack(sampled_z)
-            #print(sampled_z)
-            np.save(f, sampled_z)
-        with open(dir_name+'seed'+str(seednr)+'_literature_polymer_z.npy', 'wb') as f:
-            seed_z = seed_z.cpu().numpy()
-            np.save(f, seed_z)
-        with open(dir_name+'generated_polymers_from_seed'+str(seednr)+'_literature_noise'+str(std)+'.pkl', 'wb') as f:
-            pickle.dump(all_predictions_seed, f)
+# Ensure we have at least some molecules to plot
+if not smiles_list:
+    print("No valid molecules found to plot!")
+    exit(1)
 
+# Convert SMILES to images
+grid_size_x = args.grid_x
+grid_size_y = args.grid_y
+max_molecules = grid_size_x * grid_size_y
+placeholder_image = create_placeholder_image()
 
-else: print("The model training diverged and there are is no trained model file!")
+molecule_images = [smiles_to_image(smiles) for smiles in smiles_list[:max_molecules]]
+print(f"Found {len(molecule_images)} molecules to plot")
+
+# Create grids
+image_grid = np.empty((grid_size_x, grid_size_y), dtype=object)
+inf_grid = np.empty((grid_size_x, grid_size_y), dtype=object)
+inf_grid_obj = np.empty((grid_size_x, grid_size_y), dtype=object)
+
+# Place molecule images in the grid
+idx = 0
+for i in range(grid_size_x):
+    for j in range(grid_size_y):
+        if idx < len(molecule_images) and molecule_images[idx]:
+            image_grid[i, j] = molecule_images[idx]
+            inf_grid[i, j] = stoich_con_list[idx] if idx < len(stoich_con_list) else ""
+            
+            # Format objective and property display
+            obj_str = f"f(z)={obj_val_list[idx]:.3f}\n" if idx < len(obj_val_list) else "f(z)=N/A\n"
+            
+            # Add property values dynamically
+            if idx < len(property_lists[0]):
+                property_values = [prop_list[idx] for prop_list in property_lists]
+                property_str = format_property_display(property_names, property_values)
+                inf_grid_obj[i, j] = obj_str + property_str
+            else:
+                inf_grid_obj[i, j] = obj_str + "Properties: N/A"
+        else:
+            image_grid[i, j] = placeholder_image
+            inf_grid[i, j] = ""
+            inf_grid_obj[i, j] = "Invalid"
+        idx += 1
+
+# Plot the grid
+plt.rcParams.update({'font.size': 18, 'font.family': 'sans-serif'})
+
+fig, axes = plt.subplots(grid_size_x, grid_size_y, figsize=(10, 4))
+plt.subplots_adjust(hspace=0.6)
+
+# Handle single row/column case
+if grid_size_x == 1:
+    axes = axes.reshape(1, -1)
+elif grid_size_y == 1:
+    axes = axes.reshape(-1, 1)
+
+# Plot each image in the grid
+for i in range(grid_size_x):
+    for j in range(grid_size_y):
+        if grid_size_x == 1 and grid_size_y == 1:
+            ax = axes
+        elif grid_size_x == 1:
+            ax = axes[j]
+        elif grid_size_y == 1:
+            ax = axes[i]
+        else:
+            ax = axes[i, j]
+            
+        ax.imshow(image_grid[i, j])
+        ax.axis('off')
+        
+        # Add text overlays
+        ax.text(0.5, 0.5, inf_grid[i, j], ha='center', va='center', 
+                transform=ax.transAxes, fontsize=11, color='black', alpha=0.3, weight="bold")
+        ax.text(0.5, -0.25, inf_grid_obj[i, j], ha='center', va='center', 
+                transform=ax.transAxes, fontsize=11, color='black')
+
+# Save with property-aware filename
+property_suffix = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+output_filename = f'{args.output_prefix}_{property_suffix}.png'
+output_path = os.path.join(args.results_path, output_filename)
+
+plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
+print(f"Plot saved to: {output_path}")
+
+# Print summary
+if smiles_list:
+    print(f"\nSummary:")
+    print(f"Total molecules plotted: {len(smiles_list)}")
+    print(f"Properties: {property_names}")
+    if obj_val_list:
+        print(f"Average objective value: {np.mean(obj_val_list):.3f}")
+        print(f"Objective values: {obj_val_list}")
+    
+    # Print property statistics
+    for i, prop_name in enumerate(property_names):
+        if i < len(property_lists) and property_lists[i]:
+            values = property_lists[i]
+            print(f"{prop_name} - Mean: {np.mean(values):.3f}, Std: {np.std(values):.3f}, Range: [{np.min(values):.3f}, {np.max(values):.3f}]")

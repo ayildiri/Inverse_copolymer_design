@@ -30,12 +30,8 @@ def make_poly_chemprop_input(mona, monb, stoich):
     # Standard connectivity with correct format
     connectivity = "<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5"
     
-    # For homopolymers (same monomer)
-    if can_mona == can_monb:
-        return f"{can_mona}|{stoich}|{connectivity}"
-    else:
-        # For copolymers
-        return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
+    # Always use MonA.MonB format for consistency, even for homopolymers
+    return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
 
 def detect_target_columns(df, exclude_columns=None):
     """

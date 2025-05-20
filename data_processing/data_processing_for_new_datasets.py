@@ -212,8 +212,10 @@ def main():
     print("Ready for transform_batch_data.py")
     print("\nFor transform_batch_data.py, use:")
     target_names = [col.replace('_eV', '').replace('_', '') for col in final_targets]
-    print(f"--property_columns {' '.join([f'\"{col}\"' for col in final_targets])}")
-    print(f"--property_names {' '.join(target_names)}")
+    property_columns_str = ' '.join([f'"{col}"' for col in final_targets])
+    print(f"--property_columns {property_columns_str}")
+    property_names_str = ' '.join(target_names)
+    print(f"--property_names {property_names_str}")
     print("="*60)
 
 if __name__ == "__main__":

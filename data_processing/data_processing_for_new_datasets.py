@@ -172,7 +172,7 @@ def interactive_column_selection(df, interactive=True):
     print(f"\nFinal column mapping: {column_mapping}")
     return selected_columns, column_mapping
 
-def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True):
+def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5"):
     """
     General preprocessing function for polymer data with flexible target handling
     
@@ -182,6 +182,7 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         target_columns: List of target column names, or None for interactive selection
         column_mapping: Dict mapping old names to new names
         interactive: If True, use interactive selection
+        stoichiometry: Default stoichiometry to use (format: "fraction_A|fraction_B")
     """
     # Load CSV
     df = pd.read_csv(input_file)
@@ -200,11 +201,11 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     else:
         df['MonB'].fillna(df['MonA'], inplace=True)
     
-    # If stoich not provided, default to 0.5|0.5
+    # If stoich not provided, use the provided stoichiometry parameter
     if 'stoich' not in df.columns:
-        df['stoich'] = '0.5|0.5'
+        df['stoich'] = stoichiometry
     else:
-        df['stoich'].fillna('0.5|0.5', inplace=True)
+        df['stoich'].fillna(stoichiometry, inplace=True)
     
     # Handle target columns
     if target_columns is None or column_mapping is None:
@@ -276,13 +277,15 @@ def main():
     parser.add_argument('--input', '-i', required=True, help='Input CSV file path')
     parser.add_argument('--output', '-o', required=True, help='Output CSV file path')
     parser.add_argument('--targets', '-t', nargs='+', default=None,
-                       help='Target column names (space-separated). If not provided, uses interactive selection')
+                        help='Target column names (space-separated). If not provided, uses interactive selection')
     parser.add_argument('--target_names', '-n', nargs='+', default=None,
-                       help='New names for target columns (must match --targets length)')
+                        help='New names for target columns (must match --targets length)')
+    parser.add_argument('--stoichiometry', '-s', default="0.5|0.5",
+                        help='Default stoichiometry for homopolymers (format: fraction_A|fraction_B)')
     parser.add_argument('--non_interactive', action='store_true',
-                       help='Skip interactive selection and auto-detect all numeric columns')
+                        help='Skip interactive selection and auto-detect all numeric columns')
     parser.add_argument('--list_columns', '-l', action='store_true',
-                       help='List all columns in the input file and exit')
+                        help='List all columns in the input file and exit')
     
     args = parser.parse_args()
     
@@ -318,7 +321,8 @@ def main():
         args.output, 
         target_columns, 
         column_mapping,
-        interactive=not args.non_interactive
+        interactive=not args.non_interactive,
+        stoichiometry=args.stoichiometry
     )
     
     print("\n" + "="*60)

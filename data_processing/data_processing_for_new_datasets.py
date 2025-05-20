@@ -49,7 +49,7 @@ def detect_target_columns(df, exclude_columns=None):
         List of potential target column names
     """
     if exclude_columns is None:
-        exclude_columns = ['pol_id', 'hp_id', 'MonA', 'MonB', 'stoich']
+        exclude_columns = ['pol_id', 'hp_id', 'MonA', 'MonB', 'stoich', 'smiles', 'canonical_smiles']
     
     # Find numeric columns
     numeric_columns = df.select_dtypes(include=['float64', 'int64', 'float32', 'int32']).columns.tolist()
@@ -59,15 +59,134 @@ def detect_target_columns(df, exclude_columns=None):
     
     return potential_targets
 
-def preprocess_polymer_data(input_file, output_file, target_columns=None, target_suffix=""):
+def interactive_column_selection(df, interactive=True):
+    """
+    Interactively select target columns and their new names
+    
+    Args:
+        df: DataFrame
+        interactive: If True, ask user for input. If False, auto-detect.
+    
+    Returns:
+        tuple: (selected_columns, column_mapping)
+    """
+    if not interactive:
+        # Auto-detect mode
+        potential_targets = detect_target_columns(df)
+        if not potential_targets:
+            raise ValueError("No suitable target columns found!")
+        
+        # Create default mapping (keep original names)
+        column_mapping = {col: col for col in potential_targets}
+        return potential_targets, column_mapping
+    
+    # Interactive mode
+    print("\nAvailable columns in your data:")
+    print("-" * 50)
+    all_columns = df.columns.tolist()
+    potential_targets = detect_target_columns(df)
+    
+    for i, col in enumerate(all_columns):
+        col_type = str(df[col].dtype)
+        is_numeric = "(numeric" in col_type or "int" in col_type or "float" in col_type
+        is_potential = col in potential_targets
+        marker = "→ " if is_potential else "  "
+        print(f"{marker}{i+1:2d}. {col:<25} ({col_type})")
+    
+    print(f"\nColumns marked with → are automatically detected as potential targets")
+    print(f"Auto-detected targets: {potential_targets}")
+    
+    # Ask user to select columns
+    print("\nHow do you want to select target columns?")
+    print("1. Use all auto-detected columns")
+    print("2. Select specific columns by number")
+    print("3. Enter column names manually")
+    
+    while True:
+        try:
+            choice = input("\nEnter your choice (1, 2, or 3): ").strip()
+            if choice in ['1', '2', '3']:
+                break
+            print("Please enter 1, 2, or 3")
+        except KeyboardInterrupt:
+            raise
+        except:
+            print("Please enter 1, 2, or 3")
+    
+    selected_columns = []
+    
+    if choice == '1':
+        selected_columns = potential_targets
+    elif choice == '2':
+        print("\nEnter the numbers of columns you want to use (comma-separated):")
+        print("Example: 1,3,5")
+        while True:
+            try:
+                numbers = input("Column numbers: ").strip().split(',')
+                selected_columns = []
+                for num in numbers:
+                    idx = int(num.strip()) - 1
+                    if 0 <= idx < len(all_columns):
+                        selected_columns.append(all_columns[idx])
+                    else:
+                        print(f"Invalid number: {num}")
+                        selected_columns = []
+                        break
+                if selected_columns:
+                    break
+            except:
+                print("Please enter valid numbers separated by commas")
+    else:  # choice == '3'
+        print("\nEnter column names (comma-separated):")
+        print("Example: value,band_gap,property1")
+        while True:
+            try:
+                names = input("Column names: ").strip().split(',')
+                selected_columns = []
+                for name in names:
+                    name = name.strip()
+                    if name in all_columns:
+                        selected_columns.append(name)
+                    else:
+                        print(f"Column '{name}' not found!")
+                        selected_columns = []
+                        break
+                if selected_columns:
+                    break
+            except:
+                print("Please enter valid column names separated by commas")
+    
+    print(f"\nSelected columns: {selected_columns}")
+    
+    # Ask for new names
+    column_mapping = {}
+    print("\nNow specify what you want to call these columns in the output:")
+    print("(Press Enter to keep the original name)")
+    
+    for col in selected_columns:
+        while True:
+            try:
+                new_name = input(f"'{col}' → ").strip()
+                if not new_name:
+                    new_name = col
+                column_mapping[col] = new_name
+                break
+            except:
+                print("Please enter a valid name or press Enter")
+    
+    print(f"\nFinal column mapping: {column_mapping}")
+    return selected_columns, column_mapping
+
+def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True):
     """
     General preprocessing function for polymer data with flexible target handling
     
     Args:
         input_file: Path to input CSV file
         output_file: Path to output CSV file  
-        target_columns: List of target column names, or None for auto-detection
-        target_suffix: Suffix to add to target column names (e.g., '_eV')
+        target_columns: List of target column names, or None for interactive selection
+        column_mapping: Dict mapping old names to new names
+        interactive: If True, use interactive selection
     """
     # Load CSV
     df = pd.read_csv(input_file)
@@ -93,34 +212,21 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, target
         df['stoich'].fillna('0.5|0.5', inplace=True)
     
     # Handle target columns
-    if target_columns is None:
-        # Auto-detect target columns
-        potential_targets = detect_target_columns(df)
-        print(f"Auto-detected potential target columns: {potential_targets}")
-        
-        if len(potential_targets) == 0:
-            raise ValueError("No suitable target columns found!")
-        
-        # Use all detected targets or prompt user
-        target_columns = potential_targets
-        print(f"Using all detected target columns: {target_columns}")
+    if target_columns is None or column_mapping is None:
+        target_columns, column_mapping = interactive_column_selection(df, interactive=interactive)
     
     # Validate target columns exist
     missing_targets = [col for col in target_columns if col not in df.columns]
     if missing_targets:
         raise ValueError(f"Target columns not found: {missing_targets}")
     
-    # Rename target columns with suffix if provided
-    target_mapping = {}
+    # Rename target columns according to mapping
     final_target_columns = []
-    for target_col in target_columns:
-        if target_suffix and not target_col.endswith(target_suffix):
-            new_name = f"{target_col}{target_suffix}"
-            df.rename(columns={target_col: new_name}, inplace=True)
-            target_mapping[target_col] = new_name
-            final_target_columns.append(new_name)
-        else:
-            final_target_columns.append(target_col)
+    for old_name in target_columns:
+        new_name = column_mapping[old_name]
+        if old_name != new_name:
+            df.rename(columns={old_name: new_name}, inplace=True)
+        final_target_columns.append(new_name)
     
     print(f"Final target columns: {final_target_columns}")
     
@@ -168,16 +274,18 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, target
         for target_col in final_target_columns:
             print(f"   {target_col}: {df_final.iloc[i][target_col]}")
     
-    return df_final, final_target_columns
+    return df_final, final_target_columns, column_mapping
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess polymer data for poly_chemprop with flexible target handling')
+    parser = argparse.ArgumentParser(description='Preprocess polymer data for poly_chemprop with interactive target handling')
     parser.add_argument('--input', '-i', required=True, help='Input CSV file path')
     parser.add_argument('--output', '-o', required=True, help='Output CSV file path')
     parser.add_argument('--targets', '-t', nargs='+', default=None,
-                       help='Target column names (space-separated). If not provided, auto-detects all numeric columns')
-    parser.add_argument('--target_suffix', '-s', default='',
-                       help='Suffix to add to target column names (e.g., "_eV")')
+                       help='Target column names (space-separated). If not provided, uses interactive selection')
+    parser.add_argument('--target_names', '-n', nargs='+', default=None,
+                       help='New names for target columns (must match --targets length)')
+    parser.add_argument('--non_interactive', action='store_true',
+                       help='Skip interactive selection and auto-detect all numeric columns')
     parser.add_argument('--list_columns', '-l', action='store_true',
                        help='List all columns in the input file and exit')
     
@@ -197,12 +305,25 @@ def main():
         print(f"\nAuto-detected target columns: {potential_targets}")
         return
     
+    # Prepare column mapping if provided via command line
+    target_columns = args.targets
+    column_mapping = None
+    
+    if target_columns and args.target_names:
+        if len(target_columns) != len(args.target_names):
+            raise ValueError("Number of target columns must match number of target names")
+        column_mapping = dict(zip(target_columns, args.target_names))
+    elif target_columns:
+        # Keep original names
+        column_mapping = {col: col for col in target_columns}
+    
     # Process the data
-    df_final, final_targets = preprocess_polymer_data(
+    df_final, final_targets, final_mapping = preprocess_polymer_data(
         args.input, 
         args.output, 
-        args.targets, 
-        args.target_suffix
+        target_columns, 
+        column_mapping,
+        interactive=not args.non_interactive
     )
     
     print("\n" + "="*60)
@@ -211,10 +332,23 @@ def main():
     print(f"Target properties: {final_targets}")
     print("Ready for transform_batch_data.py")
     print("\nFor transform_batch_data.py, use:")
-    target_names = [col.replace('_eV', '').replace('_', '') for col in final_targets]
+    
+    # Create property names for transform_batch_data.py (simplified from target names)
+    property_names = []
+    for target in final_targets:
+        # Remove common suffixes and make lowercase
+        clean_name = target.lower()
+        for suffix in ['_ev', '_value', '_property', '_target']:
+            if clean_name.endswith(suffix):
+                clean_name = clean_name[:-len(suffix)]
+                break
+        clean_name = clean_name.replace('_', '').replace('-', '').replace(' ', '')
+        property_names.append(clean_name)
+    
     property_columns_str = ' '.join([f'"{col}"' for col in final_targets])
+    property_names_str = ' '.join(property_names)
+    
     print(f"--property_columns {property_columns_str}")
-    property_names_str = ' '.join(target_names)
     print(f"--property_names {property_names_str}")
     print("="*60)
 
@@ -222,16 +356,16 @@ if __name__ == "__main__":
     # Example usage when run without arguments
     if len(os.sys.argv) == 1:
         print("Example usage:")
-        print("# Auto-detect all target columns")
-        print("python preprocess_polymer_data.py -i band_gap_chain.csv -o output.csv")
+        print("# Interactive mode (default)")
+        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv")
         print("")
-        print("# Specify target columns")
-        print("python preprocess_polymer_data.py -i data.csv -o output.csv -t value band_gap EA IP")
+        print("# Non-interactive mode (auto-detect all)")
+        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv --non_interactive")
         print("")
-        print("# Add suffix to target columns")
-        print("python preprocess_polymer_data.py -i data.csv -o output.csv -s _eV")
+        print("# Specify columns and names via command line")
+        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -t value band_gap -n band_gap_eV conductivity")
         print("")
         print("# List available columns")
-        print("python preprocess_polymer_data.py -i data.csv -l")
+        print("python data_processing_for_new_datasets.py -i input.csv -l")
     else:
         main()

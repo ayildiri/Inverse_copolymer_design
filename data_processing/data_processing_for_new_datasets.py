@@ -19,7 +19,7 @@ def canonicalize_smiles(smiles):
     except:
         return None
 
-def make_poly_chemprop_input(mona, monb, stoich):
+def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     """Create poly_chemprop_input format string"""
     can_mona = canonicalize_smiles(mona)
     can_monb = canonicalize_smiles(monb) if monb != mona else can_mona
@@ -27,8 +27,9 @@ def make_poly_chemprop_input(mona, monb, stoich):
     if can_mona is None or can_monb is None:
         return None
 
-    # Standard connectivity with correct format
-    connectivity = "<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5"
+    # Use provided connectivity or default if none provided
+    if connectivity is None:
+        connectivity = "<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5"
     
     # Always use MonA.MonB format for consistency, even for homopolymers
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
@@ -45,7 +46,7 @@ def detect_target_columns(df, exclude_columns=None):
         List of potential target column names
     """
     if exclude_columns is None:
-        exclude_columns = ['pol_id', 'hp_id', 'MonA', 'MonB', 'stoich', 'smiles', 'canonical_smiles']
+        exclude_columns = ['pol_id', 'hp_id', 'MonA', 'MonB', 'stoich', 'connectivity', 'smiles', 'canonical_smiles']
     
     # Find numeric columns
     numeric_columns = df.select_dtypes(include=['float64', 'int64', 'float32', 'int32']).columns.tolist()
@@ -172,7 +173,7 @@ def interactive_column_selection(df, interactive=True):
     print(f"\nFinal column mapping: {column_mapping}")
     return selected_columns, column_mapping
 
-def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5"):
+def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5", default_connectivity="<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5"):
     """
     General preprocessing function for polymer data with flexible target handling
     
@@ -183,6 +184,7 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         column_mapping: Dict mapping old names to new names
         interactive: If True, use interactive selection
         stoichiometry: Default stoichiometry to use (format: "fraction_A|fraction_B")
+        default_connectivity: Default connectivity pattern for polymers
     """
     # Load CSV
     df = pd.read_csv(input_file)
@@ -207,6 +209,12 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     else:
         df['stoich'].fillna(stoichiometry, inplace=True)
     
+    # Handle connectivity if provided in the CSV
+    if 'connectivity' not in df.columns:
+        df['connectivity'] = default_connectivity
+    else:
+        df['connectivity'].fillna(default_connectivity, inplace=True)
+    
     # Handle target columns
     if target_columns is None or column_mapping is None:
         target_columns, column_mapping = interactive_column_selection(df, interactive=interactive)
@@ -229,7 +237,7 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     # Apply poly_chemprop_input formatting
     print("Creating poly_chemprop_input...")
     df['poly_chemprop_input'] = df.apply(
-        lambda row: make_poly_chemprop_input(row['MonA'], row['MonB'], row['stoich']), 
+        lambda row: make_poly_chemprop_input(row['MonA'], row['MonB'], row['stoich'], row['connectivity']), 
         axis=1
     )
     
@@ -282,6 +290,8 @@ def main():
                         help='New names for target columns (must match --targets length)')
     parser.add_argument('--stoichiometry', '-s', default="0.5|0.5",
                         help='Default stoichiometry for homopolymers (format: fraction_A|fraction_B)')
+    parser.add_argument('--connectivity', '-c', default="<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5",
+                        help='Default connectivity pattern for polymers')
     parser.add_argument('--non_interactive', action='store_true',
                         help='Skip interactive selection and auto-detect all numeric columns')
     parser.add_argument('--list_columns', '-l', action='store_true',
@@ -322,7 +332,8 @@ def main():
         target_columns, 
         column_mapping,
         interactive=not args.non_interactive,
-        stoichiometry=args.stoichiometry
+        stoichiometry=args.stoichiometry,
+        default_connectivity=args.connectivity
     )
     
     print("\n" + "="*60)
@@ -363,6 +374,9 @@ if __name__ == "__main__":
         print("")
         print("# Specify columns and names via command line")
         print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -t value band_gap -n band_gap_eV conductivity")
+        print("")
+        print("# With custom stoichiometry and connectivity")
+        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -s \"0.7|0.3\" -c \"<1.3:0.7:0.3<1.4:0.3:0.7<2.3:0.5:0.5<2.4:0.8:0.2\"")
         print("")
         print("# List available columns")
         print("python data_processing_for_new_datasets.py -i input.csv -l")

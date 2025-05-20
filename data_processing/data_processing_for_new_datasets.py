@@ -132,25 +132,62 @@ def interactive_column_selection(df, interactive=True):
                     break
             except:
                 print("Please enter valid numbers separated by commas")
+    
+    # For choice == '3' (manual column entry), replace the existing code with:
     else:  # choice == '3'
-        print("\nEnter column names (comma-separated):")
-        print("Example: value,band_gap,property1")
-        while True:
-            try:
-                names = input("Column names: ").strip().split(',')
-                selected_columns = []
-                for name in names:
-                    name = name.strip()
-                    if name in all_columns:
-                        selected_columns.append(name)
-                    else:
-                        print(f"Column '{name}' not found!")
-                        selected_columns = []
-                        break
-                if selected_columns:
+        try:
+            # Try to use ipywidgets for larger input box
+            from ipywidgets import widgets
+            from IPython.display import display
+            
+            print("\nEnter column names (comma-separated):")
+            print("Example: value,band_gap,property1")
+            
+            # Create larger text area widget
+            textarea = widgets.Textarea(
+                value='',
+                placeholder='Enter column names separated by commas',
+                description='Columns:',
+                rows=5,
+                width='100%'
+            )
+            
+            display(textarea)
+            
+            # Wait for input (this is a bit hacky)
+            import time
+            max_wait = 60  # seconds
+            last_val = textarea.value
+            for _ in range(max_wait):
+                time.sleep(1)
+                if textarea.value != last_val and textarea.value.strip():
                     break
-            except:
-                print("Please enter valid column names separated by commas")
+                last_val = textarea.value
+            
+            names = textarea.value.strip().split(',')
+            
+            # Process names as before
+            selected_columns = []
+            for name in names:
+                name = name.strip()
+                if name in all_columns:
+                    selected_columns.append(name)
+                else:
+                    print(f"Column '{name}' not found!")
+            
+        except (ImportError, Exception):
+            # Fallback to standard input if widgets not available
+            print("\nEnter column names (comma-separated):")
+            print("Example: value,band_gap,property1")
+            names_input = input("Column names: ").strip()
+            names = names_input.split(',')
+            selected_columns = []
+            for name in names:
+                name = name.strip()
+                if name in all_columns:
+                    selected_columns.append(name)
+                else:
+                    print(f"Column '{name}' not found!")
     
     print(f"\nSelected columns: {selected_columns}")
     

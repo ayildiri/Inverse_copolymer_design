@@ -88,7 +88,6 @@ def interactive_column_selection(df, interactive=True):
     
     for i, col in enumerate(all_columns):
         col_type = str(df[col].dtype)
-        is_numeric = "(numeric" in col_type or "int" in col_type or "float" in col_type
         is_potential = col in potential_targets
         marker = "→ " if is_potential else "  "
         print(f"{marker}{i+1:2d}. {col:<25} ({col_type})")

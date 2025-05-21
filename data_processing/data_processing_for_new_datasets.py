@@ -29,7 +29,8 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
 
     # Use provided connectivity or default if none provided
     if connectivity is None:
-        connectivity = "<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5"
+        # FIXED: Use hyphen separator instead of dot
+        connectivity = "<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5"
     
     # Always use MonA.MonB format for consistency, even for homopolymers
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
@@ -210,7 +211,7 @@ def interactive_column_selection(df, interactive=True):
     print(f"\nFinal column mapping: {column_mapping}")
     return selected_columns, column_mapping
 
-def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5", default_connectivity="<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5"):
+def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5", default_connectivity="<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5"):
     """
     General preprocessing function for polymer data with flexible target handling
     
@@ -327,7 +328,7 @@ def main():
                         help='New names for target columns (must match --targets length)')
     parser.add_argument('--stoichiometry', '-s', default="0.5|0.5",
                         help='Default stoichiometry for homopolymers (format: fraction_A|fraction_B)')
-    parser.add_argument('--connectivity', '-c', default="<1.3:0.5:0.5<1.4:0.5:0.5<2.3:0.5:0.5<2.4:0.5:0.5",
+    parser.add_argument('--connectivity', '-c', default="<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5",
                         help='Default connectivity pattern for polymers')
     parser.add_argument('--non_interactive', action='store_true',
                         help='Skip interactive selection and auto-detect all numeric columns')
@@ -413,7 +414,7 @@ if __name__ == "__main__":
         print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -t value band_gap -n band_gap_eV conductivity")
         print("")
         print("# With custom stoichiometry and connectivity")
-        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -s \"0.7|0.3\" -c \"<1.3:0.7:0.3<1.4:0.3:0.7<2.3:0.5:0.5<2.4:0.8:0.2\"")
+        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -s \"0.7|0.3\" -c \"<1-3:0.7:0.3<1-4:0.3:0.7<2-3:0.5:0.5<2-4:0.8:0.2\"")
         print("")
         print("# List available columns")
         print("python data_processing_for_new_datasets.py -i input.csv -l")

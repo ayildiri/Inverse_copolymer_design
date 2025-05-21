@@ -117,6 +117,10 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     """
     Create properly formatted poly_chemprop_input string with chemical validity checks
     """
+    # FIX: Ensure stoichiometry uses decimal points not hyphens
+    if isinstance(stoich, str):
+        stoich = stoich.replace('-', '.')
+    
     can_mona = canonicalize_smiles(mona)
     
     # Determine if this is a homopolymer
@@ -146,7 +150,8 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
         connectivity = create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points)
     
     # Always ensure connectivity uses hyphens, not dots
-    connectivity = connectivity.replace('.', '-')
+    if connectivity is not None:
+        connectivity = connectivity.replace('.', '-')
     
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
 
@@ -361,6 +366,11 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         df['stoich'] = stoichiometry
     else:
         df['stoich'].fillna(stoichiometry, inplace=True)
+        
+    # FIX: Replace hyphens with decimal points in stoichiometry values
+    if 'stoich' in df.columns and df['stoich'].dtype == 'object':
+        print("Fixing stoichiometry format: replacing hyphens with decimal points")
+        df['stoich'] = df['stoich'].astype(str).str.replace('-', '.')
     
     # Handle connectivity if provided in the CSV
     if 'connectivity' not in df.columns:
@@ -368,6 +378,11 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     else:
         # Replace null values with None rather than a string
         df['connectivity'] = df['connectivity'].where(pd.notnull(df['connectivity']), None)
+        
+        # FIX: Make sure connectivity uses hyphens not dots
+        df['connectivity'] = df['connectivity'].apply(
+            lambda x: x.replace('.', '-') if isinstance(x, str) else x
+        )
     
     # Handle target columns
     if target_columns is None or column_mapping is None:
@@ -409,6 +424,29 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     # Final selection - keep poly_chemprop_input and all target columns
     columns_to_keep = ['poly_chemprop_input'] + final_target_columns
     df_final = df[columns_to_keep].copy()
+    
+    # FIX: Final check for hyphens in the polymer string
+    print("Performing final check for format issues...")
+    def fix_polymer_format(poly_str):
+        if not isinstance(poly_str, str):
+            return poly_str
+            
+        parts = poly_str.split('|')
+        if len(parts) < 3:
+            return poly_str
+            
+        # Replace hyphens with dots in stoichiometry sections
+        for i in range(1, len(parts) - 1):  # Skip SMILES and connectivity sections
+            parts[i] = parts[i].replace('-', '.')
+            
+        # Ensure connectivity section uses hyphens
+        if len(parts) >= 3:
+            # Last part is connectivity
+            parts[-1] = parts[-1].replace('.', '-')
+            
+        return '|'.join(parts)
+        
+    df_final['poly_chemprop_input'] = df_final['poly_chemprop_input'].apply(fix_polymer_format)
     
     # Save to output file
     df_final.to_csv(output_file, index=False)

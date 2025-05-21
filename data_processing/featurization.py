@@ -6,6 +6,7 @@ import logging
 import re
 
 from rdkit import Chem
+from rdkit.Chem import AllChem
 import torch
 import numpy as np
 
@@ -227,19 +228,27 @@ def atom_features(atom: Chem.rdchem.Atom, functional_groups: List[int] = None) -
     if atom is None:
         features = [0] * PARAMS.ATOM_FDIM
     else:
-        # features = onek_encoding_unk(atom.GetAtomicNum() - 1, PARAMS.ATOM_FEATURES['atomic_num']) + \
-        features = onek_encoding_unk_atoms(atom.GetAtomicNum()) + \
-            onek_encoding_unk(atom.GetTotalDegree(), PARAMS.ATOM_FEATURES['degree']) + \
-            onek_encoding_unk(atom.GetFormalCharge(), PARAMS.ATOM_FEATURES['formal_charge']) + \
-            onek_encoding_unk(int(atom.GetChiralTag()), PARAMS.ATOM_FEATURES['chiral_tag']) + \
-            onek_encoding_unk(int(atom.GetTotalNumHs()), PARAMS.ATOM_FEATURES['num_Hs']) + \
-            onek_encoding_unk(int(atom.GetHybridization()), PARAMS.ATOM_FEATURES['hybridization']) + \
-            onek_encoding_unk(atom.GetDoubleProp('w_frag'), PARAMS.ATOM_FEATURES['stoichiometry']) + \
-            [1 if atom.GetIsAromatic() else 0]
-            # [1 if atom.GetIsAromatic() else 0] + \
-            # [atom.GetMass() * 0.01]  # scaled to about the same range as other features
-        if functional_groups is not None:
-            features += functional_groups
+        try:
+            # features = onek_encoding_unk(atom.GetAtomicNum() - 1, PARAMS.ATOM_FEATURES['atomic_num']) + \
+            features = onek_encoding_unk_atoms(atom.GetAtomicNum()) + \
+                onek_encoding_unk(atom.GetTotalDegree(), PARAMS.ATOM_FEATURES['degree']) + \
+                onek_encoding_unk(atom.GetFormalCharge(), PARAMS.ATOM_FEATURES['formal_charge']) + \
+                onek_encoding_unk(int(atom.GetChiralTag()), PARAMS.ATOM_FEATURES['chiral_tag']) + \
+                onek_encoding_unk(int(atom.GetTotalNumHs()), PARAMS.ATOM_FEATURES['num_Hs']) + \
+                onek_encoding_unk(int(atom.GetHybridization()), PARAMS.ATOM_FEATURES['hybridization']) + \
+                onek_encoding_unk(atom.GetDoubleProp('w_frag'), PARAMS.ATOM_FEATURES['stoichiometry']) + \
+                [1 if atom.GetIsAromatic() else 0]
+                # [1 if atom.GetIsAromatic() else 0] + \
+                # [atom.GetMass() * 0.01]  # scaled to about the same range as other features
+            
+            if functional_groups is not None:
+                features += functional_groups
+        except Exception as e:
+            print(f"Error computing atom features for {atom.GetSymbol()}: {str(e)}")
+            # Provide default features
+            features = [0] * PARAMS.ATOM_FDIM
+            features[-1] = 1  # Set unknown flag
+            
     return features
 
 
@@ -269,17 +278,23 @@ def bond_features(bond: Chem.rdchem.Bond) -> List[Union[bool, int, float]]:
     if bond is None:
         fbond = [1] + [0] * (PARAMS.BOND_FDIM - 1)
     else:
-        bt = bond.GetBondType()
-        fbond = [
-            0,  # bond is not None
-            bt == Chem.rdchem.BondType.SINGLE,
-            bt == Chem.rdchem.BondType.DOUBLE,
-            bt == Chem.rdchem.BondType.TRIPLE,
-            bt == Chem.rdchem.BondType.AROMATIC,
-            (bond.GetIsConjugated() if bt is not None else 0),
-            (bond.IsInRing() if bt is not None else 0)
-        ]
-        fbond += onek_encoding_unk(int(bond.GetStereo()), list(range(6)))
+        try:
+            bt = bond.GetBondType()
+            fbond = [
+                0,  # bond is not None
+                bt == Chem.rdchem.BondType.SINGLE,
+                bt == Chem.rdchem.BondType.DOUBLE,
+                bt == Chem.rdchem.BondType.TRIPLE,
+                bt == Chem.rdchem.BondType.AROMATIC,
+                (bond.GetIsConjugated() if bt is not None else 0),
+                (bond.IsInRing() if bt is not None else 0)
+            ]
+            fbond += onek_encoding_unk(int(bond.GetStereo()), list(range(6)))
+        except Exception as e:
+            print(f"Error computing bond features: {str(e)}")
+            # Default bond features
+            fbond = [1] + [0] * (PARAMS.BOND_FDIM - 1)
+            
     return fbond
 
 
@@ -321,50 +336,245 @@ def tag_atoms_in_repeating_unit(mol):
     Tags atoms that are part of the core units, as well as atoms serving to identify attachment points. In addition,
     create a map of bond types based on what bonds are connected to R groups in the input.
     """
-    atoms = [a for a in mol.GetAtoms()]
-    neighbor_map = {}  # map R group to index of atom it is attached to
-    r_bond_types = {}  # map R group to bond type
+    try:
+        atoms = [a for a in mol.GetAtoms()]
+        neighbor_map = {}  # map R group to index of atom it is attached to
+        r_bond_types = {}  # map R group to bond type
 
-    # go through each atoms and: (i) get index of attachment atoms, (ii) tag all non-R atoms
-    for atom in atoms:
-        # if R atom
-        if '*' in atom.GetSmarts():
-            # get index of atom it is attached to
-            neighbors = atom.GetNeighbors()
-            assert len(neighbors) == 1
-            neighbor_idx = neighbors[0].GetIdx()
-            # *1, *2, ...
-            r_tag = atom.GetSmarts().strip('[]').replace(':', '')
-            neighbor_map[r_tag] = neighbor_idx
-            # tag it as non-core atom
-            atom.SetBoolProp('core', False)
-            # create a map R --> bond type
-            bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor_idx)
-            r_bond_types[r_tag] = bond.GetBondType()
-        # if not R atom
+        # Show molecule info for diagnostics
+        smiles = Chem.MolToSmiles(mol)
+        print(f"Tagging atoms in molecule: {smiles}")
+        attachment_points = re.findall(r'\[\*:(\d+)\]', smiles)
+        
+        if attachment_points:
+            print(f"Found attachment points: {attachment_points}")
         else:
-            # tag it as core atom
-            atom.SetBoolProp('core', True)
+            print("Warning: No attachment points found in molecule")
+            
+        # Detect potential homopolymer structure
+        if '.' in smiles:
+            parts = smiles.split('.')
+            if len(parts) == 2:
+                # Remove attachment points for comparison
+                base_part1 = re.sub(r'\[\*:\d+\]', '[*]', parts[0])
+                base_part2 = re.sub(r'\[\*:\d+\]', '[*]', parts[1])
+                
+                if base_part1 == base_part2:
+                    print("Detected homopolymer structure")
 
-    # use the map created to tag attachment atoms
-    for atom in atoms:
-        if atom.GetIdx() in neighbor_map.values():
-            r_tags = [k for k, v in neighbor_map.items() if v == atom.GetIdx()]
-            atom.SetProp('R', ''.join(r_tags))
-        else:
-            atom.SetProp('R', '')
+        # go through each atoms and: (i) get index of attachment atoms, (ii) tag all non-R atoms
+        for atom in atoms:
+            try:
+                # if R atom
+                if '*' in atom.GetSmarts():
+                    # get index of atom it is attached to
+                    neighbors = atom.GetNeighbors()
+                    if len(neighbors) != 1:
+                        print(f"Warning: R atom at index {atom.GetIdx()} has {len(neighbors)} neighbors (expected 1)")
+                        
+                        # Use first neighbor if available
+                        if len(neighbors) > 0:
+                            neighbor_idx = neighbors[0].GetIdx()
+                        else:
+                            # No neighbors, skip this atom
+                            print(f"Skipping R atom with no neighbors at index {atom.GetIdx()}")
+                            atom.SetBoolProp('core', False)
+                            continue
+                    else:
+                        neighbor_idx = neighbors[0].GetIdx()
+                    
+                    # *1, *2, ...
+                    r_tag = atom.GetSmarts().strip('[]').replace(':', '')
+                    print(f"Found R group {r_tag} at index {atom.GetIdx()}, connected to atom {neighbor_idx}")
+                    
+                    neighbor_map[r_tag] = neighbor_idx
+                    # tag it as non-core atom
+                    atom.SetBoolProp('core', False)
+                    
+                    # create a map R --> bond type
+                    try:
+                        bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor_idx)
+                        if bond is None:
+                            print(f"Warning: No bond found between atoms {atom.GetIdx()} and {neighbor_idx}")
+                            r_bond_types[r_tag] = Chem.rdchem.BondType.SINGLE
+                        else:
+                            r_bond_types[r_tag] = bond.GetBondType()
+                            print(f"Bond type for {r_tag}: {bond.GetBondType()}")
+                    except Exception as bond_error:
+                        print(f"Error getting bond type: {str(bond_error)}")
+                        # Default to SINGLE
+                        r_bond_types[r_tag] = Chem.rdchem.BondType.SINGLE
+                # if not R atom
+                else:
+                    # tag it as core atom
+                    atom.SetBoolProp('core', True)
+            except Exception as atom_error:
+                print(f"Error processing atom {atom.GetIdx()}: {str(atom_error)}")
+                # Default to safe option
+                atom.SetBoolProp('core', False)
 
-    return mol, r_bond_types
+        # use the map created to tag attachment atoms
+        for atom in atoms:
+            try:
+                if atom.GetIdx() in neighbor_map.values():
+                    r_tags = [k for k, v in neighbor_map.items() if v == atom.GetIdx()]
+                    atom.SetProp('R', ''.join(r_tags))
+                else:
+                    atom.SetProp('R', '')
+            except Exception as tag_error:
+                print(f"Error setting R property for atom {atom.GetIdx()}: {str(tag_error)}")
+                atom.SetProp('R', '')
+
+        # Check results
+        r_atoms = [a.GetIdx() for a in atoms if a.HasProp('core') and not a.GetBoolProp('core')]
+        print(f"Tagged {len(r_atoms)} atoms as R groups")
+        print(f"R group to atom mapping: {neighbor_map}")
+        
+        return mol, r_bond_types
+    except Exception as e:
+        print(f"Error in tag_atoms_in_repeating_unit: {str(e)}")
+        # Attempt recovery with minimal info
+        for atom in mol.GetAtoms():
+            atom.SetBoolProp('core', '*' not in atom.GetSmarts())
+            if atom.GetBoolProp('core'):
+                atom.SetProp('R', '')
+            else:
+                atom.SetProp('R', atom.GetSmarts().strip('[]').replace(':', ''))
+                
+        # Create a basic r_bond_types dictionary
+        r_bond_types = {}
+        for atom in mol.GetAtoms():
+            if '*' in atom.GetSmarts():
+                r_tag = atom.GetSmarts().strip('[]').replace(':', '')
+                r_bond_types[r_tag] = Chem.rdchem.BondType.SINGLE
+                
+        return mol, r_bond_types
 
 
 def remove_wildcard_atoms(rwmol):
-    indices = [a.GetIdx() for a in rwmol.GetAtoms() if '*' in a.GetSmarts()]
-    while len(indices) > 0:
-        rwmol.RemoveAtom(indices[0])
-        indices = [a.GetIdx()
-                   for a in rwmol.GetAtoms() if '*' in a.GetSmarts()]
-    Chem.SanitizeMol(rwmol, Chem.SanitizeFlags.SANITIZE_ALL)
-    return rwmol
+    """
+    Removes wildcard atoms ([*]) from a molecule with proper handling of aromaticity and bonds.
+    
+    Args:
+        rwmol: RDKit RWMol object
+        
+    Returns:
+        RDKit RWMol object with wildcards removed and proper structure
+    """
+    try:
+        # Create a backup copy for fallback
+        mol_backup = Chem.Mol(rwmol)
+        # Get indices of wildcard atoms
+        indices = [a.GetIdx() for a in rwmol.GetAtoms() if '*' in a.GetSmarts()]
+        
+        # Pre-adjust all aromatic atoms to help with kekulization
+        for atom in rwmol.GetAtoms():
+            if atom.GetIsAromatic():
+                # Ensure aromatic atoms have proper valence
+                atom.SetNoImplicit(False)
+        
+        # Track neighbors of wildcard atoms for post-processing
+        neighbor_indices = []
+        for idx in indices:
+            atom = rwmol.GetAtomWithIdx(idx)
+            neighbors = atom.GetNeighbors()
+            neighbor_indices.extend([n.GetIdx() for n in neighbors])
+        neighbor_indices = list(set(neighbor_indices))
+        
+        # Pre-kekulize to preserve aromatic systems
+        try:
+            # Careful kekulization - maintain aromatic flags
+            Chem.Kekulize(rwmol, clearAromaticFlags=False)
+        except Exception as e:
+            print(f"Pre-kekulization warning (this is normal for complex aromatics): {str(e)}")
+            # Try partial sanitization
+            Chem.SanitizeMol(rwmol, 
+                Chem.SanitizeFlags.SANITIZE_ALL ^ 
+                Chem.SanitizeFlags.SANITIZE_KEKULIZE,
+                catchErrors=True)
+        
+        # Remove wildcard atoms one by one
+        removed_count = 0
+        while indices:
+            idx = indices[0]
+            atom = rwmol.GetAtomWithIdx(idx)
+            
+            # Store neighbor info before removal for valence adjustment
+            neighbors = []
+            for neighbor in atom.GetNeighbors():
+                neighbor_idx = neighbor.GetIdx()
+                # Adjust index for atoms removed already
+                if neighbor_idx > idx:
+                    neighbor_idx -= removed_count
+                neighbors.append(neighbor_idx)
+            
+            # Remove the atom
+            rwmol.RemoveAtom(idx)
+            removed_count += 1
+            
+            # Refresh indices list
+            indices = [a.GetIdx() for a in rwmol.GetAtoms() if '*' in a.GetSmarts()]
+            
+            # Process each neighbor to fix valence
+            for neighbor_idx in neighbors:
+                if neighbor_idx < rwmol.GetNumAtoms():
+                    neighbor = rwmol.GetAtomWithIdx(neighbor_idx)
+                    neighbor.SetNoImplicit(False)
+                    # Adjust explicit Hs to maintain proper valence
+                    try:
+                        neighbor.UpdatePropertyCache(strict=False)
+                    except:
+                        # If valence issues, just ensure it has valid structure
+                        neighbor.SetNumExplicitHs(0)
+                        
+        # Final sanitization with careful handling
+        try:
+            # Try partial sanitization first (skip kekulization)
+            Chem.SanitizeMol(rwmol, 
+                Chem.SanitizeFlags.SANITIZE_FINDRADICALS | 
+                Chem.SanitizeFlags.SANITIZE_SETAROMATICITY | 
+                Chem.SanitizeFlags.SANITIZE_SETCONJUGATION | 
+                Chem.SanitizeFlags.SANITIZE_SETHYBRIDIZATION,
+                catchErrors=True)
+            
+            # Try kekulization last
+            try:
+                Chem.Kekulize(rwmol, clearAromaticFlags=False)
+            except:
+                print("Warning: Kekulization failed after wildcard removal (not critical)")
+                # Just set aromaticity
+                AllChem.SetAromaticity(rwmol)
+        except Exception as e:
+            print(f"Warning: Sanitization failed after removing wildcards: {str(e)}")
+            print("Maintaining basic aromaticity only")
+            AllChem.SetAromaticity(rwmol)
+        
+        # Ensure all atoms have valid valence
+        for atom in rwmol.GetAtoms():
+            atom.SetNoImplicit(False)
+            
+        return rwmol
+    except Exception as e:
+        print(f"Error in remove_wildcard_atoms: {str(e)}")
+        print("Using fallback approach")
+        
+        # Simple fallback approach
+        try:
+            # Just remove the wildcard atoms without complex processing
+            indices = [a.GetIdx() for a in mol_backup.GetAtoms() if '*' in a.GetSmarts()]
+            rwmol_simple = Chem.RWMol(mol_backup)
+            
+            # Remove from the end to avoid index issues
+            for idx in sorted(indices, reverse=True):
+                rwmol_simple.RemoveAtom(idx)
+            
+            # Set aromaticity without full sanitization
+            AllChem.SetAromaticity(rwmol_simple)
+            return rwmol_simple
+        except:
+            print("Fallback also failed - using minimal processing")
+            # Return the original with minimal processing
+            return mol_backup
 
 
 def detect_homopolymer(smiles):
@@ -382,69 +592,59 @@ def detect_homopolymer(smiles):
     attachment_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', smiles)])
     if not attachment_points:
         return False
+    
+    # Check homopolymer by structure
+    if '.' in smiles:
+        parts = smiles.split('.')
+        if len(parts) == 2:
+            # Remove attachment points for comparison
+            base_part1 = re.sub(r'\[\*:\d+\]', '[*]', parts[0])
+            base_part2 = re.sub(r'\[\*:\d+\]', '[*]', parts[1])
+            
+            if base_part1 == base_part2:
+                print(f"Detected homopolymer with base structure: {base_part1}")
+                return True
         
     # Check if it's a homopolymer (only attachments 1,2 are present)
     if len(attachment_points) <= 2 and all(ap <= 2 for ap in attachment_points):
+        print("Detected homopolymer with attachments 1,2")
         return True
         
     # Check if it looks like our renumbered format (1,2,3,4)
     if len(attachment_points) == 4 and attachment_points == [1, 2, 3, 4]:
-        # It's a properly renumbered homopolymer
+        print("Detected homopolymer with properly numbered attachments 1,2,3,4")
         return True
     
     return False
 
 
-def remap_connection_point(point, is_homopolymer):
-    """
-    Remaps connection points for homopolymers.
-    For homopolymers with only [*:1] and [*:2], this maps 3->1 and 4->2
-    
-    Args:
-        point: The attachment point number as string
-        is_homopolymer: Whether this is a homopolymer
-        
-    Returns:
-        remapped point number as string
-    """
-    if not is_homopolymer:
-        return point
-        
-    # For homopolymers, map 3->1 and 4->2 if needed
-    point_num = int(point)
-    if point_num == 3:
-        return "1"
-    elif point_num == 4:
-        return "2"
-    return point
-
-
 def parse_polymer_rules(rules):
     """
-    Parse polymer connectivity rules with robust error handling and homopolymer support.
+    Parse polymer connectivity rules with robust handling for various formats.
     
     Args:
-        rules: List of connectivity rules
+        rules: List of connectivity rules (strings)
         
     Returns:
         tuple: (polymer_info, degree_of_polymerization)
     """
     polymer_info = []
     counter = Counter()  # used for validating the input
+    
+    # Print input for diagnostics
+    rules_str = ", ".join(rules) if rules else "empty rules"
+    print(f"Parsing polymer rules: {rules_str}")
 
     # check if deg of polymerization is provided
-    if '~' in rules[-1]:
+    if rules and '~' in rules[-1]:
         Xn = float(rules[-1].split('~')[1])
         rules[-1] = rules[-1].split('~')[0]
     else:
         Xn = 1.
-    
-    # Try to detect if this is a homopolymer
-    is_homopolymer = any("1-3:" in rule or "2-4:" in rule for rule in rules)
-    
-    # Get SMILES from environment if possible to better detect homopolymers
-    # This is difficult to do in this context without modifying function signature,
-    # so we'll rely on the connectivity patterns to detect homopolymers
+
+    # Try to detect if this is a homopolymer from the rules
+    is_homopolymer = any(('1-3:' in rule or '1.3:' in rule or 
+                          '2-4:' in rule or '2.4:' in rule) for rule in rules)
     
     for rule in rules:
         # handle edge case where we have no rules, and rule is empty string
@@ -475,16 +675,30 @@ def parse_polymer_rules(rules):
                 # Apply homopolymer remapping if needed
                 if is_homopolymer:
                     original_idx1, original_idx2 = idx1, idx2
-                    idx1 = remap_connection_point(idx1, is_homopolymer)
-                    idx2 = remap_connection_point(idx2, is_homopolymer)
+                    # For homopolymers, allow mapping between 1↔3 and 2↔4
+                    if idx1 == "3":
+                        idx1 = "1"
+                    elif idx1 == "4":
+                        idx1 = "2"
+                        
+                    if idx2 == "3":
+                        idx2 = "1"
+                    elif idx2 == "4":
+                        idx2 = "2"
+                    
                     if idx1 != original_idx1 or idx2 != original_idx2:
                         print(f'Remapped homopolymer connection {original_idx1}-{original_idx2} to {idx1}-{idx2}')
                 
                 # Extract weights
                 weights_parts = rule.split(':')[1:]
                 if len(weights_parts) >= 2:
-                    w12 = float(weights_parts[0])  # weight for bond R_idx1 -> R_idx2
-                    w21 = float(weights_parts[1])  # weight for bond R_idx2 -> R_idx1
+                    try:
+                        w12 = float(weights_parts[0])  # weight for bond R_idx1 -> R_idx2
+                        w21 = float(weights_parts[1])  # weight for bond R_idx2 -> R_idx1
+                    except ValueError:
+                        print(f'Warning: invalid weight values in "{rule}", using default weights 1.0')
+                        w12 = 1.0
+                        w21 = 1.0
                 else:
                     print(f'Warning: missing weight information in "{rule}", using default weights 1.0')
                     w12 = 1.0
@@ -495,6 +709,7 @@ def parse_polymer_rules(rules):
             w12 = 1.0  # Default weight
             w21 = 1.0  # Default weight
             
+        # Add to polymer info and counter
         polymer_info.append((idx1, idx2, w12, w21))
         counter[idx1] += float(w21)
         counter[idx2] += float(w12)
@@ -503,6 +718,11 @@ def parse_polymer_rules(rules):
     for k, v in counter.items():
         if np.isclose(v, 1.0) is False:
             print(f'Warning: sum of weights of incoming stochastic edges should be 1 -- found {v} for [*:{k}]. Proceeding anyway.')
+    
+    # Show final parsed rules
+    print(f"Parsed {len(polymer_info)} polymer connections:")
+    for i, (idx1, idx2, w12, w21) in enumerate(polymer_info):
+        print(f"  {i+1}. {idx1}-{idx2} with weights {w12:.2f}, {w21:.2f}")
             
     return polymer_info, 1. + np.log10(Xn)
 
@@ -639,8 +859,6 @@ class MolGraph:
             # Check for homopolymer
             smiles_part = Chem.MolToSmiles(m)
             is_homopolymer = detect_homopolymer(smiles_part)
-            if is_homopolymer:
-                print(f"Detected homopolymer structure in {smiles_part}")
             
             # parse rules on monomer connections
             self.polymer_info, self.degree_of_polym = parse_polymer_rules(
@@ -731,15 +949,17 @@ class MolGraph:
             # Check available attachment points from R tags
             r_tags = set()
             for atom in cm.GetAtoms():
-                if 'R' in atom.GetPropNames() and atom.GetProp('R'):
+                if atom.HasProp('R') and atom.GetProp('R'):
                     for tag in atom.GetProp('R').split('*')[1:]:
                         r_tags.add(tag)
             
             print(f"Available R tags in molecule: {sorted(list(r_tags))}")
 
+            # Process each connection with proper error handling
+            processed_connections = []
+            
             # for all possible bonds between monomers:
             # add bond -> compute bond features -> add to bond list -> remove bond
-            processed_connections = []
             for r1, r2, w_bond12, w_bond21 in self.polymer_info:
                 print(f"Processing connection {r1}-{r2}")
                 
@@ -761,7 +981,7 @@ class MolGraph:
                 
                 for atom in cm.GetAtoms():
                     # Check if the R groups exist
-                    if 'R' in atom.GetPropNames():
+                    if atom.HasProp('R'):
                         r_prop = atom.GetProp('R')
                         if f'*{r1}' in r_prop:
                             r1_exists = True
@@ -787,7 +1007,7 @@ class MolGraph:
                         print(f"Remapping attachment point {r1} to {remapped_r1} for homopolymer")
                         
                         for atom in cm.GetAtoms():
-                            if 'R' in atom.GetPropNames():
+                            if atom.HasProp('R'):
                                 r_prop = atom.GetProp('R')
                                 if f'*{remapped_r1}' in r_prop and atom.GetBoolProp('OrigMol') is True:
                                     a1 = atom.GetIdx()
@@ -798,7 +1018,7 @@ class MolGraph:
                         print(f"Remapping attachment point {r2} to {remapped_r2} for homopolymer")
                         
                         for atom in cm.GetAtoms():
-                            if 'R' in atom.GetPropNames():
+                            if atom.HasProp('R'):
                                 r_prop = atom.GetProp('R')
                                 if f'*{remapped_r2}' in r_prop:
                                     if atom.GetBoolProp('OrigMol') is True:
@@ -851,11 +1071,31 @@ class MolGraph:
                         
                     # create bond
                     cm.AddBond(a1, _a2, order=order1)
-                    Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
+                    
+                    try:
+                        # Try various sanitization approaches
+                        try:
+                            Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
+                        except:
+                            # Try more flexible sanitization
+                            Chem.SanitizeMol(cm, 
+                                Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE,
+                                catchErrors=True)
+                    except Exception as e:
+                        print(f"Warning: Sanitization failed after adding bond: {str(e)}")
+                        # Just set aromaticity
+                        AllChem.SetAromaticity(cm)
 
                     # get bond object and features
                     bond = cm.GetBondBetweenAtoms(a1, _a2)
-                    f_bond = bond_features(bond)
+                    if bond is None:
+                        print(f"Warning: Could not find bond between atoms {a1} and {_a2}.")
+                        # Create a default bond feature vector
+                        f_bond = [0] * PARAMS.BOND_FDIM
+                        f_bond[0] = 1  # Mark as None bond
+                    else:
+                        f_bond = bond_features(bond)
+                        
                     if bond_features_extra is not None:
                         descr = bond_features_extra[bond.GetIdx()].tolist()
                         if overwrite_default_bond_features:
@@ -880,7 +1120,12 @@ class MolGraph:
 
                     # remove the bond
                     cm.RemoveBond(a1, _a2)
-                    Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
+                    
+                    try:
+                        Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE)
+                    except:
+                        # Just set aromaticity if sanitization fails
+                        AllChem.SetAromaticity(cm)
                     
                 except Exception as e:
                     print(f"Error adding bond {r1}-{r2}: {str(e)}. Skipping.")

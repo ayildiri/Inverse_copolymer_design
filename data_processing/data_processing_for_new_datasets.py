@@ -2,6 +2,7 @@ import pandas as pd
 from rdkit import Chem
 import argparse
 import os
+import re
 
 def canonicalize_smiles(smiles):
     """Canonicalize SMILES and convert attachment points to numbered format"""
@@ -19,20 +20,42 @@ def canonicalize_smiles(smiles):
     except:
         return None
 
+def renumber_attachment_points(smiles, offset=2):
+    """
+    Renumber attachment points in a SMILES string by adding an offset
+    
+    Example: C([*:1])([*:2]) → C([*:3])([*:4])
+    """
+    # Find all [*:X] patterns and increase the numbers
+    pattern = r'\[\*:(\d+)\]'
+    
+    def replace_with_offset(match):
+        num = int(match.group(1))
+        return f'[*:{num + offset}]'
+    
+    return re.sub(pattern, replace_with_offset, smiles)
+
 def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     """Create poly_chemprop_input format string"""
     can_mona = canonicalize_smiles(mona)
-    can_monb = canonicalize_smiles(monb) if monb != mona else can_mona
+    
+    # For monomer B, we need special handling
+    if monb == mona:
+        # Homopolymer case - use the same monomer but renumber the attachment points
+        can_monb = renumber_attachment_points(can_mona, offset=2)
+    else:
+        # Different monomers - just canonicalize
+        can_monb = canonicalize_smiles(monb)
     
     if can_mona is None or can_monb is None:
         return None
 
     # Use provided connectivity or default if none provided
     if connectivity is None:
-        # FIXED: Use hyphen separator instead of dot
+        # Use hyphen separator and proper connection points
         connectivity = "<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5"
     
-    # Always use MonA.MonB format for consistency, even for homopolymers
+    # Always use MonA.MonB format
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
 
 def detect_target_columns(df, exclude_columns=None):
@@ -315,6 +338,11 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         print(f"{i+1}. {df_final.iloc[i]['poly_chemprop_input']}")
         for target_col in final_target_columns:
             print(f"   {target_col}: {df_final.iloc[i][target_col]}")
+        
+        # Parse and show attachment points in the example
+        smiles_part = df_final.iloc[i]['poly_chemprop_input'].split('|')[0]
+        attachment_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', smiles_part)])
+        print(f"   Attachment points: {attachment_points}")
     
     return df_final, final_target_columns, column_mapping
 

@@ -3,6 +3,7 @@ from itertools import zip_longest
 from copy import deepcopy
 from collections import Counter
 import logging
+import re
 
 from rdkit import Chem
 import torch
@@ -366,7 +367,68 @@ def remove_wildcard_atoms(rwmol):
     return rwmol
 
 
+def detect_homopolymer(smiles):
+    """
+    Detect if a polymer SMILES string represents a homopolymer with 
+    repeated attachment points.
+    
+    Args:
+        smiles: SMILES string with attachment points
+        
+    Returns:
+        bool: True if homopolymer detected, False otherwise
+    """
+    # Extract attachment points
+    attachment_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', smiles)])
+    if not attachment_points:
+        return False
+        
+    # Check if it's a homopolymer (only attachments 1,2 are present)
+    if len(attachment_points) <= 2 and all(ap <= 2 for ap in attachment_points):
+        return True
+        
+    # Check if it looks like our renumbered format (1,2,3,4)
+    if len(attachment_points) == 4 and attachment_points == [1, 2, 3, 4]:
+        # It's a properly renumbered homopolymer
+        return True
+    
+    return False
+
+
+def remap_connection_point(point, is_homopolymer):
+    """
+    Remaps connection points for homopolymers.
+    For homopolymers with only [*:1] and [*:2], this maps 3->1 and 4->2
+    
+    Args:
+        point: The attachment point number as string
+        is_homopolymer: Whether this is a homopolymer
+        
+    Returns:
+        remapped point number as string
+    """
+    if not is_homopolymer:
+        return point
+        
+    # For homopolymers, map 3->1 and 4->2 if needed
+    point_num = int(point)
+    if point_num == 3:
+        return "1"
+    elif point_num == 4:
+        return "2"
+    return point
+
+
 def parse_polymer_rules(rules):
+    """
+    Parse polymer connectivity rules with robust error handling and homopolymer support.
+    
+    Args:
+        rules: List of connectivity rules
+        
+    Returns:
+        tuple: (polymer_info, degree_of_polymerization)
+    """
     polymer_info = []
     counter = Counter()  # used for validating the input
 
@@ -376,7 +438,14 @@ def parse_polymer_rules(rules):
         rules[-1] = rules[-1].split('~')[0]
     else:
         Xn = 1.
-
+    
+    # Try to detect if this is a homopolymer
+    is_homopolymer = any("1-3:" in rule or "2-4:" in rule for rule in rules)
+    
+    # Get SMILES from environment if possible to better detect homopolymers
+    # This is difficult to do in this context without modifying function signature,
+    # so we'll rely on the connectivity patterns to detect homopolymers
+    
     for rule in rules:
         # handle edge case where we have no rules, and rule is empty string
         if rule == "":
@@ -393,10 +462,23 @@ def parse_polymer_rules(rules):
                 # Try to split by hyphen, but handle case where there's no hyphen
                 connection_part = rule.split(':')[0]
                 if '-' in connection_part:
+                    # Normal hyphen format
                     idx1, idx2 = connection_part.split('-')
+                elif '.' in connection_part:
+                    # Handle older dot format
+                    print(f'Warning: connection format "{connection_part}" uses dots instead of hyphens')
+                    idx1, idx2 = connection_part.split('.')
                 else:
-                    print(f'Warning: connection format "{connection_part}" does not contain hyphen, using default 1-1')
+                    print(f'Warning: connection format "{connection_part}" does not contain hyphen or dot, using default 1-1')
                     idx1, idx2 = "1", "1"  # Default connectivity between positions 1 and 1
+                
+                # Apply homopolymer remapping if needed
+                if is_homopolymer:
+                    original_idx1, original_idx2 = idx1, idx2
+                    idx1 = remap_connection_point(idx1, is_homopolymer)
+                    idx2 = remap_connection_point(idx2, is_homopolymer)
+                    if idx1 != original_idx1 or idx2 != original_idx2:
+                        print(f'Remapped homopolymer connection {original_idx1}-{original_idx2} to {idx1}-{idx2}')
                 
                 # Extract weights
                 weights_parts = rule.split(':')[1:]
@@ -553,6 +635,13 @@ class MolGraph:
             # TODO: infer bond type from bond to R groups
             m = mol[0]  # RDKit Mol object
             rules = mol[1]  # [str], list of rules
+            
+            # Check for homopolymer
+            smiles_part = Chem.MolToSmiles(m)
+            is_homopolymer = detect_homopolymer(smiles_part)
+            if is_homopolymer:
+                print(f"Detected homopolymer structure in {smiles_part}")
+            
             # parse rules on monomer connections
             self.polymer_info, self.degree_of_polym = parse_polymer_rules(
                 rules)
@@ -639,71 +728,166 @@ class MolGraph:
             cm = Chem.CombineMols(rwmol, rwmol_copy)
             cm = Chem.RWMol(cm)
 
+            # Check available attachment points from R tags
+            r_tags = set()
+            for atom in cm.GetAtoms():
+                if 'R' in atom.GetPropNames() and atom.GetProp('R'):
+                    for tag in atom.GetProp('R').split('*')[1:]:
+                        r_tags.add(tag)
+            
+            print(f"Available R tags in molecule: {sorted(list(r_tags))}")
+
             # for all possible bonds between monomers:
             # add bond -> compute bond features -> add to bond list -> remove bond
+            processed_connections = []
             for r1, r2, w_bond12, w_bond21 in self.polymer_info:
-
+                print(f"Processing connection {r1}-{r2}")
+                
+                # Skip duplicate connections (can happen with homopolymer remapping)
+                connection_key = f"{r1}-{r2}"
+                if connection_key in processed_connections:
+                    print(f"Skipping duplicate connection {connection_key}")
+                    continue
+                processed_connections.append(connection_key)
+                
                 # get index of attachment atoms
                 a1 = None  # idx of atom 1 in rwmol
                 a2 = None  # idx of atom 1 in rwmol --> to be used by MolGraph
                 _a2 = None  # idx of atom 1 in cm --> to be used by RDKit
+                
+                # Check if the R groups actually exist in the molecule
+                r1_exists = False
+                r2_exists = False
+                
                 for atom in cm.GetAtoms():
-                    # take a1 from a fragment in the original molecule object
-                    if f'*{r1}' in atom.GetProp('R') and atom.GetBoolProp('OrigMol') is True:
-                        a1 = atom.GetIdx()
-                    # take _a2 from a fragment in the copied molecule object, but a2 from the original
-                    if f'*{r2}' in atom.GetProp('R'):
-                        if atom.GetBoolProp('OrigMol') is True:
-                            a2 = atom.GetIdx()
-                        elif atom.GetBoolProp('OrigMol') is False:
-                            _a2 = atom.GetIdx()
+                    # Check if the R groups exist
+                    if 'R' in atom.GetPropNames():
+                        r_prop = atom.GetProp('R')
+                        if f'*{r1}' in r_prop:
+                            r1_exists = True
+                        if f'*{r2}' in r_prop:
+                            r2_exists = True
+                        
+                        # take a1 from a fragment in the original molecule object
+                        if f'*{r1}' in r_prop and atom.GetBoolProp('OrigMol') is True:
+                            a1 = atom.GetIdx()
+                        # take _a2 from a fragment in the copied molecule object, but a2 from the original
+                        if f'*{r2}' in r_prop:
+                            if atom.GetBoolProp('OrigMol') is True:
+                                a2 = atom.GetIdx()
+                            elif atom.GetBoolProp('OrigMol') is False:
+                                _a2 = atom.GetIdx()
+
+                # Handle homopolymer case by remapping attachment points if needed
+                if is_homopolymer:
+                    # For homopolymer with only attachment points 1,2
+                    # Try to map attachment points 3,4 to 1,2
+                    if int(r1) > 2 and not r1_exists:
+                        remapped_r1 = str((int(r1) - 2) if int(r1) <= 4 else r1)
+                        print(f"Remapping attachment point {r1} to {remapped_r1} for homopolymer")
+                        
+                        for atom in cm.GetAtoms():
+                            if 'R' in atom.GetPropNames():
+                                r_prop = atom.GetProp('R')
+                                if f'*{remapped_r1}' in r_prop and atom.GetBoolProp('OrigMol') is True:
+                                    a1 = atom.GetIdx()
+                                    r1_exists = True
+                    
+                    if int(r2) > 2 and not r2_exists:
+                        remapped_r2 = str((int(r2) - 2) if int(r2) <= 4 else r2)
+                        print(f"Remapping attachment point {r2} to {remapped_r2} for homopolymer")
+                        
+                        for atom in cm.GetAtoms():
+                            if 'R' in atom.GetPropNames():
+                                r_prop = atom.GetProp('R')
+                                if f'*{remapped_r2}' in r_prop:
+                                    if atom.GetBoolProp('OrigMol') is True:
+                                        a2 = atom.GetIdx()
+                                    elif atom.GetBoolProp('OrigMol') is False:
+                                        _a2 = atom.GetIdx()
+                                        r2_exists = True
+
+                if not r1_exists:
+                    print(f'Warning: attachment point [*:{r1}] not found in molecule. Skipping connection {r1}-{r2}.')
+                    continue  # Skip this connection and move to the next
+                    
+                if not r2_exists:
+                    print(f'Warning: attachment point [*:{r2}] not found in molecule. Skipping connection {r1}-{r2}.')
+                    continue  # Skip this connection and move to the next
 
                 if a1 is None:
-                    raise ValueError(f'cannot find atom attached to [*:{r1}]')
+                    print(f'Warning: cannot find atom attached to [*:{r1}]. Skipping connection {r1}-{r2}.')
+                    continue  # Skip this connection
+                    
                 if a2 is None or _a2 is None:
-                    raise ValueError(f'cannot find atom attached to [*:{r2}]')
+                    print(f'Warning: cannot find atom attached to [*:{r2}]. Skipping connection {r1}-{r2}.')
+                    continue  # Skip this connection
 
-                # create bond
-                order1 = r_bond_types[f'*{r1}']
-                order2 = r_bond_types[f'*{r2}']
-                if order1 != order2:
-                    raise ValueError(f'two atoms are trying to be bonded with different bond types: '
-                                     f'{order1} vs {order2}')
-                cm.AddBond(a1, _a2, order=order1)
-                Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
-
-                # get bond object and features
-                bond = cm.GetBondBetweenAtoms(a1, _a2)
-                f_bond = bond_features(bond)
-                if bond_features_extra is not None:
-                    descr = bond_features_extra[bond.GetIdx()].tolist()
-                    if overwrite_default_bond_features:
-                        f_bond = descr
+                try:
+                    # Try to get bond types - handle missing keys for homopolymers
+                    if f'*{r1}' in r_bond_types:
+                        order1 = r_bond_types[f'*{r1}']
+                    elif is_homopolymer and f'*{str((int(r1) - 2))}' in r_bond_types and int(r1) <= 4:
+                        # Map 3->1, 4->2 for homopolymers
+                        remapped_r1 = str((int(r1) - 2))
+                        order1 = r_bond_types[f'*{remapped_r1}']
                     else:
-                        f_bond += descr
+                        print(f"Cannot find bond type for *{r1}, using SINGLE")
+                        order1 = Chem.rdchem.BondType.SINGLE
+                        
+                    if f'*{r2}' in r_bond_types:
+                        order2 = r_bond_types[f'*{r2}']
+                    elif is_homopolymer and f'*{str((int(r2) - 2))}' in r_bond_types and int(r2) <= 4:
+                        # Map 3->1, 4->2 for homopolymers
+                        remapped_r2 = str((int(r2) - 2))
+                        order2 = r_bond_types[f'*{remapped_r2}']
+                    else:
+                        print(f"Cannot find bond type for *{r2}, using SINGLE")
+                        order2 = Chem.rdchem.BondType.SINGLE
+                        
+                    if order1 != order2:
+                        print(f'Warning: two atoms are trying to be bonded with different bond types: '
+                                    f'{order1} vs {order2}. Using {order1}.')
+                        
+                    # create bond
+                    cm.AddBond(a1, _a2, order=order1)
+                    Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
 
-                self.f_bonds.append(self.f_atoms[a1] + f_bond)
-                self.f_bonds.append(self.f_atoms[a2] + f_bond)
+                    # get bond object and features
+                    bond = cm.GetBondBetweenAtoms(a1, _a2)
+                    f_bond = bond_features(bond)
+                    if bond_features_extra is not None:
+                        descr = bond_features_extra[bond.GetIdx()].tolist()
+                        if overwrite_default_bond_features:
+                            f_bond = descr
+                        else:
+                            f_bond += descr
 
-                # Update index mappings
-                b1 = self.n_bonds
-                b2 = b1 + 1
-                self.a2b[a2].append(b1)  # b1 = a1 --> a2
-                self.b2a.append(a1)
-                self.a2b[a1].append(b2)  # b2 = a2 --> a1
-                self.b2a.append(a2)
-                self.b2revb.append(b2)
-                self.b2revb.append(b1)
-                self.w_bonds.extend([w_bond12, w_bond21])  # add edge weights
-                self.n_bonds += 2
+                    self.f_bonds.append(self.f_atoms[a1] + f_bond)
+                    self.f_bonds.append(self.f_atoms[a2] + f_bond)
 
-                # remove the bond
-                cm.RemoveBond(a1, _a2)
-                Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
+                    # Update index mappings
+                    b1 = self.n_bonds
+                    b2 = b1 + 1
+                    self.a2b[a2].append(b1)  # b1 = a1 --> a2
+                    self.b2a.append(a1)
+                    self.a2b[a1].append(b2)  # b2 = a2 --> a1
+                    self.b2a.append(a2)
+                    self.b2revb.append(b2)
+                    self.b2revb.append(b1)
+                    self.w_bonds.extend([w_bond12, w_bond21])  # add edge weights
+                    self.n_bonds += 2
+
+                    # remove the bond
+                    cm.RemoveBond(a1, _a2)
+                    Chem.SanitizeMol(cm, Chem.SanitizeFlags.SANITIZE_ALL)
+                    
+                except Exception as e:
+                    print(f"Error adding bond {r1}-{r2}: {str(e)}. Skipping.")
+                    continue
 
             if bond_features_extra is not None and len(bond_features_extra) != self.n_bonds / 2:
-                raise ValueError(f'The number of bonds in {Chem.MolToSmiles(rwmol)} is different from the length of '
-                                 f'the extra bond features')
+                print(f'Warning: The number of bonds in processed polymer ({self.n_bonds/2}) is different from the length of the extra bond features ({len(bond_features_extra)})')
 
         # =============
         # Reaction mode

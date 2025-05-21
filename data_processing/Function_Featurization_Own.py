@@ -58,6 +58,10 @@ def poly_smiles_to_graph(poly_input, poly_label1=None, poly_label2=None, poly_in
     Returns:
         PyG Data object with flexible property attributes
     '''
+    # ADDED DEBUGGING: Print input before processing
+    original_input = poly_input
+    print(f"Debug - Original polymer input: {original_input}")
+    
     # Check polymer input format and report diagnostics
     parts = poly_input.split('|')
     if len(parts) < 3:
@@ -69,6 +73,20 @@ def poly_smiles_to_graph(poly_input, poly_label1=None, poly_label2=None, poly_in
         elif len(parts) == 2:
             poly_input = f"{parts[0]}|{parts[1]}|<1-1:1.0:1.0"
         parts = poly_input.split('|')
+    
+    # ADDED FIX: Convert hyphens to decimal points in stoichiometry values
+    for i in range(1, len(parts) - 1):  # Skip SMILES part and connectivity part
+        if '-' in parts[i] and not parts[i].startswith('<'):
+            print(f"Found hyphen in stoichiometry value: {parts[i]}")
+            parts[i] = parts[i].replace('-', '.')
+            print(f"Fixed to: {parts[i]}")
+    
+    # Update the poly_input with fixed parts
+    poly_input = '|'.join(parts)
+    
+    # ADDED DEBUGGING: Print updated input
+    if original_input != poly_input:
+        print(f"Debug - Fixed polymer input: {poly_input}")
     
     # Extract SMILES part and analyze attachment points
     smiles_part = parts[0]
@@ -99,6 +117,10 @@ def poly_smiles_to_graph(poly_input, poly_label1=None, poly_label2=None, poly_in
         parts[2] = parts[2].replace('.', '-')
         poly_input = '|'.join(parts)
 
+    # ADDED DEBUGGING: Final check before creating molecule
+    print(f"Debug - Final polymer input passed to make_polymer_mol: {poly_input}")
+    print(f"Debug - Stoichiometry values: {poly_input.split('|')[1:-1]}")
+    
     # Turn into RDKIT mol object with careful error handling
     try:
         mol = (make_polymer_mol(poly_input.split("|")[0], 0, 0,  # smiles
@@ -584,4 +606,25 @@ def poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan=
     Returns:
         PyG Data object with flexible property attributes
     """
+    # ADDED DEBUGGING: Debug the input before passing to poly_smiles_to_graph
+    print(f"Debug from flexible function - Input: {poly_input}")
+    if "|" in poly_input:
+        parts = poly_input.split("|")
+        if len(parts) >= 3:
+            stoichiometry = parts[1:-1]
+            print(f"Debug - Stoichiometry values from polymer string: {stoichiometry}")
+            # Check for potential problematic values
+            for i, part in enumerate(stoichiometry):
+                if "-" in part and not part.startswith("<"):
+                    print(f"WARNING: Problematic stoichiometry format detected: {part}")
+                    # Fix it
+                    parts[i+1] = parts[i+1].replace("-", ".")
+                    print(f"Fixed to: {parts[i+1]}")
+            
+            # Rebuild the string if needed
+            fixed_poly_input = "|".join(parts)
+            if fixed_poly_input != poly_input:
+                print(f"Debug - Fixed polymer input: {fixed_poly_input}")
+                poly_input = fixed_poly_input
+                
     return poly_smiles_to_graph(poly_input, None, None, poly_input_nocan, property_values)

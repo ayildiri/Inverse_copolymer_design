@@ -5,7 +5,10 @@ import os
 import re
 
 def canonicalize_smiles(smiles):
-    """Canonicalize SMILES and convert attachment points to numbered format"""
+    """
+    Canonicalize SMILES and convert attachment points to numbered format
+    Ensures chemical validity is preserved
+    """
     try:
         # Convert [*] to [*:1], [*:2] etc.
         numbered_smiles = smiles
@@ -16,46 +19,135 @@ def canonicalize_smiles(smiles):
         
         # Canonicalize with RDKit
         mol = Chem.MolFromSmiles(numbered_smiles)
-        return Chem.MolToSmiles(mol, canonical=True) if mol else None
+        if mol is None:
+            return None
+            
+        # Ensure aromatic atoms have proper valence before canonicalization
+        try:
+            Chem.SanitizeMol(mol)
+            return Chem.MolToSmiles(mol, canonical=True)
+        except:
+            # If sanitization fails, try to fix the structure
+            for atom in mol.GetAtoms():
+                if atom.GetIsAromatic():
+                    atom.SetNumExplicitHs(0)
+                    atom.SetNoImplicit(False)
+            try:
+                Chem.SanitizeMol(mol)
+                return Chem.MolToSmiles(mol, canonical=True)
+            except:
+                return None
     except:
         return None
 
-def renumber_attachment_points(smiles, offset=2):
+def check_polymer_validity(mona_smiles, monb_smiles):
     """
-    Renumber attachment points in a SMILES string by adding an offset
-    
-    Example: C([*:1])([*:2]) → C([*:3])([*:4])
+    Check if polymer monomers are valid and can form a proper polymer structure
     """
-    # Find all [*:X] patterns and increase the numbers
-    pattern = r'\[\*:(\d+)\]'
+    # Verify monomers have attachment points
+    mona_valid = mona_smiles is not None and '[*:' in mona_smiles
+    monb_valid = monb_smiles is not None and '[*:' in monb_smiles
     
-    def replace_with_offset(match):
-        num = int(match.group(1))
-        return f'[*:{num + offset}]'
+    if not mona_valid or not monb_valid:
+        return False, "Invalid monomer SMILES or missing attachment points"
     
-    return re.sub(pattern, replace_with_offset, smiles)
+    # Count attachment points
+    mona_points = len(re.findall(r'\[\*:\d+\]', mona_smiles))
+    monb_points = len(re.findall(r'\[\*:\d+\]', monb_smiles))
+    
+    if mona_points < 1 or monb_points < 1:
+        return False, "Insufficient attachment points"
+        
+    return True, "Valid polymer structure"
+
+def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts):
+    """
+    Create a proper attachment scheme based on monomer structures
+    
+    Args:
+        is_homopolymer: Whether monomers are identical
+        mona_pts: List of attachment point numbers in MonA
+        monb_pts: List of attachment point numbers in MonB
+    
+    Returns:
+        Connectivity string appropriate for the structure
+    """
+    connectivity = ""
+    
+    # For homopolymers, connect same positions between units
+    if is_homopolymer:
+        for a_pt in mona_pts:
+            for b_pt in monb_pts:
+                connectivity += f"<{a_pt}-{b_pt}:0.5:0.5"
+    else:
+        # For copolymers, connect all available positions
+        for a_pt in mona_pts:
+            for b_pt in monb_pts:
+                connectivity += f"<{a_pt}-{b_pt}:0.5:0.5"
+    
+    return connectivity
+
+def prepare_homopolymer(monomer_smiles):
+    """
+    Properly prepare a homopolymer by creating consistent attachment points
+    
+    Args:
+        monomer_smiles: Canonicalized SMILES of the monomer
+    
+    Returns:
+        Tuple of (monA, monB) with proper attachment point numbering
+    """
+    # Extract current attachment points
+    attachment_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', monomer_smiles)])
+    
+    if not attachment_points:
+        return monomer_smiles, monomer_smiles
+    
+    # For the second unit, shift attachment points by largest number
+    max_point = max(attachment_points)
+    monb_smiles = monomer_smiles
+    
+    # Replace each attachment point with offset version
+    for point in sorted(attachment_points, reverse=True):
+        monb_smiles = monb_smiles.replace(f'[*:{point}]', f'[*:{point + max_point}]')
+    
+    return monomer_smiles, monb_smiles
 
 def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
-    """Create poly_chemprop_input format string"""
+    """
+    Create properly formatted poly_chemprop_input string with chemical validity checks
+    """
     can_mona = canonicalize_smiles(mona)
     
-    # For monomer B, we need special handling
-    if monb == mona:
-        # Homopolymer case - use the same monomer but renumber the attachment points
-        can_monb = renumber_attachment_points(can_mona, offset=2)
+    # Determine if this is a homopolymer
+    is_homopolymer = (monb == mona)
+    
+    if is_homopolymer:
+        # Handle homopolymer case
+        can_mona, can_monb = prepare_homopolymer(can_mona)
     else:
         # Different monomers - just canonicalize
         can_monb = canonicalize_smiles(monb)
     
     if can_mona is None or can_monb is None:
         return None
-
-    # Use provided connectivity or default if none provided
-    if connectivity is None:
-        # Use hyphen separator and proper connection points
-        connectivity = "<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5"
     
-    # Always use MonA.MonB format
+    # Check if polymer structure is valid
+    is_valid, _ = check_polymer_validity(can_mona, can_monb)
+    if not is_valid:
+        return None
+    
+    # Extract attachment points
+    mona_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_mona)])
+    monb_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_monb)])
+    
+    # Use provided connectivity or generate appropriate scheme
+    if connectivity is None:
+        connectivity = create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points)
+    
+    # Always ensure connectivity uses hyphens, not dots
+    connectivity = connectivity.replace('.', '-')
+    
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
 
 def detect_target_columns(df, exclude_columns=None):
@@ -234,7 +326,7 @@ def interactive_column_selection(df, interactive=True):
     print(f"\nFinal column mapping: {column_mapping}")
     return selected_columns, column_mapping
 
-def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5", default_connectivity="<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5"):
+def preprocess_polymer_data(input_file, output_file, target_columns=None, column_mapping=None, interactive=True, stoichiometry="0.5|0.5", default_connectivity=None):
     """
     General preprocessing function for polymer data with flexible target handling
     
@@ -245,7 +337,7 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         column_mapping: Dict mapping old names to new names
         interactive: If True, use interactive selection
         stoichiometry: Default stoichiometry to use (format: "fraction_A|fraction_B")
-        default_connectivity: Default connectivity pattern for polymers
+        default_connectivity: Default connectivity pattern for polymers (if None, will be derived from structure)
     """
     # Load CSV
     df = pd.read_csv(input_file)
@@ -272,9 +364,10 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     
     # Handle connectivity if provided in the CSV
     if 'connectivity' not in df.columns:
-        df['connectivity'] = default_connectivity
+        df['connectivity'] = None
     else:
-        df['connectivity'].fillna(default_connectivity, inplace=True)
+        # Replace null values with None rather than a string
+        df['connectivity'] = df['connectivity'].where(pd.notnull(df['connectivity']), None)
     
     # Handle target columns
     if target_columns is None or column_mapping is None:
@@ -356,8 +449,8 @@ def main():
                         help='New names for target columns (must match --targets length)')
     parser.add_argument('--stoichiometry', '-s', default="0.5|0.5",
                         help='Default stoichiometry for homopolymers (format: fraction_A|fraction_B)')
-    parser.add_argument('--connectivity', '-c', default="<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5",
-                        help='Default connectivity pattern for polymers')
+    parser.add_argument('--connectivity', '-c', default=None,
+                        help='Default connectivity pattern for polymers (if None, derived from structure)')
     parser.add_argument('--non_interactive', action='store_true',
                         help='Skip interactive selection and auto-detect all numeric columns')
     parser.add_argument('--list_columns', '-l', action='store_true',
@@ -441,8 +534,8 @@ if __name__ == "__main__":
         print("# Specify columns and names via command line")
         print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -t value band_gap -n band_gap_eV conductivity")
         print("")
-        print("# With custom stoichiometry and connectivity")
-        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -s \"0.7|0.3\" -c \"<1-3:0.7:0.3<1-4:0.3:0.7<2-3:0.5:0.5<2-4:0.8:0.2\"")
+        print("# With custom stoichiometry")
+        print("python data_processing_for_new_datasets.py -i input.csv -o output.csv -s \"0.7|0.3\"")
         print("")
         print("# List available columns")
         print("python data_processing_for_new_datasets.py -i input.csv -l")

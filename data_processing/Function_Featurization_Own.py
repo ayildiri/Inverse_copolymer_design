@@ -112,10 +112,20 @@ def poly_smiles_to_graph(poly_input, poly_label1=None, poly_label2=None, poly_in
         if poly_label2 is not None:
             properties.append(poly_label2)
 
-    # Pre-process connectivity to ensure hyphens, not dots
+    # Pre-process connectivity ONLY for the connectivity section
     if len(parts) >= 3:
-        parts[2] = parts[2].replace('.', '-')
-        poly_input = '|'.join(parts)
+        # Get the connectivity part (everything after the second pipe)
+        connectivity_start = poly_input.find('|', poly_input.find('|') + 1) + 1
+        connectivity_part = poly_input[connectivity_start:]
+        
+        # Replace dots with hyphens ONLY in the connectivity part
+        fixed_connectivity = connectivity_part.replace('.', '-')
+        
+        # Put it back together
+        poly_input = poly_input[:connectivity_start] + fixed_connectivity
+        
+        # Update parts array
+        parts = poly_input.split('|')
 
     # ADDED DEBUGGING: Final check before creating molecule
     print(f"Debug - Final polymer input passed to make_polymer_mol: {poly_input}")

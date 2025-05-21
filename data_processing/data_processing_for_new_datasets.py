@@ -428,23 +428,27 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     # FIX: Final check for hyphens in the polymer string
     print("Performing final check for format issues...")
     def fix_polymer_format(poly_str):
-        if not isinstance(poly_str, str):
-            return poly_str
-            
-        parts = poly_str.split('|')
-        if len(parts) < 3:
-            return poly_str
-            
-        # Replace hyphens with dots in stoichiometry sections
-        for i in range(1, len(parts) - 1):  # Skip SMILES and connectivity sections
-            parts[i] = parts[i].replace('-', '.')
-            
-        # Ensure connectivity section uses hyphens
-        if len(parts) >= 3:
-            # Last part is connectivity
-            parts[-1] = parts[-1].replace('.', '-')
-            
-        return '|'.join(parts)
+    if not isinstance(poly_str, str):
+        return poly_str
+        
+    parts = poly_str.split('|')
+    if len(parts) < 3:
+        return poly_str
+        
+    # Replace hyphens with dots in stoichiometry sections
+    for i in range(1, len(parts) - 1):  # Skip SMILES and connectivity sections
+        parts[i] = parts[i].replace('-', '.')
+        
+    # For connectivity part, ONLY replace dots between attachment points
+    # NOT in the numeric values
+    if len(parts) >= 3:
+        connectivity = parts[-1]
+        # Use regex to ONLY replace dots between numbers when they follow a < character
+        # This targets only the connection points (<1.3) not the weight values (0.5)
+        fixed_connectivity = re.sub(r'<(\d+)\.(\d+)', r'<\1-\2', connectivity)
+        parts[-1] = fixed_connectivity
+        
+    return '|'.join(parts)
         
     df_final['poly_chemprop_input'] = df_final['poly_chemprop_input'].apply(fix_polymer_format)
     

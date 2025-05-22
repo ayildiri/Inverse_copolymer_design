@@ -11,6 +11,22 @@ import pickle
 import argparse
 import numpy as np
 
+
+# Necessary lists
+all_predictions = []
+all_real = []
+prediction_validityA = []
+prediction_validityB = []
+monA_pred = []
+monB_pred = []
+monA_true = []
+monB_true = []
+monomer_weights_predicted = []
+monomer_weights_real = []
+monomer_con_predicted = []
+monomer_con_real = []
+
+
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -25,11 +41,10 @@ if device.type == 'cuda':
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
-parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
-parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
-parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
+parser.add_argument("--embedding_dim", type=int, help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -40,12 +55,15 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.01)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
+parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 
-# Add flexible property arguments
+# Add flexible property arguments (same as other scripts)
 parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
                     help="Names of the properties used in the model")
 parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to custom dataset files (will use default naming pattern if not specified)")
 parser.add_argument("--save_properties", action="store_true",
                     help="Save property predictions alongside reconstruction results")
 
@@ -62,7 +80,9 @@ else:
 if len(property_names) != property_count:
     raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
 
-print(f"Running inference reconstruction for model with {property_count} properties: {property_names}")
+print(f"Running inference for model with {property_count} properties: {property_names}")
+if args.save_properties:
+    print("Property predictions will be saved alongside reconstruction results")
 
 seed = args.seed
 augment = args.augment #augmented or original
@@ -75,16 +95,96 @@ elif args.add_latent ==0:
 dataset_type = "test"
 data_augment = "old" # new or old
 
-# Load test data
-dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+# Handle dataset path flexibility
+if args.dataset_path:
+    # Use custom dataset path
+    data_path = os.path.join(args.dataset_path, f'dict_test_loader_{augment}_{tokenization}.pt')
+    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
+else:
+    # Use default paths
+    data_path = main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt'
+    vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+
+print(f"Loading test data from: {data_path}")
+print(f"Loading vocabulary from: {vocab_file_path}")
+
+dict_test_loader = torch.load(data_path)
+
 num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
 
-# Include property info in model name
+# Load model
+# Create an instance of the G2S model from checkpoint
+# Include property info in model name for consistency
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
-filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+# Updated path handling to use save_dir if provided
+if args.save_dir is not None:
+    filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+else:
+    filepath = os.path.join(main_dir_path, 'Checkpoints/', model_name, "model_best_loss.pt")
+
+print(f"Looking for model checkpoint at: {filepath}")
+
+def extract_properties_from_data(data):
+    """Extract property values from data object dynamically."""
+    properties = []
+    for i in range(property_count):
+        prop_attr = f'y{i+1}'
+        if hasattr(data, prop_attr):
+            properties.append(getattr(data, prop_attr).cpu().numpy())
+        else:
+            print(f"Warning: Property {prop_attr} not found in data")
+            properties.append(np.full(data.num_graphs, np.nan))
+    return properties
+
+def extract_monomers_from_strings(polymer_strings, is_homopolymer_check=True):
+    """Extract monomer information from polymer strings, handling both copolymers and homopolymers."""
+    monA_list = []
+    monB_list = []
+    weights_list = []
+    connectivity_list = []
+    
+    for polymer_str in polymer_strings:
+        try:
+            # Split the polymer string to extract components
+            parts = polymer_str.split('|')
+            if len(parts) >= 4:
+                # Extract monomers (assuming format: START|monA|monB|stoich|connectivity:pattern)
+                monA = parts[1] if len(parts) > 1 else ""
+                monB = parts[2] if len(parts) > 2 else ""
+                stoich_part = parts[3] if len(parts) > 3 else ""
+                
+                # Handle homopolymers - if monA and monB are the same or monB is empty
+                if monA == monB or monB == "" or (is_homopolymer_check and monA != "" and monB == ""):
+                    monB = monA  # Ensure homopolymer consistency
+                    stoich_part = "1:1" if stoich_part == "" else stoich_part
+                
+                monA_list.append(monA)
+                monB_list.append(monB)
+                weights_list.append(stoich_part)
+                
+                # Extract connectivity pattern
+                if len(parts) > 4 and ':' in parts[4]:
+                    connectivity = parts[4].split(':')[1] if ':' in parts[4] else ""
+                else:
+                    connectivity = ""
+                connectivity_list.append(connectivity)
+            else:
+                # Handle incomplete strings
+                monA_list.append("")
+                monB_list.append("")
+                weights_list.append("")
+                connectivity_list.append("")
+        except Exception as e:
+            print(f"Warning: Error parsing polymer string '{polymer_str}': {e}")
+            monA_list.append("")
+            monB_list.append("")
+            weights_list.append("")
+            connectivity_list.append("")
+    
+    return monA_list, monB_list, weights_list, connectivity_list
 
 if os.path.isfile(filepath):
     if args.ppguided:
@@ -104,7 +204,7 @@ if os.path.isfile(filepath):
         print(f"Warning: Specified property count ({property_count}) doesn't match model property count ({model_property_count})")
         print(f"Using model property count: {model_property_count}")
         property_count = model_property_count
-        
+    
     if property_names != model_property_names:
         print(f"Warning: Specified property names ({property_names}) don't match model property names ({model_property_names})")
         print(f"Using model property names: {model_property_names}")
@@ -116,13 +216,10 @@ if os.path.isfile(filepath):
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
     
-    # Load vocabulary
-    vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
-    vocab = load_vocab(vocab_file=vocab_file)
+    vocab = load_vocab(vocab_file=vocab_file_path)
     
-    # Initialize model
     if model_config['loss']=="wce":
-        class_weights = token_weights(vocab_file)
+        class_weights = token_weights(vocab_file_path)
         class_weights = torch.FloatTensor(class_weights)
         model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, loss_weights=class_weights, add_latent=add_latent)
     else: 
@@ -131,177 +228,137 @@ if os.path.isfile(filepath):
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
 
-    # Directory to save results
-    dir_name = os.path.join(args.save_dir, model_name)
+    # Directory to save results - updated to use save_dir if provided
+    if args.save_dir is not None:
+        dir_name = os.path.join(args.save_dir, model_name)
+    else:
+        dir_name = os.path.join(main_dir_path, 'Checkpoints/', model_name)
+        
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
-    print(f'📝 Results will be saved to: {dir_name}')
-    print(f'🔄 Running inference reconstruction on test set')
+    print(f'Running inference on test set')
+    print(f'Results will be saved to: {dir_name}')
 
-    # Initialize storage lists
-    all_predictions = []
-    all_real = []
-    all_latents = []
-    all_properties_pred = [] if args.save_properties else None
-    all_properties_real = [] if args.save_properties else None
-
-    # Run inference
+    # Run over all batches
     batches = list(range(len(dict_test_loader)))
-    
+    vocab = load_vocab(vocab_file=vocab_file_path)
+
+    # Initialize property storage if saving properties
+    if args.save_properties:
+        all_property_predictions = [[] for _ in range(property_count)]
+        all_real_properties = [[] for _ in range(property_count)]
+
+    ### INFERENCE ###
     with torch.no_grad():
         model.eval()
-        for i, batch in enumerate(batches):
-            print(f"Processing batch {i+1}/{len(batches)}")
-            
+        for batch in batches:
             data = dict_test_loader[str(batch)][0]
             data.to(device)
             dest_is_origin_matrix = dict_test_loader[str(batch)][1]
             dest_is_origin_matrix.to(device)
             inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
             inc_edges_to_atom_matrix.to(device)
-            
             model.beta = 1.0
-            predictions, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
+            
+            predictions, _, _, z, y_pred = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
             
             # Convert predictions to strings
             prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
             all_predictions.extend(prediction_strings)
             
-            # Convert real molecules to strings
             real_strings = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization) for sample in range(len(data))]
             all_real.extend(real_strings)
             
-            # Save latent vectors
-            all_latents.extend(z.cpu().numpy())
+            # Extract and store monomer information for both predicted and real strings
+            pred_monA, pred_monB, pred_weights, pred_connectivity = extract_monomers_from_strings(prediction_strings)
+            real_monA, real_monB, real_weights, real_connectivity = extract_monomers_from_strings(real_strings)
             
-            # Save property predictions if requested
+            monA_pred.extend(pred_monA)
+            monB_pred.extend(pred_monB)
+            monA_true.extend(real_monA)
+            monB_true.extend(real_monB)
+            monomer_weights_predicted.extend(pred_weights)
+            monomer_weights_real.extend(real_weights)
+            monomer_con_predicted.extend(pred_connectivity)
+            monomer_con_real.extend(real_connectivity)
+            
+            # Store property predictions and real values if requested
             if args.save_properties:
-                if torch.is_tensor(y):
-                    properties_pred_batch = y.cpu().numpy()
-                    all_properties_pred.extend(properties_pred_batch)
-                
-                # Extract real property values dynamically
-                properties_real_batch = []
-                for j in range(property_count):
-                    prop_attr = f'y{j+1}'
-                    if hasattr(data, prop_attr):
-                        prop_values = getattr(data, prop_attr).cpu().numpy()
-                        if j == 0:  # Initialize for first property
-                            properties_real_batch = prop_values.reshape(-1, 1)
-                        else:  # Stack additional properties
-                            properties_real_batch = np.column_stack([properties_real_batch, prop_values])
-                    else:
-                        print(f"Warning: Property {prop_attr} not found in data")
-                        # Add NaN values for missing property
-                        nan_values = np.full((len(data), 1), np.nan)
-                        if j == 0:
-                            properties_real_batch = nan_values
+                # Property predictions from model
+                if y_pred is not None:
+                    y_pred_np = y_pred.cpu().numpy()
+                    for i in range(property_count):
+                        if i < y_pred_np.shape[1]:
+                            all_property_predictions[i].append(y_pred_np[:, i])
                         else:
-                            properties_real_batch = np.column_stack([properties_real_batch, nan_values])
+                            print(f"Warning: Property {i+1} not available in predictions")
+                            all_property_predictions[i].append(np.full(y_pred_np.shape[0], np.nan))
                 
-                if properties_real_batch.size > 0:
-                    all_properties_real.extend(properties_real_batch)
+                # Real property values from data
+                real_props = extract_properties_from_data(data)
+                for i, prop_vals in enumerate(real_props):
+                    all_real_properties[i].append(prop_vals)
 
-    print(f'💾 Saving inference reconstruction results')
+    print(f'Saving inference results')
+    print(f'Total predictions: {len(all_predictions)}')
+    print(f'Total real samples: {len(all_real)}')
 
     # Save reconstruction results
-    with open(os.path.join(dir_name, 'all_test_prediction_strings.pkl'), 'wb') as f:
+    with open(os.path.join(dir_name, 'all_val_prediction_strings.pkl'), 'wb') as f:
         pickle.dump(all_predictions, f)
-    with open(os.path.join(dir_name, 'all_test_real_strings.pkl'), 'wb') as f:
+    with open(os.path.join(dir_name, 'all_val_real_strings.pkl'), 'wb') as f:
         pickle.dump(all_real, f)
-    with open(os.path.join(dir_name, 'all_test_latents.npy'), 'wb') as f:
-        np.save(f, np.array(all_latents))
-
-    print(f"✅ Saved {len(all_predictions)} reconstructed molecules")
-    print(f"✅ Saved {len(all_real)} real molecules")
-    print(f"✅ Saved latent vectors: {np.array(all_latents).shape}")
-
-    # Save property results if requested
+    
+    # Save monomer analysis results
+    with open(os.path.join(dir_name, 'monA_predicted.pkl'), 'wb') as f:
+        pickle.dump(monA_pred, f)
+    with open(os.path.join(dir_name, 'monB_predicted.pkl'), 'wb') as f:
+        pickle.dump(monB_pred, f)
+    with open(os.path.join(dir_name, 'monA_real.pkl'), 'wb') as f:
+        pickle.dump(monA_true, f)
+    with open(os.path.join(dir_name, 'monB_real.pkl'), 'wb') as f:
+        pickle.dump(monB_true, f)
+    with open(os.path.join(dir_name, 'weights_predicted.pkl'), 'wb') as f:
+        pickle.dump(monomer_weights_predicted, f)
+    with open(os.path.join(dir_name, 'weights_real.pkl'), 'wb') as f:
+        pickle.dump(monomer_weights_real, f)
+    with open(os.path.join(dir_name, 'connectivity_predicted.pkl'), 'wb') as f:
+        pickle.dump(monomer_con_predicted, f)
+    with open(os.path.join(dir_name, 'connectivity_real.pkl'), 'wb') as f:
+        pickle.dump(monomer_con_real, f)
+    
+    # Save property predictions if requested
     if args.save_properties:
-        if all_properties_pred:
-            all_properties_pred = np.array(all_properties_pred)
-            with open(os.path.join(dir_name, 'all_test_properties_predicted.npy'), 'wb') as f:
-                np.save(f, all_properties_pred)
-            print(f"✅ Saved predicted properties: {all_properties_pred.shape}")
+        print(f'Saving property predictions for {property_count} properties: {property_names}')
         
-        if all_properties_real:
-            all_properties_real = np.array(all_properties_real)
-            with open(os.path.join(dir_name, 'all_test_properties_real.npy'), 'wb') as f:
-                np.save(f, all_properties_real)
-            print(f"✅ Saved real properties: {all_properties_real.shape}")
-
-    # Calculate and save reconstruction accuracy
-    exact_matches = sum(1 for pred, real in zip(all_predictions, all_real) if pred == real)
-    total_molecules = len(all_predictions)
-    reconstruction_accuracy = exact_matches / total_molecules
-
-    # Save reconstruction summary
-    with open(os.path.join(dir_name, 'reconstruction_summary.txt'), 'w') as f:
-        f.write("Inference Reconstruction Summary\n")
-        f.write("="*50 + "\n\n")
-        f.write(f"Properties: {property_names}\n")
-        f.write(f"Dataset: {dataset_type}\n")
-        f.write(f"Total molecules: {total_molecules}\n")
-        f.write(f"Exact reconstructions: {exact_matches}\n")
-        f.write(f"Reconstruction accuracy: {reconstruction_accuracy:.4f} ({reconstruction_accuracy*100:.2f}%)\n\n")
-        
-        if args.save_properties and all_properties_pred is not None:
-            f.write("Property Prediction Summary:\n")
-            f.write("-"*30 + "\n")
-            for i, prop_name in enumerate(property_names):
-                pred_values = all_properties_pred[:, i]
-                f.write(f"{prop_name} (Predicted):\n")
-                f.write(f"  Mean: {np.mean(pred_values):.4f}\n")
-                f.write(f"  Std:  {np.std(pred_values):.4f}\n")
-                f.write(f"  Min:  {np.min(pred_values):.4f}\n")
-                f.write(f"  Max:  {np.max(pred_values):.4f}\n\n")
-        
-        if args.save_properties and all_properties_real is not None:
-            f.write("Real Property Summary:\n")
-            f.write("-"*30 + "\n")
-            for i, prop_name in enumerate(property_names):
-                real_values = all_properties_real[:, i]
-                valid_values = real_values[~np.isnan(real_values)]
-                if len(valid_values) > 0:
-                    f.write(f"{prop_name} (Real):\n")
-                    f.write(f"  Mean: {np.mean(valid_values):.4f}\n")
-                    f.write(f"  Std:  {np.std(valid_values):.4f}\n")
-                    f.write(f"  Min:  {np.min(valid_values):.4f}\n")
-                    f.write(f"  Max:  {np.max(valid_values):.4f}\n\n")
-
-    # Save detailed comparison for first 100 molecules
-    with open(os.path.join(dir_name, 'reconstruction_examples.txt'), 'w') as f:
-        f.write("Reconstruction Examples (First 100 molecules)\n")
-        f.write("="*80 + "\n\n")
-        f.write(f"Properties: {property_names}\n\n")
-        
-        for i in range(min(100, len(all_predictions))):
-            f.write(f"Molecule {i+1}:\n")
-            f.write(f"  Real:        {all_real[i]}\n")
-            f.write(f"  Predicted:   {all_predictions[i]}\n")
-            f.write(f"  Match:       {'✓' if all_real[i] == all_predictions[i] else '✗'}\n")
+        for i in range(property_count):
+            # Save predicted properties
+            if all_property_predictions[i]:
+                pred_props_concat = np.concatenate(all_property_predictions[i], axis=0)
+                np.save(os.path.join(dir_name, f'{property_names[i]}_predicted.npy'), pred_props_concat)
+                print(f'  Saved {property_names[i]} predictions: {pred_props_concat.shape}')
             
-            if args.save_properties and all_properties_pred is not None and all_properties_real is not None:
-                f.write("  Properties:\n")
-                for j, prop_name in enumerate(property_names):
-                    real_val = all_properties_real[i, j] if not np.isnan(all_properties_real[i, j]) else "N/A"
-                    pred_val = all_properties_pred[i, j]
-                    f.write(f"    {prop_name}: Real={real_val}, Pred={pred_val:.4f}\n")
-            f.write("\n")
-
-    print('\n' + '='*60)
-    print('🎉 INFERENCE RECONSTRUCTION COMPLETED')
-    print('='*60)
-    print(f"📊 Summary:")
-    print(f"  Total molecules: {total_molecules}")
-    print(f"  Exact reconstructions: {exact_matches}")
-    print(f"  Reconstruction accuracy: {reconstruction_accuracy:.4f} ({reconstruction_accuracy*100:.2f}%)")
-    print(f"📁 Results saved to: {dir_name}")
+            # Save real properties
+            if all_real_properties[i]:
+                real_props_concat = np.concatenate(all_real_properties[i], axis=0)
+                np.save(os.path.join(dir_name, f'{property_names[i]}_real.npy'), real_props_concat)
+                print(f'  Saved {property_names[i]} real values: {real_props_concat.shape}')
+    
+    # Summary statistics
+    homopolymer_count_pred = sum(1 for a, b in zip(monA_pred, monB_pred) if a == b and a != "")
+    homopolymer_count_real = sum(1 for a, b in zip(monA_true, monB_true) if a == b and a != "")
+    
+    print(f'\n=== INFERENCE SUMMARY ===')
+    print(f'Total samples processed: {len(all_predictions)}')
+    print(f'Homopolymers in predictions: {homopolymer_count_pred}/{len(all_predictions)} ({100*homopolymer_count_pred/len(all_predictions):.1f}%)')
+    print(f'Homopolymers in real data: {homopolymer_count_real}/{len(all_real)} ({100*homopolymer_count_real/len(all_real):.1f}%)')
+    print(f'Results saved to: {dir_name}')
+    print(f'Model properties: {property_names}')
     if args.save_properties:
-        print(f"🔬 Property predictions and comparisons saved")
-        print(f"📋 Properties: {property_names}")
+        print(f'Property predictions saved for: {property_names}')
+    print(f'=========================')
 
 else: 
-    print("❌ The model training diverged and there is no trained model file!")
+    print("The model training diverged and there is no trained model file!")
     print(f"Expected model file: {filepath}")

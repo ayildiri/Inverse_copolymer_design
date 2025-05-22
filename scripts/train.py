@@ -32,15 +32,18 @@ class EarlyStopping:
             self.best_score = val_loss
             torch.save(model_dict, os.path.join(self.save_dir,"model_best_loss.pt"))
             #torch.save(model.state_dict(), self.save_dir + "/model_best_loss.pth")
+            return True  # Indicate that a new best model was saved
         elif val_loss > self.best_score:
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
+            return False  # No improvement
         else:
             self.best_score = val_loss
             torch.save(model_dict, os.path.join(self.save_dir,"model_best_loss.pt"))
             #torch.save(model.state_dict(), self.save_dir + "/model_best_loss.pth")
             self.counter = 0
+            return True  # Indicate that a new best model was saved
 
 
 def train(dict_train_loader, global_step, monotonic_step):
@@ -513,10 +516,10 @@ for epoch in range(epoch_cp, epochs):
     torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
     print(f"Saved latest checkpoint *after* epoch {epoch + 1}")
 
-    # Check and save best model
-    if hasattr(earlystopping, 'best_score') and earlystopping.best_score == val_loss:
-        print(f"[INFO] New best model saved with validation loss: {val_loss:.5f}")
-    earlystopping(val_loss, model_dict)
+    # FIXED: Check and save best model with proper logging
+    model_saved = earlystopping(val_loss, model_dict)
+    if model_saved:
+        print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
 
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")

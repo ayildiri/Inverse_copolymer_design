@@ -66,6 +66,9 @@ parser.add_argument("--dataset_path", type=str, default=None,
                     help="Path to custom dataset files (will use default naming pattern if not specified)")
 parser.add_argument("--save_properties", action="store_true",
                     help="Save property predictions alongside reconstruction results")
+# Add argument to control homopolymer enforcement
+parser.add_argument("--enforce_homopolymer", action="store_true", default=True,
+                    help="Enforce homopolymer format in predicted structures")
 
 args = parser.parse_args()
 
@@ -83,6 +86,8 @@ if len(property_names) != property_count:
 print(f"Running inference for model with {property_count} properties: {property_names}")
 if args.save_properties:
     print("Property predictions will be saved alongside reconstruction results")
+if args.enforce_homopolymer:
+    print("Homopolymer format will be enforced on all predictions")
 
 seed = args.seed
 augment = args.augment #augmented or original
@@ -112,6 +117,38 @@ dict_test_loader = torch.load(data_path)
 
 num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
+
+def convert_to_homopolymer_format(polymer_string):
+    """
+    Convert any polymer string to homopolymer format by making monA = monB.
+    Assumes the format: START|monA|monB|stoich|connectivity
+    """
+    if not polymer_string or '|' not in polymer_string:
+        return polymer_string
+    
+    parts = polymer_string.split('|')
+    if len(parts) < 3:
+        return polymer_string
+    
+    # Extract parts
+    start_part = parts[0]
+    monA = parts[1]
+    
+    # Use monA for both monomers (homopolymer)
+    new_parts = [start_part, monA, monA]
+    
+    # Add stoichiometry (1:1 for homopolymers)
+    if len(parts) > 3:
+        new_parts.append("1:1")
+    else:
+        new_parts.append("1:1")
+    
+    # Add connectivity if present
+    if len(parts) > 4:
+        new_parts.append(parts[4])
+    
+    # Reconstruct the polymer string
+    return "|".join(new_parts)
 
 # Load model
 # Create an instance of the G2S model from checkpoint
@@ -303,10 +340,28 @@ if os.path.isfile(filepath):
     print(f'Saving inference results')
     print(f'Total predictions: {len(all_predictions)}')
     print(f'Total real samples: {len(all_real)}')
-
-    # Save reconstruction results
-    with open(os.path.join(dir_name, 'all_val_prediction_strings.pkl'), 'wb') as f:
+    
+    # Save original predictions before homopolymer enforcement
+    with open(os.path.join(dir_name, 'all_val_prediction_strings_original.pkl'), 'wb') as f:
         pickle.dump(all_predictions, f)
+
+    # Apply homopolymer enforcement if specified
+    if args.enforce_homopolymer:
+        print(f'Converting all predictions to homopolymer format')
+        homopolymer_predictions = [convert_to_homopolymer_format(pred) for pred in all_predictions]
+        
+        # Save homopolymer-enforced predictions as the main result
+        with open(os.path.join(dir_name, 'all_val_prediction_strings.pkl'), 'wb') as f:
+            pickle.dump(homopolymer_predictions, f)
+        
+        # Re-extract monomer information after homopolymer enforcement
+        monA_pred, monB_pred, monomer_weights_predicted, monomer_con_predicted = extract_monomers_from_strings(homopolymer_predictions)
+    else:
+        # Save original predictions if homopolymer enforcement not specified
+        with open(os.path.join(dir_name, 'all_val_prediction_strings.pkl'), 'wb') as f:
+            pickle.dump(all_predictions, f)
+    
+    # Save real samples
     with open(os.path.join(dir_name, 'all_val_real_strings.pkl'), 'wb') as f:
         pickle.dump(all_real, f)
     
@@ -353,6 +408,9 @@ if os.path.isfile(filepath):
     print(f'Total samples processed: {len(all_predictions)}')
     print(f'Homopolymers in predictions: {homopolymer_count_pred}/{len(all_predictions)} ({100*homopolymer_count_pred/len(all_predictions):.1f}%)')
     print(f'Homopolymers in real data: {homopolymer_count_real}/{len(all_real)} ({100*homopolymer_count_real/len(all_real):.1f}%)')
+    if args.enforce_homopolymer:
+        print(f'Homopolymer format enforced on all predictions')
+        print(f'Original predictions saved as: all_val_prediction_strings_original.pkl')
     print(f'Results saved to: {dir_name}')
     print(f'Model properties: {property_names}')
     if args.save_properties:

@@ -15,7 +15,6 @@ from statistics import mean
 import argparse
 from functools import partial
 
-
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -342,11 +341,24 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     prediction_validityB.append(False)
                     rec_B.append(False)
             
-            # Check stoichiometry reconstruction - direct string comparison, no canonicalization
-            if stoich_p.strip().replace("_", "") == stoich_r.strip().replace("_", ""):
+            # Improved stoichiometry reconstruction using float parsing
+            def parse_stoich(s):
+                """
+                Parses a stoichiometry string like '0.5:0.5' into a list of floats.
+                Strips whitespace, removes EOS markers like '_', and rounds to 3 decimals.
+                Returns None if parsing fails.
+                """
+                try:
+                    return [round(float(x.strip()), 3) for x in s.strip().replace("_", "").split(":")]
+                except:
+                    return None
+            
+            # Compare stoichiometry as parsed floats
+            if parse_stoich(stoich_p) == parse_stoich(stoich_r):
                 rec_stoich.append(True)
             else:
                 rec_stoich.append(False)
+
             
             # Check connectivity reconstruction - direct string comparison, no canonicalization
             if con_p == con_r:

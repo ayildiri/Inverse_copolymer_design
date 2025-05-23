@@ -106,6 +106,18 @@ if not os.path.exists(dir_name):
 print(f'Validity check of validation set using inference decoding')
 print(f'Loading results from: {dir_name}')
 
+def safe_canonicalize(smile_string, sm_can, monomer_only=False):
+    """Safely canonicalize a SMILES string, returning None if invalid."""
+    if not smile_string:
+        return None
+    try:
+        result = sm_can.canonicalize(smile_string, monomer_only=monomer_only)
+        return result if result != 'invalid_monomer_string' else None
+    except Exception as e:
+        # Optionally print the error for debugging
+        # print(f"Error canonicalizing {smile_string}: {e}")
+        return None
+
 def is_homopolymer_string(polymer_string):
     """Check if a polymer string represents a homopolymer (monA = monB)."""
     try:
@@ -121,25 +133,46 @@ def is_homopolymer_string(polymer_string):
 def extract_monomer_info(polymer_string):
     """Extract monomer information from polymer string, handling both copolymers and homopolymers."""
     try:
+        monA = monB = stoich = connectivity = ""
+        
         if '|' in polymer_string:
             parts = polymer_string.split('|')
+            
+            # Extract from explicit monomer fields if available
             if len(parts) >= 3:
-                monomer_field = parts[0] if len(parts) > 0 else ""
-                if '.' in monomer_field:
-                    monA, monB = monomer_field.split('.', 1)
-                else:
-                    monA = monomer_field
-                    monB = monomer_field  # fallback for homopolymer
+                # Try to get monomers from the expected positions
+                monA = parts[1] if len(parts) > 1 else ""
+                monB = parts[2] if len(parts) > 2 else ""
+                
+                # For backwards compatibility, check if monomers might be in field 0
+                if (not monA or not monB) and '.' in parts[0]:
+                    monomers = parts[0].split('.')
+                    if len(monomers) >= 2:
+                        monA = monA or monomers[0]
+                        monB = monB or monomers[1]
+                
+                # Get stoichiometry and connectivity if available
                 stoich = parts[3] if len(parts) > 3 else ""
                 connectivity = parts[4] if len(parts) > 4 else ""
-                return monA, monB, stoich, connectivity
-        else:
-            # Handle old format with dots
-            if '.' in polymer_string.split('|')[0]:
-                monomers = polymer_string.split('|')[0].split('.')
+            
+            # Try alternative format where monomers are in first field with a dot separator
+            elif '.' in parts[0]:
+                monomers = parts[0].split('.')
                 if len(monomers) >= 2:
-                    return monomers[0], monomers[1], "", ""
-            return polymer_string, polymer_string, "", ""  # Assume homopolymer
+                    monA = monomers[0]
+                    monB = monomers[1]
+        
+        # Handle simple format without pipes
+        elif '.' in polymer_string:
+            monomers = polymer_string.split('.')
+            if len(monomers) >= 2:
+                monA = monomers[0]
+                monB = monomers[1]
+        else:
+            # Assume single monomer (homopolymer)
+            monA = monB = polymer_string
+            
+        return monA, monB, stoich, connectivity
     except:
         return "", "", "", ""
 
@@ -176,8 +209,16 @@ with open(os.path.join(dir_name, 'all_val_real_strings.txt'), 'w') as f:
 
 # Canonicalize both the prediction and real string and check if they are the same
 sm_can = SmilesEnumCanon()
-all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
-all_real_can = list(map(sm_can.canonicalize, all_real))
+
+# Use safe_canonicalize instead of direct mapping to handle errors gracefully
+all_predictions_can = []
+all_real_can = []
+for s in all_predictions:
+    can_s = safe_canonicalize(s, sm_can)
+    all_predictions_can.append(can_s if can_s else "invalid_smiles")
+for s in all_real:
+    can_s = safe_canonicalize(s, sm_can)
+    all_real_can.append(can_s if can_s else "invalid_smiles")
 
 print("Performing detailed reconstruction validation...")
 
@@ -196,6 +237,8 @@ homopolymer_count_real = 0
 homopolymer_count_pred = 0
 copolymer_count_real = 0
 copolymer_count_pred = 0
+invalid_pred_count = 0
+invalid_real_count = 0
 
 for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
     # Check if homopolymer or copolymer
@@ -212,8 +255,17 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
     else:
         copolymer_count_pred += 1
     
-    # Both canonicalized strings are the same
-    if sm_can.canonicalize(s_r) == sm_can.canonicalize(s_p):
+    # Both canonicalized strings are the same - use safe canonicalization
+    s_r_can = safe_canonicalize(s_r, sm_can)
+    s_p_can = safe_canonicalize(s_p, sm_can)
+    
+    # Track invalid SMILES counts
+    if not s_p_can:
+        invalid_pred_count += 1
+    if not s_r_can:
+        invalid_real_count += 1
+    
+    if s_r_can and s_p_can and s_r_can == s_p_can:
         rec.append(True)
         prediction_validityA.append(True)
         prediction_validityB.append(True)
@@ -226,43 +278,19 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
         
         # Extract monomer information for detailed analysis
         try:
-            # Handle both old format (dots) and new format (pipes)
-            if '|' in s_p and len(s_p.split("|")) >= 3:
-                # New format with explicit monomer fields
-                monA_r, monB_r, stoich_r, con_r = extract_monomer_info(s_r)
-                monA_p, monB_p, stoich_p, con_p = extract_monomer_info(s_p)
-            elif '.' in s_p and '|' in s_p:
-                # Old format with dots for monomers
-                if len(s_p.split("|")[0].split('.')) >= 2:
-                    monA_r = s_r.split("|")[0].split('.')[0]
-                    monB_r = s_r.split("|")[0].split('.')[1]
-                    monA_p = s_p.split("|")[0].split('.')[0]
-                    monB_p = s_p.split("|")[0].split('.')[1]
-                    stoich_r = "|".join(s_r.split("|")[1:-1]) if len(s_r.split("|")) > 2 else ""
-                    stoich_p = "|".join(s_p.split("|")[1:-1]) if len(s_p.split("|")) > 2 else ""
-                    con_r = s_r.split("<")[1:] if "<" in s_r else []
-                    con_p = s_p.split("<")[1:] if "<" in s_p else []
-                else:
-                    # Invalid format
-                    monA_r = monB_r = monA_p = monB_p = ""
-                    stoich_r = stoich_p = ""
-                    con_r = con_p = []
-            else:
-                # Single monomer or invalid format
-                monA_r = monB_r = monA_p = monB_p = ""
-                stoich_r = stoich_p = ""
-                con_r = con_p = []
+            monA_r, monB_r, stoich_r, con_r = extract_monomer_info(s_r)
+            monA_p, monB_p, stoich_p, con_p = extract_monomer_info(s_p)
             
-            # Canonicalize monomers
-            monA_r_can = sm_can.canonicalize(monA_r, monomer_only=True) if monA_r else ""
-            monB_r_can = sm_can.canonicalize(monB_r, monomer_only=True) if monB_r else ""
-            monA_p_can = sm_can.canonicalize(monA_p, monomer_only=True) if monA_p else ""
-            monB_p_can = sm_can.canonicalize(monB_p, monomer_only=True) if monB_p else ""
+            # Safely canonicalize monomers
+            monA_r_can = safe_canonicalize(monA_r, sm_can, monomer_only=True)
+            monB_r_can = safe_canonicalize(monB_r, sm_can, monomer_only=True)
+            monA_p_can = safe_canonicalize(monA_p, sm_can, monomer_only=True)
+            monB_p_can = safe_canonicalize(monB_p, sm_can, monomer_only=True)
             
             # Check monomer A validity and reconstruction
-            if monA_p_can and monA_p_can != 'invalid_monomer_string':
+            if monA_p_can:
                 prediction_validityA.append(True)
-                if monA_p_can == monA_r_can:
+                if monA_r_can and monA_p_can == monA_r_can:
                     rec_A.append(True)
                 else:
                     rec_A.append(False)
@@ -274,9 +302,9 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
             # For homopolymers, monB should equal monA
             if is_homo_real and is_homo_pred:
                 # Both are homopolymers
-                if monA_p_can and monA_p_can != 'invalid_monomer_string':
+                if monA_p_can:
                     prediction_validityB.append(True)
-                    if monA_p_can == monA_r_can:  # For homopolymers, monB = monA
+                    if monA_r_can and monA_p_can == monA_r_can:  # For homopolymers, monB = monA
                         rec_B.append(True)
                     else:
                         rec_B.append(False)
@@ -285,9 +313,9 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     rec_B.append(False)
             else:
                 # Handle copolymers or mixed cases
-                if monB_p_can and monB_p_can != 'invalid_monomer_string':
+                if monB_p_can:
                     prediction_validityB.append(True)
-                    if monB_p_can == monB_r_can:
+                    if monB_r_can and monB_p_can == monB_r_can:
                         rec_B.append(True)
                     else:
                         rec_B.append(False)
@@ -333,10 +361,14 @@ else:
 
 validityA = sum(1 for entry in prediction_validityA if entry) / len(prediction_validityA)
 validityB = sum(1 for entry in prediction_validityB if entry) / len(prediction_validityB)
+valid_pred_percentage = 100 * (1 - invalid_pred_count / total_samples)
+valid_real_percentage = 100 * (1 - invalid_real_count / total_samples)
 
 # Print detailed results
 print(f'\n=== RECONSTRUCTION VALIDATION RESULTS ===')
 print(f'Total samples: {total_samples}')
+print(f'Valid SMILES in predictions: {total_samples - invalid_pred_count} ({valid_pred_percentage:.1f}%)')
+print(f'Valid SMILES in real data: {total_samples - invalid_real_count} ({valid_real_percentage:.1f}%)')
 print(f'Homopolymers in real data: {homopolymer_count_real} ({100*homopolymer_count_real/total_samples:.1f}%)')
 print(f'Homopolymers in predictions: {homopolymer_count_pred} ({100*homopolymer_count_pred/total_samples:.1f}%)')
 print(f'Copolymers in real data: {copolymer_count_real} ({100*copolymer_count_real/total_samples:.1f}%)')
@@ -361,6 +393,8 @@ print(f'Saving detailed metrics to: {metrics_file}')
 with open(metrics_file, 'w') as f:
     f.write("=== RECONSTRUCTION VALIDATION RESULTS ===\n")
     f.write(f"Total samples: {total_samples}\n")
+    f.write(f"Valid SMILES in predictions: {total_samples - invalid_pred_count} ({valid_pred_percentage:.1f}%)\n")
+    f.write(f"Valid SMILES in real data: {total_samples - invalid_real_count} ({valid_real_percentage:.1f}%)\n")
     f.write(f"Homopolymers in real data: {homopolymer_count_real} ({100*homopolymer_count_real/total_samples:.1f}%)\n")
     f.write(f"Homopolymers in predictions: {homopolymer_count_pred} ({100*homopolymer_count_pred/total_samples:.1f}%)\n")
     f.write(f"Copolymers in real data: {copolymer_count_real} ({100*copolymer_count_real/total_samples:.1f}%)\n")
@@ -382,6 +416,8 @@ with open(metrics_file, 'w') as f:
 # Save detailed breakdown for further analysis
 detailed_results = {
     'total_samples': total_samples,
+    'invalid_pred_count': invalid_pred_count,
+    'invalid_real_count': invalid_real_count,
     'homopolymer_count_real': homopolymer_count_real,
     'homopolymer_count_pred': homopolymer_count_pred,
     'copolymer_count_real': copolymer_count_real,

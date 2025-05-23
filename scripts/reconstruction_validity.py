@@ -181,6 +181,18 @@ def extract_monomer_info(polymer_string):
     except:
         return "", "", "", ""
 
+# Parse stoichiometry strings into numerical values
+def parse_stoich(s):
+    """
+    Parses a stoichiometry string like '0.5:0.5' into a list of floats.
+    Strips whitespace, removes EOS markers like '_', and rounds to 3 decimals.
+    Returns None if parsing fails.
+    """
+    try:
+        return [round(float(x.strip()), 3) for x in s.strip().replace("_", "").split(":")]
+    except:
+        return None
+
 # Load prediction and real strings
 pred_file = os.path.join(dir_name, 'all_val_prediction_strings.pkl')
 real_file = os.path.join(dir_name, 'all_val_real_strings.pkl')
@@ -215,19 +227,42 @@ with open(os.path.join(dir_name, 'all_val_real_strings.txt'), 'w') as f:
 # Canonicalize both the prediction and real string and check if they are the same
 sm_can = SmilesEnumCanon()
 
-# Use safe_canonicalize instead of direct mapping to handle errors gracefully
-print("Safely canonicalizing SMILES strings...")
-all_predictions_can = []
-all_real_can = []
-for s in all_predictions:
-    can_s = safe_canonicalize(s, sm_can)
-    all_predictions_can.append(can_s if can_s else "invalid_smiles")
+# Debug first few samples to understand the structure
+print("\nDebug: Examining a few samples")
+for i, (s_r, s_p) in enumerate(zip(all_real[:3], all_predictions[:3])):
+    print(f"\nSample {i+1}:")
+    print(f"  Real: {s_r}")
+    print(f"  Pred: {s_p}")
+    try:
+        print(f"  Real canonicalized: {sm_can.canonicalize(s_r)}")
+        print(f"  Pred canonicalized: {sm_can.canonicalize(s_p)}")
+    except:
+        print("  Canonicalization failed")
     
-for s in all_real:
-    can_s = safe_canonicalize(s, sm_can)
-    all_real_can.append(can_s if can_s else "invalid_smiles")
+    # Extract components for comparison
+    monA_r, monB_r, stoich_r, con_r = extract_monomer_info(s_r)
+    monA_p, monB_p, stoich_p, con_p = extract_monomer_info(s_p)
+    print(f"  Real components: monA='{monA_r}', monB='{monB_r}', stoich='{stoich_r}', con='{con_r}'")
+    print(f"  Pred components: monA='{monA_p}', monB='{monB_p}', stoich='{stoich_p}', con='{con_p}'")
+    
+    # Try to canonicalize monomers
+    try:
+        monA_r_can = sm_can.canonicalize(monA_r, monomer_only=True) if monA_r else ""
+        monB_r_can = sm_can.canonicalize(monB_r, monomer_only=True) if monB_r else ""
+        monA_p_can = sm_can.canonicalize(monA_p, monomer_only=True) if monA_p else ""
+        monB_p_can = sm_can.canonicalize(monB_p, monomer_only=True) if monB_p else ""
+        
+        print(f"  Real canonicalized monomers: monA='{monA_r_can}', monB='{monB_r_can}'")
+        print(f"  Pred canonicalized monomers: monA='{monA_p_can}', monB='{monB_p_can}'")
+        
+        # Check monomer matches
+        monA_match = monA_r_can == monA_p_can if monA_r_can and monA_p_can else False
+        monB_match = monB_r_can == monB_p_can if monB_r_can and monB_p_can else False
+        print(f"  Monomer matches: A={monA_match}, B={monB_match}")
+    except:
+        print("  Monomer canonicalization failed")
 
-print("Performing detailed reconstruction validation...")
+print("\nPerforming detailed reconstruction validation...")
 
 # Initialize validation lists
 prediction_validityA = []
@@ -237,6 +272,7 @@ rec_B = []
 rec = []
 rec_stoich = []
 rec_con = []
+component_full_rec = []  # NEW: Track if all components match
 
 # Counters for statistics
 total_samples = len(all_real)
@@ -272,6 +308,7 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
         rec_B.append(True)
         rec_stoich.append(True)
         rec_con.append(True)
+        component_full_rec.append(True)  # All components match
         continue
         
     s_r_can = safe_canonicalize(s_r, sm_can)
@@ -291,6 +328,7 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
         rec_B.append(True)
         rec_stoich.append(True)
         rec_con.append(True)
+        component_full_rec.append(True)  # All components match
     else:
         rec.append(False)
         
@@ -306,9 +344,13 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
             monB_p_can = safe_canonicalize(monB_p, sm_can, monomer_only=True)
             
             # Check monomer A validity and reconstruction
+            monA_valid = False
+            monA_match = False
             if monA_p_can:
+                monA_valid = True
                 prediction_validityA.append(True)
                 if monA_r_can and monA_p_can == monA_r_can:
+                    monA_match = True
                     rec_A.append(True)
                 else:
                     rec_A.append(False)
@@ -317,12 +359,16 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                 rec_A.append(False)
             
             # Check monomer B validity and reconstruction
+            monB_valid = False
+            monB_match = False
             # For homopolymers, monB should equal monA
             if is_homo_real and is_homo_pred:
                 # Both are homopolymers
                 if monA_p_can:
+                    monB_valid = True
                     prediction_validityB.append(True)
                     if monA_r_can and monA_p_can == monA_r_can:  # For homopolymers, monB = monA
+                        monB_match = True
                         rec_B.append(True)
                     else:
                         rec_B.append(False)
@@ -332,8 +378,10 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
             else:
                 # Handle copolymers or mixed cases
                 if monB_p_can:
+                    monB_valid = True
                     prediction_validityB.append(True)
                     if monB_r_can and monB_p_can == monB_r_can:
+                        monB_match = True
                         rec_B.append(True)
                     else:
                         rec_B.append(False)
@@ -341,30 +389,39 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     prediction_validityB.append(False)
                     rec_B.append(False)
             
-            # Improved stoichiometry reconstruction using float parsing
-            def parse_stoich(s):
-                """
-                Parses a stoichiometry string like '0.5:0.5' into a list of floats.
-                Strips whitespace, removes EOS markers like '_', and rounds to 3 decimals.
-                Returns None if parsing fails.
-                """
-                try:
-                    return [round(float(x.strip()), 3) for x in s.strip().replace("_", "").split(":")]
-                except:
-                    return None
-            
-            # Compare stoichiometry as parsed floats
-            if parse_stoich(stoich_p) == parse_stoich(stoich_r):
+            # Check stoichiometry reconstruction
+            stoich_match = False
+            if stoich_p == stoich_r:
+                stoich_match = True
                 rec_stoich.append(True)
             else:
-                rec_stoich.append(False)
-
+                # Try numeric comparison for stoichiometry
+                try:
+                    # Parse stoichiometry values
+                    stoich_r_vals = parse_stoich(stoich_r)
+                    stoich_p_vals = parse_stoich(stoich_p)
+                    
+                    if stoich_r_vals and stoich_p_vals and stoich_r_vals == stoich_p_vals:
+                        stoich_match = True
+                        rec_stoich.append(True)
+                    else:
+                        rec_stoich.append(False)
+                except:
+                    rec_stoich.append(False)
             
-            # Check connectivity reconstruction - direct string comparison, no canonicalization
+            # Check connectivity reconstruction
+            con_match = False
             if con_p == con_r:
+                con_match = True
                 rec_con.append(True)
             else:
                 rec_con.append(False)
+            
+            # Check if all components match (for component-based full reconstruction)
+            if monA_match and monB_match and stoich_match and con_match:
+                component_full_rec.append(True)
+            else:
+                component_full_rec.append(False)
                 
         except Exception as e:
             print(f"Warning: Error processing sample {i}: {e}")
@@ -375,6 +432,7 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
             rec_B.append(False)
             rec_stoich.append(False)
             rec_con.append(False)
+            component_full_rec.append(False)
 
 # Calculate reconstruction accuracies
 if len(rec) > 0:
@@ -383,12 +441,14 @@ if len(rec) > 0:
     rec_accuracyB = sum(1 for entry in rec_B if entry) / len(rec_B)
     rec_accuracy_stoich = sum(1 for entry in rec_stoich if entry) / len(rec_stoich)
     rec_accuracy_con = sum(1 for entry in rec_con if entry) / len(rec_con)
+    component_full_rec_accuracy = sum(1 for entry in component_full_rec if entry) / len(component_full_rec)
 else:
     rec_accuracy = 0
     rec_accuracyA = 0
     rec_accuracyB = 0
     rec_accuracy_stoich = 0
     rec_accuracy_con = 0
+    component_full_rec_accuracy = 0
 
 validityA = sum(1 for entry in prediction_validityA if entry) / len(prediction_validityA)
 validityB = sum(1 for entry in prediction_validityB if entry) / len(prediction_validityB)
@@ -405,7 +465,8 @@ print(f'Homopolymers in predictions: {homopolymer_count_pred} ({100*homopolymer_
 print(f'Copolymers in real data: {copolymer_count_real} ({100*copolymer_count_real/total_samples:.1f}%)')
 print(f'Copolymers in predictions: {copolymer_count_pred} ({100*copolymer_count_pred/total_samples:.1f}%)')
 print(f'')
-print(f'Full reconstruction accuracy: {100*rec_accuracy:.2f}%')
+print(f'Full reconstruction accuracy (exact string match): {100*rec_accuracy:.2f}%')
+print(f'Component-based full reconstruction: {100*component_full_rec_accuracy:.2f}%')
 print(f'Monomer A reconstruction: {100*rec_accuracyA:.2f}%')
 print(f'Monomer B reconstruction: {100*rec_accuracyB:.2f}%')
 print(f'Stoichiometry reconstruction: {100*rec_accuracy_stoich:.2f}%')
@@ -431,7 +492,8 @@ with open(metrics_file, 'w') as f:
     f.write(f"Copolymers in real data: {copolymer_count_real} ({100*copolymer_count_real/total_samples:.1f}%)\n")
     f.write(f"Copolymers in predictions: {copolymer_count_pred} ({100*copolymer_count_pred/total_samples:.1f}%)\n")
     f.write(f"\n")
-    f.write(f"Full reconstruction accuracy: {100*rec_accuracy:.4f}%\n")
+    f.write(f"Full reconstruction accuracy (exact string match): {100*rec_accuracy:.4f}%\n")
+    f.write(f"Component-based full reconstruction: {100*component_full_rec_accuracy:.4f}%\n")
     f.write(f"Monomer A reconstruction: {100*rec_accuracyA:.4f}%\n")
     f.write(f"Monomer B reconstruction: {100*rec_accuracyB:.4f}%\n")
     f.write(f"Stoichiometry reconstruction: {100*rec_accuracy_stoich:.4f}%\n")
@@ -454,6 +516,7 @@ detailed_results = {
     'copolymer_count_real': copolymer_count_real,
     'copolymer_count_pred': copolymer_count_pred,
     'rec_accuracy': rec_accuracy,
+    'component_full_rec_accuracy': component_full_rec_accuracy,  # NEW
     'rec_accuracyA': rec_accuracyA,
     'rec_accuracyB': rec_accuracyB,
     'rec_accuracy_stoich': rec_accuracy_stoich,
@@ -463,6 +526,7 @@ detailed_results = {
     'property_names': property_names,
     'property_count': property_count,
     'full_reconstruction_list': rec,
+    'component_full_rec_list': component_full_rec,  # NEW
     'monA_reconstruction_list': rec_A,
     'monB_reconstruction_list': rec_B,
     'stoich_reconstruction_list': rec_stoich,

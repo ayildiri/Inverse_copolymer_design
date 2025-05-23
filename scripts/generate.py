@@ -50,6 +50,9 @@ parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
 parser.add_argument("--save_properties", action="store_true",
                     help="Save predicted properties of generated molecules")
+# Add option to enforce homopolymer format
+parser.add_argument("--enforce_homopolymer", action="store_true",
+                    help="Enforce homopolymer format in generated structures")
 
 args = parser.parse_args()
 
@@ -65,6 +68,8 @@ if len(property_names) != property_count:
     raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
 
 print(f"Loading model trained for {property_count} properties: {property_names}")
+if args.enforce_homopolymer:
+    print("Homopolymer format will be enforced in all generated outputs")
 
 seed = args.seed
 augment = args.augment #augmented or original
@@ -80,6 +85,56 @@ dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_
 
 num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
+
+# Functions for cleaning and processing outputs
+def clean_output(polymer_string):
+    """Remove all padding underscores from generated polymer strings"""
+    return polymer_string.rstrip('_')
+
+def convert_to_homopolymer_format(polymer_string):
+    """
+    Convert any polymer string to homopolymer format by making monA = monB.
+    Assumes the format: START|monA|monB|stoich|connectivity
+    """
+    polymer_string = clean_output(polymer_string)  # First remove padding
+    
+    if not polymer_string or '|' not in polymer_string:
+        return polymer_string
+    
+    parts = polymer_string.split('|')
+    if len(parts) < 3:
+        return polymer_string
+    
+    # Extract parts
+    start_part = parts[0]
+    monA = parts[1]
+    
+    # Use monA for both monomers (homopolymer)
+    new_parts = [start_part, monA, monA]
+    
+    # Add stoichiometry (1:1 for homopolymers)
+    if len(parts) > 3:
+        new_parts.append("1:1")
+    else:
+        new_parts.append("1:1")
+    
+    # Add connectivity if present
+    if len(parts) > 4:
+        new_parts.append(parts[4])
+    
+    # Reconstruct the polymer string
+    return "|".join(new_parts)
+
+def process_generated_string(polymer_string, enforce_homopolymer=False):
+    """Process a generated polymer string by removing padding and optionally enforcing homopolymer format"""
+    # First remove trailing underscores
+    clean_string = clean_output(polymer_string)
+    
+    # Optionally enforce homopolymer format
+    if enforce_homopolymer:
+        return convert_to_homopolymer_format(clean_string)
+    else:
+        return clean_string
 
 # Include property info in model name
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
@@ -151,8 +206,13 @@ if os.path.isfile(filepath):
             predictions_rand, _, _, z, y = model.inference(data=z_rand, device=device, sample=False, log_var=None)
             print(f'Generated batch {i+1}/250')
             
-            # Convert predictions to strings
-            prediction_strings = [combine_tokens(tokenids_to_vocab(predictions_rand[sample][0].tolist(), vocab), tokenization=tokenization).split('_')[0] for sample in range(len(predictions_rand))]
+            # Convert predictions to strings and clean up
+            prediction_strings = [
+                process_generated_string(
+                    combine_tokens(tokenids_to_vocab(predictions_rand[sample][0].tolist(), vocab), tokenization=tokenization),
+                    enforce_homopolymer=args.enforce_homopolymer
+                ) for sample in range(len(predictions_rand))
+            ]
             all_predictions.extend(prediction_strings)
             
             # Save property predictions if requested
@@ -211,7 +271,8 @@ if os.path.isfile(filepath):
         ind = random.choice(list(range(64)))
         seed_z = z[ind]
         seed_z = seed_z.unsqueeze(0).repeat(64, 1)
-        seed_string = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab), tokenization=tokenization)
+        seed_string_raw = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab), tokenization=tokenization)
+        seed_string = clean_output(seed_string_raw)  # Clean seed string
         
         print(f"🌱 Seed molecule: {seed_string}")
         
@@ -229,7 +290,14 @@ if os.path.isfile(filepath):
             sampled_z.append(seed_z_noise.cpu().numpy())
             
             predictions_seed, _, _, z_new, y_new = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
-            prediction_strings = [combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions_seed))]
+            
+            # Convert predictions to strings and clean up
+            prediction_strings = [
+                process_generated_string(
+                    combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization),
+                    enforce_homopolymer=args.enforce_homopolymer
+                ) for sample in range(len(predictions_seed))
+            ]
             all_predictions_seed.extend(prediction_strings)
             
             # Save property predictions if requested
@@ -303,8 +371,12 @@ if os.path.isfile(filepath):
             while ind1 == ind2:  # Ensure they're different
                 ind2 = random.choice(list(range(64)))
                 
-            start_mol = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind1], vocab), tokenization=tokenization)
-            end_mol = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind2], vocab), tokenization=tokenization)
+            start_mol_raw = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind1], vocab), tokenization=tokenization)
+            end_mol_raw = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind2], vocab), tokenization=tokenization)
+            
+            # Clean up the strings
+            start_mol = clean_output(start_mol_raw)
+            end_mol = clean_output(end_mol_raw)
             
             seed_z1 = z[ind1]
             seed_z2 = z[ind2]
@@ -325,9 +397,11 @@ if os.path.isfile(filepath):
 
             # Generate molecules for each interpolated vector
             for s in range(interpolated_vectors.shape[0]):
-                prediction_interp, _, _, _, y_interp = model.inference(data=interpolated_vectors[s], device=device, sample=False, log_var=None)
-                prediction_string = combine_tokens(tokenids_to_vocab(prediction_interp[0][0].tolist(), vocab), tokenization=tokenization)
-                all_predictions_interp.append(prediction_string)
+                prediction_interp, _, _, _, y_interp = model.inference(data=interpolated_vectors[s].unsqueeze(0), device=device, sample=False, log_var=None)
+                
+                raw_string = combine_tokens(tokenids_to_vocab(prediction_interp[0][0].tolist(), vocab), tokenization=tokenization)
+                processed_string = process_generated_string(raw_string, enforce_homopolymer=args.enforce_homopolymer)
+                all_predictions_interp.append(processed_string)
                 
                 # Save property predictions if requested
                 if args.save_properties and torch.is_tensor(y_interp):
@@ -365,6 +439,8 @@ if os.path.isfile(filepath):
     print(f"  Interpolated molecules: {len(all_predictions_interp_all)}")
     print(f"  Total molecules generated: {len(all_predictions) + len(all_predictions_seed) + len(all_predictions_interp_all)}")
     print(f"📁 Results saved to: {dir_name}")
+    if args.enforce_homopolymer:
+        print(f"🧪 Homopolymer format enforced on all generated structures")
     if args.save_properties:
         print(f"🔬 Property predictions saved for all generated molecules")
         print(f"📋 Properties: {property_names}")

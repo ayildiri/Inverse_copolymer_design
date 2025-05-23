@@ -124,8 +124,12 @@ def extract_monomer_info(polymer_string):
         if '|' in polymer_string:
             parts = polymer_string.split('|')
             if len(parts) >= 3:
-                monA = parts[1] if len(parts) > 1 else ""
-                monB = parts[2] if len(parts) > 2 else ""
+                monomer_field = parts[0] if len(parts) > 0 else ""
+                if '.' in monomer_field:
+                    monA, monB = monomer_field.split('.', 1)
+                else:
+                    monA = monomer_field
+                    monB = monomer_field  # fallback for homopolymer
                 stoich = parts[3] if len(parts) > 3 else ""
                 connectivity = parts[4] if len(parts) > 4 else ""
                 return monA, monB, stoich, connectivity

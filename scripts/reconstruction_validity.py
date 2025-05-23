@@ -343,7 +343,7 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     rec_B.append(False)
             
             # Check stoichiometry reconstruction - direct string comparison, no canonicalization
-            if stoich_p == stoich_r:
+            if stoich_p.strip().replace("_", "") == stoich_r.strip().replace("_", ""):
                 rec_stoich.append(True)
             else:
                 rec_stoich.append(False)

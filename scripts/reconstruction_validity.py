@@ -107,9 +107,15 @@ print(f'Validity check of validation set using inference decoding')
 print(f'Loading results from: {dir_name}')
 
 def safe_canonicalize(smile_string, sm_can, monomer_only=False):
-    """Safely canonicalize a SMILES string, returning None if invalid."""
+    """Safely canonicalize a SMILES string, returning None if invalid.
+    Special handling for stoichiometry values like '0.5'."""
     if not smile_string:
         return None
+        
+    # Skip canonicalization for stoichiometry values (numbers)
+    if smile_string.replace('.', '').isdigit():
+        return smile_string
+        
     try:
         result = sm_can.canonicalize(smile_string, monomer_only=monomer_only)
         return result if result != 'invalid_monomer_string' else None
@@ -211,11 +217,13 @@ with open(os.path.join(dir_name, 'all_val_real_strings.txt'), 'w') as f:
 sm_can = SmilesEnumCanon()
 
 # Use safe_canonicalize instead of direct mapping to handle errors gracefully
+print("Safely canonicalizing SMILES strings...")
 all_predictions_can = []
 all_real_can = []
 for s in all_predictions:
     can_s = safe_canonicalize(s, sm_can)
     all_predictions_can.append(can_s if can_s else "invalid_smiles")
+    
 for s in all_real:
     can_s = safe_canonicalize(s, sm_can)
     all_real_can.append(can_s if can_s else "invalid_smiles")
@@ -256,6 +264,17 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
         copolymer_count_pred += 1
     
     # Both canonicalized strings are the same - use safe canonicalization
+    # Only attempt to canonicalize the full strings if they don't match exactly already
+    if s_r == s_p:
+        rec.append(True)
+        prediction_validityA.append(True)
+        prediction_validityB.append(True)
+        rec_A.append(True)
+        rec_B.append(True)
+        rec_stoich.append(True)
+        rec_con.append(True)
+        continue
+        
     s_r_can = safe_canonicalize(s_r, sm_can)
     s_p_can = safe_canonicalize(s_p, sm_can)
     
@@ -323,13 +342,13 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     prediction_validityB.append(False)
                     rec_B.append(False)
             
-            # Check stoichiometry reconstruction
+            # Check stoichiometry reconstruction - direct string comparison, no canonicalization
             if stoich_p == stoich_r:
                 rec_stoich.append(True)
             else:
                 rec_stoich.append(False)
             
-            # Check connectivity reconstruction
+            # Check connectivity reconstruction - direct string comparison, no canonicalization
             if con_p == con_r:
                 rec_con.append(True)
             else:

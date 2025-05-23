@@ -137,36 +137,40 @@ def is_homopolymer_string(polymer_string):
         return False
 
 def extract_monomer_info(polymer_string):
-    """Extract monomer information from polymer string, handling both copolymers and homopolymers."""
+    """Extract monomer information from polymer string, handling the format:
+    monomerA.monomerB|stoichA|stoichB|connectivity"""
     try:
-        monA = monB = stoich = connectivity = ""
+        # Default empty values
+        monA = monB = stoichA = stoichB = connectivity = ""
         
+        # Split by pipes to get the main parts
         if '|' in polymer_string:
             parts = polymer_string.split('|')
             
-            # Extract from explicit monomer fields if available
-            if len(parts) >= 3:
-                # Try to get monomers from the expected positions
-                monA = parts[1] if len(parts) > 1 else ""
-                monB = parts[2] if len(parts) > 2 else ""
-                
-                # For backwards compatibility, check if monomers might be in field 0
-                if (not monA or not monB) and '.' in parts[0]:
-                    monomers = parts[0].split('.')
-                    if len(monomers) >= 2:
-                        monA = monA or monomers[0]
-                        monB = monB or monomers[1]
-                
-                # Get stoichiometry and connectivity if available
-                stoich = parts[3] if len(parts) > 3 else ""
-                connectivity = parts[4] if len(parts) > 4 else ""
-            
-            # Try alternative format where monomers are in first field with a dot separator
-            elif '.' in parts[0]:
+            # First part contains the monomers separated by '.'
+            if len(parts) > 0 and '.' in parts[0]:
                 monomers = parts[0].split('.')
                 if len(monomers) >= 2:
                     monA = monomers[0]
                     monB = monomers[1]
+                elif len(monomers) == 1:
+                    # Homopolymer case
+                    monA = monB = monomers[0]
+            else:
+                # Handle case where there's no dot in the first part
+                monA = monB = parts[0] if parts else ""
+            
+            # Second part is stoichA
+            if len(parts) > 1:
+                stoichA = parts[1]
+                
+            # Third part is stoichB
+            if len(parts) > 2:
+                stoichB = parts[2]
+            
+            # Fourth part is connectivity
+            if len(parts) > 3:
+                connectivity = parts[3]
         
         # Handle simple format without pipes
         elif '.' in polymer_string:
@@ -174,12 +178,22 @@ def extract_monomer_info(polymer_string):
             if len(monomers) >= 2:
                 monA = monomers[0]
                 monB = monomers[1]
+            else:
+                monA = monB = monomers[0] if monomers else ""
         else:
             # Assume single monomer (homopolymer)
             monA = monB = polymer_string
             
+        # For homopolymers with no explicit stoichiometry, use 1.0
+        if monA == monB and not stoichA and not stoichB:
+            stoichA = stoichB = "1.0"
+            
+        # Use combined stoichiometry value for comparison (stoichA + stoichB)
+        stoich = stoichA + "|" + stoichB if stoichA or stoichB else ""
+            
         return monA, monB, stoich, connectivity
-    except:
+    except Exception as e:
+        print(f"Error in extract_monomer_info: {e} for string: {polymer_string[:30]}...")
         return "", "", "", ""
 
 # Load prediction and real strings
@@ -228,7 +242,64 @@ for s in all_real:
     can_s = safe_canonicalize(s, sm_can)
     all_real_can.append(can_s if can_s else "invalid_smiles")
 
-print("Performing detailed reconstruction validation...")
+    # Add debug printing for first few samples to understand structure
+    print("\nDebug: Examining polymer string formats")
+    for i, (s_r, s_p) in enumerate(zip(all_real[:5], all_predictions[:5])):
+        print(f"\nSample {i+1} Real: {s_r}")
+        monA_r, monB_r, stoich_r, con_r = extract_monomer_info(s_r)
+        print(f"  → Extracted: monA='{monA_r}', monB='{monB_r}', stoich='{stoich_r}', con='{con_r}'")
+        
+        print(f"Sample {i+1} Pred: {s_p}")
+        monA_p, monB_p, stoich_p, con_p = extract_monomer_info(s_p)
+        print(f"  → Extracted: monA='{monA_p}', monB='{monB_p}', stoich='{stoich_p}', con='{con_p}'")
+        
+        # Show pipe-delimited structure
+        if '|' in s_r:
+            print(f"  Real pipe parts: {s_r.split('|')}")
+        if '|' in s_p:
+            print(f"  Pred pipe parts: {s_p.split('|')}")
+        
+        # Show stoichiometry comparison result
+        try:
+            # Check stoichiometry reconstruction - now using the combined stoichA|stoichB format
+            stoich_match = False
+            if stoich_p == stoich_r:
+                stoich_match = True
+            else:
+                # Handle special cases for homopolymers
+                is_homo_real = monA_r == monB_r and monA_r
+                is_homo_pred = monA_p == monB_p and monA_p
+                
+                if is_homo_real and is_homo_pred:
+                    # For homopolymers, stoichiometry might be "1.0|1.0" or empty in both
+                    if (not stoich_r or stoich_r == "1.0|1.0") and (not stoich_p or stoich_p == "1.0|1.0"):
+                        stoich_match = True
+                else:
+                    # Try comparing individual stoichiometry values
+                    try:
+                        # Split combined stoich values
+                        stoich_r_parts = stoich_r.split('|') if stoich_r else []
+                        stoich_p_parts = stoich_p.split('|') if stoich_p else []
+                        
+                        # Need at least 2 parts to compare
+                        if len(stoich_r_parts) >= 2 and len(stoich_p_parts) >= 2:
+                            # Try numeric comparison
+                            stoich_r_a = float(stoich_r_parts[0]) if stoich_r_parts[0] else 0
+                            stoich_r_b = float(stoich_r_parts[1]) if stoich_r_parts[1] else 0
+                            stoich_p_a = float(stoich_p_parts[0]) if stoich_p_parts[0] else 0
+                            stoich_p_b = float(stoich_p_parts[1]) if stoich_p_parts[1] else 0
+                            
+                            # Check if numeric values are close enough (allow small floating point differences)
+                            if abs(stoich_r_a - stoich_p_a) < 0.001 and abs(stoich_r_b - stoich_p_b) < 0.001:
+                                stoich_match = True
+                    except ValueError:
+                        pass
+            
+            print(f"  Stoichiometry match: {stoich_match}")
+        except Exception as e:
+            print(f"  Error checking stoich: {e}")
+        
+    print("\nContinuing with validation...")
 
 # Initialize validation lists
 prediction_validityA = []
@@ -342,11 +413,41 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     prediction_validityB.append(False)
                     rec_B.append(False)
             
-            # Check stoichiometry reconstruction - direct string comparison, no canonicalization
+            # Check stoichiometry reconstruction - now using the combined stoichA|stoichB format
             if stoich_p == stoich_r:
                 rec_stoich.append(True)
             else:
-                rec_stoich.append(False)
+                # Handle special cases for homopolymers
+                if is_homo_real and is_homo_pred:
+                    # For homopolymers, stoichiometry might be "1.0|1.0" or empty in both
+                    if (not stoich_r or stoich_r == "1.0|1.0") and (not stoich_p or stoich_p == "1.0|1.0"):
+                        rec_stoich.append(True)
+                    else:
+                        rec_stoich.append(False)
+                else:
+                    # Try comparing individual stoichiometry values
+                    try:
+                        # Split combined stoich values
+                        stoich_r_parts = stoich_r.split('|') if stoich_r else []
+                        stoich_p_parts = stoich_p.split('|') if stoich_p else []
+                        
+                        # Need at least 2 parts to compare
+                        if len(stoich_r_parts) >= 2 and len(stoich_p_parts) >= 2:
+                            # Try numeric comparison
+                            stoich_r_a = float(stoich_r_parts[0]) if stoich_r_parts[0] else 0
+                            stoich_r_b = float(stoich_r_parts[1]) if stoich_r_parts[1] else 0
+                            stoich_p_a = float(stoich_p_parts[0]) if stoich_p_parts[0] else 0
+                            stoich_p_b = float(stoich_p_parts[1]) if stoich_p_parts[1] else 0
+                            
+                            # Check if numeric values are close enough (allow small floating point differences)
+                            if abs(stoich_r_a - stoich_p_a) < 0.001 and abs(stoich_r_b - stoich_p_b) < 0.001:
+                                rec_stoich.append(True)
+                            else:
+                                rec_stoich.append(False)
+                        else:
+                            rec_stoich.append(False)
+                    except ValueError:
+                        rec_stoich.append(False)
             
             # Check connectivity reconstruction - direct string comparison, no canonicalization
             if con_p == con_r:
@@ -364,6 +465,28 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
             rec_stoich.append(False)
             rec_con.append(False)
 
+    # Print stoichiometry distribution info for insights
+    stoich_values_real = {}
+    stoich_values_pred = {}
+    
+    print("\nStoichiometry distribution analysis:")
+    for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
+        _, _, stoich_r, _ = extract_monomer_info(s_r)
+        _, _, stoich_p, _ = extract_monomer_info(s_p)
+        
+        # Count occurrences
+        stoich_values_real[stoich_r] = stoich_values_real.get(stoich_r, 0) + 1
+        stoich_values_pred[stoich_p] = stoich_values_pred.get(stoich_p, 0) + 1
+    
+    # Show most common stoichiometry values
+    print("Real data stoichiometry values:")
+    for stoich, count in sorted(stoich_values_real.items(), key=lambda x: x[1], reverse=True)[:5]:
+        print(f"  '{stoich}': {count} occurrences ({100*count/total_samples:.1f}%)")
+        
+    print("Prediction stoichiometry values:")
+    for stoich, count in sorted(stoich_values_pred.items(), key=lambda x: x[1], reverse=True)[:5]:
+        print(f"  '{stoich}': {count} occurrences ({100*count/total_samples:.1f}%)")
+        
 # Calculate reconstruction accuracies
 if len(rec) > 0:
     rec_accuracy = sum(1 for entry in rec if entry) / len(rec)

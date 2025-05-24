@@ -103,6 +103,7 @@ num_edge_features = dict_train_loader['0'][0].num_edge_features
 
 # Load model
 # Create an instance of the G2S model from checkpoint
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
 filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
 

@@ -66,8 +66,12 @@ parser.add_argument("--save_dir", type=str, default=None, help="Custom directory
 parser.add_argument("--checkpoint_every", type=int, default=200, help="Save checkpoint every N iterations")
 parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume from")
 parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
+
+# Add flexible property arguments (from generate.py)
 parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
                     help="Names of the properties to optimize")
+parser.add_argument("--property_count", type=int, default=None,
+                    help="Number of properties (auto-detected from property_names if not specified)")
 parser.add_argument("--property_targets", type=float, nargs='+', default=None,
                     help="Target values for each property (one per property)")
 parser.add_argument("--property_weights", type=float, nargs='+', default=None,
@@ -86,6 +90,19 @@ parser.add_argument("--maximize_equation", action="store_true",
 
 args = parser.parse_args()
 
+# Handle property configuration (from generate.py)
+property_names = args.property_names
+if args.property_count is not None:
+    property_count = args.property_count
+else:
+    property_count = len(property_names)
+
+# Validate that property count matches property names
+if len(property_names) != property_count:
+    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
+
+print(f"Optimizing model trained for {property_count} properties: {property_names}")
+
 seed = args.seed
 augment = args.augment #augmented or original
 tokenization = args.tokenization #oldtok or RT_tokenized
@@ -101,9 +118,11 @@ dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
 
+# Include property info in model name (from generate.py)
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+
 # Load model
 # Create an instance of the G2S model from checkpoint
-property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
 filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
 
@@ -115,7 +134,25 @@ if os.path.isfile(filepath):
         
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
-    batch_size = model_config['batch_size']
+    
+    # Get property information from model config if available (from generate.py)
+    model_property_count = model_config.get('property_count', 2)
+    model_property_names = model_config.get('property_names', ["EA", "IP"])
+    
+    # Validate that the specified properties match the model
+    if property_count != model_property_count:
+        print(f"Warning: Specified property count ({property_count}) doesn't match model property count ({model_property_count})")
+        print(f"Using model property count: {model_property_count}")
+        property_count = model_property_count
+        
+    if property_names != model_property_names:
+        print(f"Warning: Specified property names ({property_names}) don't match model property names ({model_property_names})")
+        print(f"Using model property names: {model_property_names}") 
+        property_names = model_property_names
+    
+    print(f"Model trained for {property_count} properties: {property_names}")
+    
+    batch_size = model_config.get('batch_size', 64)
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
     model_config["max_alpha"]=args.max_alpha
@@ -465,7 +502,6 @@ opt_run = args.opt_run
 nr_vars = 32
 
 # Get property configuration from arguments
-property_names = args.property_names
 property_targets = args.property_targets
 property_weights = args.property_weights
 property_objectives = args.property_objectives

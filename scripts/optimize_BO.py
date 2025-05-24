@@ -1,4 +1,5 @@
-import sys, os
+# Now proceed with using the indices - handle variable number of properties
+property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
 
@@ -79,7 +80,7 @@ parser.add_argument("--property_weights", type=float, nargs='+', default=None,
 parser.add_argument("--property_objectives", type=str, nargs='+', default=None, 
                     choices=["minimize", "maximize", "target"],
                     help="Objective for each property: minimize, maximize, or target a specific value")
-parser.add_argument("--objective_type", type=str, default="EAmin",
+parser.add_argument("--objective_type", type=str, default="custom",
                     choices=["EAmin", "mimick_peak", "mimick_best", "max_gap", "custom"],
                     help="Type of objective function to use (legacy option)")
 parser.add_argument("--custom_equation", type=str, default=None,
@@ -151,6 +152,17 @@ if os.path.isfile(filepath):
         property_names = model_property_names
     
     print(f"Model trained for {property_count} properties: {property_names}")
+    
+    # Add warning for legacy objectives with wrong number of properties
+    if args.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap'] and property_count != 2:
+        print(f"⚠️  WARNING: Using legacy objective '{args.objective_type}' with {property_count} properties.")
+        print(f"   Legacy objectives expect exactly 2 properties (EA, IP).")
+        print(f"   Will fall back to flexible property handling with default objectives.")
+        print(f"   Consider using --objective_type custom with --custom_equation for single properties.")
+    elif args.objective_type == "custom" and property_count == 1:
+        print(f"💡 Example for single property optimization:")
+        print(f"   --objective_type custom --custom_equation 'p[0]' --maximize_equation (to maximize {property_names[0]})")
+        print(f"   --objective_type custom --custom_equation 'p[0]' (to minimize {property_names[0]})")
     
     batch_size = model_config.get('batch_size', 64)
     hidden_dimension = model_config['hidden_dimension']
@@ -228,8 +240,9 @@ class PropertyPrediction():
         prediction_strings_valid = [j for j, valid in zip(prediction_strings, validity) if valid]
         y_p_after_encoding_valid, z_p_after_encoding_valid, all_reconstructions_valid, _ = self._encode_and_predict_decode_molecules(predictions_valid)
         invalid_mask = (validity == 0)
-        # Encode and predict the valid molecules
-        expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan,np.nan] for val in list(validity)])
+        # Encode and predict the valid molecules - handle variable number of properties
+        num_properties = len(self.property_names)
+        expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan] * num_properties for val in list(validity)])
         expanded_z_p = np.array([z_p_after_encoding_valid.pop(0) if val == 1 else [0] * 32 for val in list(validity)])
         #print(x, expanded_z_p)
 
@@ -259,25 +272,56 @@ class PropertyPrediction():
                 aggr_obj = self.penalty_value
         # If using legacy objective types, handle those
         elif self.objective_type != "custom":
-            if self.objective_type=='EAmin':
-                obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-                obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1)
-            elif self.objective_type=='mimick_peak':
-                obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
-                obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
-            elif self.objective_type=='mimick_best':
-                obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
-                obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
-            elif self.objective_type=='max_gap':
-                obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-                obj2 = - self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
-            
-            if validity[0]:
-                obj3 = 0
-                aggr_obj = -(obj1[0] + obj2[0] + obj3)
+            # Check if legacy objectives are compatible with the number of properties
+            if len(self.property_names) != 2 and self.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap']:
+                print(f"Warning: Legacy objective '{self.objective_type}' expects 2 properties (EA, IP) but model has {len(self.property_names)} properties: {self.property_names}")
+                print("Falling back to flexible property handling...")
+                # Fall through to flexible property handling
+                if validity[0]:
+                    obj_values = []
+                    
+                    for i, prop_name in enumerate(self.property_names):
+                        prop_idx = i  # Index of the property in the predicted values
+                        
+                        if self.property_objectives[i] == "minimize":
+                            # For minimization, use the raw value
+                            obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
+                        elif self.property_objectives[i] == "maximize":
+                            # For maximization, negate the value
+                            obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
+                        elif self.property_objectives[i] == "target":
+                            # For targeting a specific value, use absolute difference
+                            obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
+                        
+                        # Apply the weight
+                        obj_value *= self.property_weights[i]
+                        obj_values.append(obj_value)
+                    
+                    # Sum up all objective components
+                    aggr_obj = -sum(obj_values)
+                else:
+                    aggr_obj = self.penalty_value
             else:
-                obj3 = self.penalty_value
-                aggr_obj = obj3
+                # Original legacy objective handling for 2-property models
+                if self.objective_type=='EAmin':
+                    obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
+                    obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1)
+                elif self.objective_type=='mimick_peak':
+                    obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
+                    obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
+                elif self.objective_type=='mimick_best':
+                    obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
+                    obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
+                elif self.objective_type=='max_gap':
+                    obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
+                    obj2 = - self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
+                
+                if validity[0]:
+                    obj3 = 0
+                    aggr_obj = -(obj1[0] + obj2[0] + obj3)
+                else:
+                    obj3 = self.penalty_value
+                    aggr_obj = obj3
         else:
             # New flexible property handling without custom equation
             if validity[0]:
@@ -761,8 +805,7 @@ import matplotlib.pyplot as plt
 iterations = range(len(pred_BO))
 
 # Handle different possible formats safely with proper error checking
-EA_bo = []
-IP_bo = []
+property_values_bo = [[] for _ in range(len(property_names))]  # Create lists for each property
 for x in pred_BO:
     # First ensure x is a numpy array that we can work with
     if torch.is_tensor(x):
@@ -770,69 +813,60 @@ for x in pred_BO:
     else:
         x_np = np.array(x) if not isinstance(x, np.ndarray) else x
     
-    # Access elements safely - handle (1,2) shaped arrays
-    if x_np.ndim > 1 and x_np.shape[1] >= 2:  # Handle (1,2) shaped arrays
-        EA_bo.append(x_np[0, 0])
-        IP_bo.append(x_np[0, 1])
-    elif x_np.size >= 2:  # Check if flat array has at least 2 elements
-        EA_bo.append(x_np[0])
-        IP_bo.append(x_np[1])
-    elif x_np.size == 1:  # Handle arrays with only 1 element
-        EA_bo.append(x_np[0])
-        IP_bo.append(float('nan'))  # Use NaN as a placeholder
-    else:  # Handle empty arrays
-        EA_bo.append(float('nan'))
-        IP_bo.append(float('nan'))
+    # Access elements safely - handle different array shapes
+    for prop_idx in range(len(property_names)):
+        if x_np.ndim > 1 and x_np.shape[1] > prop_idx:  # Handle (1,N) shaped arrays
+            property_values_bo[prop_idx].append(x_np[0, prop_idx])
+        elif x_np.size > prop_idx:  # Check if flat array has enough elements
+            property_values_bo[prop_idx].append(x_np[prop_idx])
+        else:  # Handle arrays without enough elements
+            property_values_bo[prop_idx].append(float('nan'))
 
 # Similarly handle pred_RE with proper error checking
-EA_re = []
-IP_re = []
+property_values_re = [[] for _ in range(len(property_names))]  # Create lists for each property
 for x in pred_RE:
-    if isinstance(x, np.ndarray):
-        if x.ndim > 1 and x.shape[1] >= 2:  # Handle (1,2) shaped arrays
-            EA_re.append(x[0, 0])
-            IP_re.append(x[0, 1])
-        elif x.size >= 2:  # Check if flat array has at least 2 elements
-            EA_re.append(x[0])
-            IP_re.append(x[1])
-        elif x.size == 1:
-            EA_re.append(x[0])
-            IP_re.append(float('nan'))
-        else:
-            EA_re.append(float('nan'))
-            IP_re.append(float('nan'))
-    else:
-        # Try to handle as a list or other indexable object
-        try:
-            if len(x) >= 2:
-                EA_re.append(x[0])
-                IP_re.append(x[1])
-            elif len(x) == 1:
-                EA_re.append(x[0])
-                IP_re.append(float('nan'))
+    for prop_idx in range(len(property_names)):
+        if isinstance(x, np.ndarray):
+            if x.ndim > 1 and x.shape[1] > prop_idx:  # Handle (1,N) shaped arrays
+                property_values_re[prop_idx].append(x[0, prop_idx])
+            elif x.size > prop_idx:  # Check if flat array has enough elements
+                property_values_re[prop_idx].append(x[prop_idx])
             else:
-                EA_re.append(float('nan'))
-                IP_re.append(float('nan'))
-        except:
-            EA_re.append(float('nan'))
-            IP_re.append(float('nan'))
+                property_values_re[prop_idx].append(float('nan'))
+        else:
+            # Try to handle as a list or other indexable object
+            try:
+                if len(x) > prop_idx:
+                    property_values_re[prop_idx].append(x[prop_idx])
+                else:
+                    property_values_re[prop_idx].append(float('nan'))
+            except:
+                property_values_re[prop_idx].append(float('nan'))
 
-EA_re = [x[0] if isinstance(x, np.ndarray) and x.size > 0 else 
-         
-         
-         
-         
-         
-         ('nan') for x in pred_RE]
-IP_re = [x[1] if isinstance(x, np.ndarray) and x.size > 0 else float('nan') for x in pred_RE]
+# For backwards compatibility with existing code that expects EA_bo, IP_bo, etc.
+if len(property_names) >= 1:
+    EA_bo = property_values_bo[0]  # First property (could be bandgap, EA, etc.)
+    EA_re = property_values_re[0]
+if len(property_names) >= 2:
+    IP_bo = property_values_bo[1]  # Second property if available
+    IP_re = property_values_re[1]
+else:
+    # If only one property, create dummy arrays for backwards compatibility
+    IP_bo = [float('nan')] * len(EA_bo)
+    IP_re = [float('nan')] * len(EA_re)
 
-# Create plot
+# Create plot with dynamic labels
 plt.figure(0)
 
-plt.plot(iterations, EA_bo, label='EA (BO)')
-plt.plot(iterations, IP_bo, label='IP (BO)')
-plt.plot(iterations, EA_re, label='EA (RE)')
-plt.plot(iterations, IP_re, label='IP (RE)')
+prop1_name = property_names[0] if len(property_names) >= 1 else "Property 1"
+prop2_name = property_names[1] if len(property_names) >= 2 else "Property 2"
+
+plt.plot(iterations, EA_bo, label=f'{prop1_name} (BO)')
+if len(property_names) >= 2:
+    plt.plot(iterations, IP_bo, label=f'{prop2_name} (BO)')
+plt.plot(iterations, EA_re, label=f'{prop1_name} (RE)')
+if len(property_names) >= 2:
+    plt.plot(iterations, IP_re, label=f'{prop2_name} (RE)')
 
 # Add labels and legend
 plt.xlabel('Index')
@@ -868,10 +902,10 @@ z_embedded_RE = reducer.transform(latents_RE_np)
 plt.figure(1)
 
 
-# PCA projection colored by EA
+# PCA projection colored by first property
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis')
 clb = plt.colorbar()
-clb.ax.set_title('Electron affinity')
+clb.ax.set_title(f'{property_names[0]}' if len(property_names) >= 1 else 'Property 1')
 plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
 plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
 plt.xlabel('PC1')
@@ -880,20 +914,19 @@ plt.savefig(dir_name+'BO_projected_to_pca_'+str(cutoff)+'_'+str(stopping_criteri
 plt.close()
 #pca = PCA(n_components=2)
 
-
-
-# PCA projection colored by IP
-plt.figure(1)
-plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y2_all_train, cmap='plasma')
-clb = plt.colorbar()
-clb.ax.set_title('Ionization potential')
-plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
-plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
-plt.xlabel('PC1')
-plt.ylabel('PC2')
-plt.title('PCA Projection Colored by Ionization Potential')
-plt.savefig(dir_name + 'BO_projected_to_pca_IP_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
-plt.close()
+# PCA projection colored by second property (only if it exists)
+if len(property_names) >= 2:
+    plt.figure(1)
+    plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y2_all_train, cmap='plasma')
+    clb = plt.colorbar()
+    clb.ax.set_title(f'{property_names[1]}')
+    plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
+    plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.title(f'PCA Projection Colored by {property_names[1]}')
+    plt.savefig(dir_name + 'BO_projected_to_pca_' + property_names[1] + '_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
+    plt.close()
 
 
 
@@ -938,15 +971,19 @@ def top_n_molecule_indices(objective_values, n_idx=10):
 
     return top_idxs, best_mols_count
 
-# Extract data for the curves
-if objective_type=='mimick_peak':
+# Extract data for the curves - handle variable number of properties
+if objective_type=='mimick_peak' and len(property_names) >= 2:
     objective_values = [-(np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
-elif objective_type=='mimick_best':
+elif objective_type=='mimick_best' and len(property_names) >= 2:
     objective_values = [-((np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61))) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
-elif objective_type=='EAmin': 
+elif objective_type=='EAmin' and len(property_names) >= 2: 
     objective_values = [-(arr[0]+np.abs(arr[1]-1)) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
-elif objective_type =='max_gap':
+elif objective_type =='max_gap' and len(property_names) >= 2:
     objective_values = [-(arr[0]-arr[1]) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
+else:
+    # For single property models or when using custom/flexible objectives
+    # Use the first property with a simple minimization objective
+    objective_values = [-arr[0] if not np.isnan(arr[0]) else float('-inf') for arr in pred_RE]
 
 # Find valid indices (where we have non-NaN values)
 valid_indices = [i for i, val in enumerate(objective_values) if val != float('-inf')]
@@ -966,14 +1003,31 @@ if not valid_indices or not indices_of_increases:
         # If there are no valid values, just use index 0
         indices_of_increases = [0]
 
-# Now proceed with using the indices
-EA_bo_imp = [EA_bo[i] for i in indices_of_increases]
-IP_bo_imp = [IP_bo[i] for i in indices_of_increases]
-EA_re_imp = [EA_re[i] for i in indices_of_increases]
-IP_re_imp = [IP_re[i] for i in indices_of_increases]
+# Now proceed with using the indices - handle variable number of properties
+property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_of_increases] for prop_idx in range(len(property_names))]
+property_values_re_imp = [[property_values_re[prop_idx][i] for i in indices_of_increases] for prop_idx in range(len(property_names))]
+
+# For backwards compatibility
+EA_bo_imp = property_values_bo_imp[0] if len(property_names) >= 1 else []
+EA_re_imp = property_values_re_imp[0] if len(property_names) >= 1 else []
+IP_bo_imp = property_values_bo_imp[1] if len(property_names) >= 2 else [float('nan')] * len(EA_bo_imp)
+IP_re_imp = property_values_re_imp[1] if len(property_names) >= 2 else [float('nan')] * len(EA_re_imp)
+
 best_z_re = [Latents_RE[i] for i in indices_of_increases]
 best_mols = {i+1: decoded_mols[i] for i in indices_of_increases}
-best_props = {i+1: [EA_re[i], EA_bo[i], IP_re[i], IP_bo[i]] for i in indices_of_increases}
+
+# Build best_props with correct number of properties
+best_props = {}
+for i, idx in enumerate(indices_of_increases):
+    prop_values = []
+    # Add RE values for each property
+    for prop_idx in range(len(property_names)):
+        prop_values.append(property_values_re[prop_idx][idx])
+    # Add BO values for each property  
+    for prop_idx in range(len(property_names)):
+        prop_values.append(property_values_bo[prop_idx][idx])
+    best_props[i+1] = prop_values
+
 best_mols_rec = {i+1: rec_mols[i] for i in indices_of_increases}
 
 
@@ -985,7 +1039,18 @@ with open(dir_name+'best_recon_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+st
 
 top_20_indices, top_20_mols = top_n_molecule_indices(objective_values, n_idx=20)
 best_mols_t20 = {i+1: decoded_mols[i] for i in top_20_indices}
-best_props_t20 = {i+1: [EA_re[i], EA_bo[i], IP_re[i], IP_bo[i]] for i in top_20_indices}
+
+# Build best_props_t20 with correct number of properties
+best_props_t20 = {}
+for i, idx in enumerate(top_20_indices):
+    prop_values = []
+    # Add RE values for each property
+    for prop_idx in range(len(property_names)):
+        prop_values.append(property_values_re[prop_idx][idx])
+    # Add BO values for each property  
+    for prop_idx in range(len(property_names)):
+        prop_values.append(property_values_bo[prop_idx][idx])
+    best_props_t20[i+1] = prop_values
 with open(dir_name+'top20_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
     print(best_mols_t20, file=fl)
     print(best_props_t20, file=fl)
@@ -1004,7 +1069,7 @@ plt.figure(2)
 
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
 clb = plt.colorbar()
-clb.ax.set_title('Electron affinity')
+clb.ax.set_title(f'{property_names[0]}' if len(property_names) >= 1 else 'Property 1')
 #plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=1, c='black', marker="1")
 #plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=1, c='red',marker="2")
 # Real latent space (reencoded)
@@ -1045,7 +1110,7 @@ plt.figure(3)
 
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
 clb = plt.colorbar()
-clb.ax.set_title('Electron affinity')
+clb.ax.set_title(f'{property_names[0]}' if len(property_names) >= 1 else 'Property 1')
 #plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=1, c='black', marker="1")
 #plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=1, c='red',marker="2")
 # Real latent space (reencoded)
@@ -1336,132 +1401,109 @@ from sklearn.neighbors import KernelDensity
 
 with open(dir_name+'y1_all_'+dataset_type+'.npy', 'rb') as f:
     y1_all = np.load(f)
-with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
-    y2_all = np.load(f)
+# Load y2_all only if we have more than one property
+if len(property_names) >= 2:
+    try:
+        with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
+            y2_all = np.load(f)
+    except FileNotFoundError:
+        print(f"Warning: y2_all_{dataset_type}.npy not found, creating dummy data")
+        y2_all = np.full_like(y1_all, np.nan)
+else:
+    y2_all = np.full_like(y1_all, np.nan)  # Create dummy data for single property models
+    
 with open(dir_name+'yp_all_'+dataset_type+'.npy', 'rb') as f:
     yp_all = np.load(f)
 
 y1_all=list(y1_all)
-y2_all=list(y2_all)
-yp1_all = [yp[0] for yp in yp_all]
-yp2_all = [yp[1] for yp in yp_all]
-yp1_all_seed = [yp[0] for yp in all_y_p]
-yp2_all_seed = [yp[1] for yp in all_y_p]
+if len(property_names) >= 2:
+    y2_all=list(y2_all)
+yp_all_list = [yp for yp in yp_all]
 
 # debug prints:
 print(f"\nBEFORE KDE PLOTTING:")
 print(f"Length of all_y_p: {len(all_y_p)}")
-print(f"Data for KDE y1: {yp1_all_seed}")
-print(f"Data for KDE y2: {yp2_all_seed}")
-print(f"Length of y1 data: {len(yp1_all_seed)}")
-print(f"Length of y2 data: {len(yp2_all_seed)}")
+print(f"Properties: {property_names}")
+if all_y_p:
+    print(f"First few y_p values: {all_y_p[:3]}")
+    print(f"Types in all_y_p: {[type(x) for x in all_y_p[:3]]}")
 
-# Replace the entire KDE plotting section with this fixed version:
+# Create KDE data for each property
+property_kde_data = []
+for prop_idx in range(len(property_names)):
+    if prop_idx < len(yp_all_list[0]) if yp_all_list else False:  # Check if this property exists in training data
+        yp_prop_all = [yp[prop_idx] for yp in yp_all_list]
+        yp_prop_all_seed = [yp[prop_idx] for yp in all_y_p] if all_y_p else []
+        property_kde_data.append((yp_prop_all, yp_prop_all_seed))
+    else:
+        property_kde_data.append(([], []))
 
-""" y1 """
-plt.figure(figsize=(10, 8))  # Specify figure size
-real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
-augmented_distribution = np.array([p for p in yp1_all])
-seed_distribution = np.array([s for s in yp1_all_seed])
+# Plot KDE for each property
+for prop_idx, (yp_prop_all, yp_prop_all_seed) in enumerate(property_kde_data):
+    if not yp_prop_all_seed:  # Skip if no data
+        continue
+        
+    prop_name = property_names[prop_idx] if prop_idx < len(property_names) else f"Property {prop_idx+1}"
+    
+    # Get property data
+    if prop_idx == 0:
+        y_prop_all = y1_all
+    elif prop_idx == 1:
+        y_prop_all = y2_all
+    else:
+        # For additional properties, we'd need to load them separately
+        continue
+    
+    plt.figure(figsize=(10, 8))
+    real_distribution = np.array([r for r in y_prop_all if not np.isnan(r)])
+    augmented_distribution = np.array([p for p in yp_prop_all])
+    seed_distribution = np.array([s for s in yp_prop_all_seed])
 
-# Reshape the data
-real_distribution = real_distribution.reshape(-1, 1)
-augmented_distribution = augmented_distribution.reshape(-1, 1)
-seed_distribution = seed_distribution.reshape(-1, 1)
+    # Reshape the data
+    real_distribution = real_distribution.reshape(-1, 1)
+    augmented_distribution = augmented_distribution.reshape(-1, 1)
+    seed_distribution = seed_distribution.reshape(-1, 1)
 
-# Define bandwidth (bandwidth controls the smoothness of the kernel density estimate)
-bandwidth = 0.1
+    # Define bandwidth
+    bandwidth = 0.1
 
-# Fit kernel density estimator for real data
-kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_real.fit(real_distribution)
-# Fit kernel density estimator for augmented data
-kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_augmented.fit(augmented_distribution)
-# Fit kernel density estimator for sampled data
-kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_sampled_seed.fit(seed_distribution)
+    # Fit kernel density estimators
+    kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_real.fit(real_distribution)
+    kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_augmented.fit(augmented_distribution)
+    kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde_sampled_seed.fit(seed_distribution)
 
-# Create a range of values for the x-axis
-x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), 
-                      max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
-# Evaluate the KDE on the range of values
-real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
-augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
-seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
+    # Create a range of values for the x-axis
+    x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), 
+                          max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
+    # Evaluate the KDE on the range of values
+    real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
+    augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
+    seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
 
-# Plotting
-plt.plot(x_values, real_density, label='Real Data', linewidth=2)
-plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
-plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
+    # Plotting
+    plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+    plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+    plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
 
-plt.xlabel('EA (eV)')
-plt.ylabel('Density')
-plt.title('Kernel Density Estimation (Electron affinity)')
-plt.legend()
-plt.grid(True, alpha=0.3)
+    plt.xlabel(f'{prop_name}')
+    plt.ylabel('Density')
+    plt.title(f'Kernel Density Estimation ({prop_name})')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
 
-# Save BEFORE show()
-plt.savefig(dir_name+'KDEy1_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
-plt.close()  # Close the figure to free memory
-
-""" y2 """
-plt.figure(figsize=(10, 8))  # Specify figure size
-real_distribution = np.array([r for r in y2_all if not np.isnan(r)])
-augmented_distribution = np.array([p for p in yp2_all])
-seed_distribution = np.array([s for s in yp2_all_seed])
-
-# Reshape the data
-real_distribution = real_distribution.reshape(-1, 1)
-augmented_distribution = augmented_distribution.reshape(-1, 1)
-seed_distribution = seed_distribution.reshape(-1, 1)
-
-# Define bandwidth (bandwidth controls the smoothness of the kernel density estimate)
-bandwidth = 0.1
-
-# Fit kernel density estimator for real data
-kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_real.fit(real_distribution)
-# Fit kernel density estimator for augmented data
-kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_augmented.fit(augmented_distribution)
-# Fit kernel density estimator for sampled data
-kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-kde_sampled_seed.fit(seed_distribution)
-
-# Create a range of values for the x-axis
-x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), 
-                      max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
-# Evaluate the KDE on the range of values
-real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
-augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
-seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
-
-# Plotting
-plt.plot(x_values, real_density, label='Real Data', linewidth=2)
-plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
-plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
-
-plt.xlabel('IP (eV)')
-plt.ylabel('Density')
-plt.title('Kernel Density Estimation (Ionization potential)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-
-# Save BEFORE show()
-plt.savefig(dir_name+'KDEy2_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
-plt.close()  # Close the figure to free memory
+    # Save plot
+    plt.savefig(dir_name+f'KDE{prop_name}_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
+    plt.close()
 
 # Add a final verification
-print(f"\nKDE plot files created:")
-import os
-kde_file1 = dir_name+'KDEy1_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
-kde_file2 = dir_name+'KDEy2_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
-
-if os.path.exists(kde_file1):
-    size1 = os.path.getsize(kde_file1)
-    print(f"KDEy1 file: {size1} bytes")
-    
-if os.path.exists(kde_file2):
-    size2 = os.path.getsize(kde_file2)
-    print(f"KDEy2 file: {size2} bytes")
+print(f"\nKDE plot files created for {len(property_names)} properties")
+for prop_idx, prop_name in enumerate(property_names):
+    kde_file = dir_name+f'KDE{prop_name}_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+    if os.path.exists(kde_file):
+        size = os.path.getsize(kde_file)
+        print(f"KDE{prop_name} file: {size} bytes")
+    else:
+        print(f"KDE{prop_name} file: Not created")

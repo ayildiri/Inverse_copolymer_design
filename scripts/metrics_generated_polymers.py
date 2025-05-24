@@ -16,11 +16,18 @@ import pandas as pd
 import argparse
 
 
+def clean_output(polymer_string):
+    """Remove all padding underscores from generated polymer strings"""
+    return polymer_string.rstrip('_')
+
 def poly_smiles_to_molecule(poly_input):
     '''
     Turns adjusted polymer smiles string into PyG data objects
     '''
     try:
+        # Clean up the polymer string first
+        poly_input = clean_output(poly_input)
+        
         # Turn into RDKIT mol object
         mols = make_monomer_mols(poly_input.split("|")[0], 0, 0,  # smiles
                                 fragment_weights=poly_input.split("|")[1:-1])
@@ -116,8 +123,14 @@ print(f'Validity check and metrics for newly generated samples')
 print(f'Model properties: {property_names}')
 print(f'Results directory: {dir_name}')
 
-with open(dir_name+'generated_polymers.pkl', 'rb') as f:
-    all_predictions=pickle.load(f)
+with open(os.path.join(dir_name, 'generated_polymers.pkl'), 'rb') as f:
+    all_predictions = pickle.load(f)
+
+print(f"Loaded {len(all_predictions)} generated polymers")
+
+# Clean up predictions by removing trailing underscores
+cleaned_predictions = [clean_output(p) for p in all_predictions]
+print(f"Cleaned trailing underscores from predictions")
 
 # Load appropriate dataset based on augmentation type
 if augment == "original":
@@ -133,7 +146,7 @@ all_train_polymers = []
 # Extract training polymers
 for batch, graphs in enumerate(dict_train_loader):
     data = dict_train_loader[str(batch)][0]
-    train_polymers_batch = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization).split('_')[0] for sample in range(len(data))]
+    train_polymers_batch = [clean_output(combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization)) for sample in range(len(data))]
     all_train_polymers.extend(train_polymers_batch)
 
 # Extract all polymers from dataset
@@ -141,14 +154,47 @@ for i in range(len(df.loc[:, 'poly_chemprop_input'])):
     poly_input = df.loc[i, 'poly_chemprop_input']
     all_polymers_data.append(poly_input)
 
+print(f"Loaded {len(all_train_polymers)} training polymers and {len(all_polymers_data)} total dataset polymers")
+
 # Canonicalize all polymer strings
+print("Canonicalizing polymer strings...")
 sm_can = SmilesEnumCanon()
-all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
-all_train_can = list(map(sm_can.canonicalize, all_train_polymers))
-all_pols_data_can = list(map(sm_can.canonicalize, all_polymers_data))
+
+# Use safe canonicalization
+def safe_canonicalize(smile_string):
+    """Safely canonicalize a SMILES string, returning 'invalid_polymer_string' if invalid."""
+    try:
+        result = sm_can.canonicalize(smile_string)
+        return result 
+    except Exception as e:
+        # Optionally print the error for debugging
+        # print(f"Error canonicalizing {smile_string}: {e}")
+        return 'invalid_polymer_string'
+
+# Canonicalize with progress tracking
+all_predictions_can = []
+invalid_count = 0
+for i, poly in enumerate(cleaned_predictions):
+    can_poly = safe_canonicalize(poly)
+    all_predictions_can.append(can_poly)
+    if can_poly == 'invalid_polymer_string':
+        invalid_count += 1
+    if (i+1) % 1000 == 0 or i+1 == len(cleaned_predictions):
+        print(f"Canonicalized {i+1}/{len(cleaned_predictions)} polymers")
+
+print(f"Found {invalid_count} invalid polymers ({100*invalid_count/len(cleaned_predictions):.1f}%)")
+all_train_can = [safe_canonicalize(poly) for poly in all_train_polymers]
+all_pols_data_can = [safe_canonicalize(poly) for poly in all_polymers_data]
 
 # Check validity of generated polymers
-prediction_mols = list(map(poly_smiles_to_molecule, all_predictions))
+print("Checking chemical validity...")
+prediction_mols = []
+for i, poly in enumerate(cleaned_predictions):
+    mol = poly_smiles_to_molecule(poly)
+    prediction_mols.append(mol)
+    if (i+1) % 1000 == 0 or i+1 == len(cleaned_predictions):
+        print(f"Processed {i+1}/{len(cleaned_predictions)} polymers for validity")
+
 for mon in prediction_mols: 
     try: prediction_validityA.append(mon[0] is not None)
     except: prediction_validityA.append(False)
@@ -159,68 +205,158 @@ for mon in prediction_mols:
 validityA = sum(prediction_validityA)/len(prediction_validityA)
 validityB = sum(prediction_validityB)/len(prediction_validityB)
 
-# Extract monomer information
-monomer_smiles_predicted = [poly_smiles.split("|")[0].split('.') for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
-monA_pred = [mon[0] for mon in monomer_smiles_predicted]
-monB_pred = [mon[1] for mon in monomer_smiles_predicted]
+# Extract monomer information - with error handling
+monomer_smiles_predicted = []
+for poly_smiles in all_predictions_can:
+    if poly_smiles != 'invalid_polymer_string':
+        try:
+            parts = poly_smiles.split("|")
+            if len(parts) > 0 and '.' in parts[0]:
+                monomers = parts[0].split('.')
+                if len(monomers) >= 2:
+                    monomer_smiles_predicted.append(monomers)
+        except Exception as e:
+            print(f"Error extracting monomers from: {poly_smiles}")
 
-monomer_smiles_train = [poly_smiles.split("|")[0].split('.') for poly_smiles in all_train_can]
-monA_t = [mon[0] for mon in monomer_smiles_train]
-monB_t = [mon[1] for mon in monomer_smiles_train]
+print(f"Extracted monomers from {len(monomer_smiles_predicted)} valid polymers")
 
-monomer_smiles_d = [poly_smiles.split("|")[0].split('.') for poly_smiles in all_pols_data_can]
-monA_d = [mon[0] for mon in monomer_smiles_d]
-monB_d = [mon[1] for mon in monomer_smiles_d]
-unique_mons = list(set(monA_d) | set(monB_d))
+# Handle case where all polymers might be invalid
+if len(monomer_smiles_predicted) == 0:
+    print("WARNING: No valid polymer structures found in the predictions!")
+    monA_pred = []
+    monB_pred = []
+    monomer_weights_predicted = []
+    monomer_con_predicted = []
+    
+    # Set default metrics
+    novelty = 0
+    novelty_full_dataset = 0
+    novelty_A = 0
+    novelty_B = 0
+    novelty_oneMon = 0
+    novelty_both = 0
+    diversity = 0
+    diversity_novel = 0
+    validity = 0
+    
+    # Skip further processing
+else:
+    # Extract monomer info when we have valid structures
+    try:
+        monA_pred = [mon[0] for mon in monomer_smiles_predicted if len(mon) >= 1]
+        monB_pred = [mon[1] for mon in monomer_smiles_predicted if len(mon) >= 2]
+    except Exception as e:
+        print(f"Error processing monomers: {e}")
+        monA_pred = []
+        monB_pred = []
 
-monomer_weights_predicted = [poly_smiles.split("|")[1:-1] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
-monomer_con_predicted = [poly_smiles.split("|")[-1].split("_")[0] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
+    # Extract monomer information from training set and full dataset
+    monomer_smiles_train = []
+    for poly_smiles in all_train_can:
+        if poly_smiles != 'invalid_polymer_string':
+            try:
+                parts = poly_smiles.split("|")
+                if len(parts) > 0 and '.' in parts[0]:
+                    monomers = parts[0].split('.')
+                    if len(monomers) >= 2:
+                        monomer_smiles_train.append(monomers)
+            except:
+                pass
+                
+    monomer_smiles_d = []
+    for poly_smiles in all_pols_data_can:
+        if poly_smiles != 'invalid_polymer_string':
+            try:
+                parts = poly_smiles.split("|")
+                if len(parts) > 0 and '.' in parts[0]:
+                    monomers = parts[0].split('.')
+                    if len(monomers) >= 2:
+                        monomer_smiles_d.append(monomers)
+            except:
+                pass
 
-# Calculate novelty metrics
-novel = 0
-novel_pols=[]
-for pol in all_predictions_can:
-    if not pol in all_train_can:
-        novel+=1
-        novel_pols.append(pol)
-novelty = novel/len(all_predictions)
+    monA_t = [mon[0] for mon in monomer_smiles_train if len(mon) >= 1]
+    monB_t = [mon[1] for mon in monomer_smiles_train if len(mon) >= 2]
 
-novel = 0
-for pol in all_predictions_can:
-    if not pol in all_pols_data_can:
-        novel+=1
-novelty_full_dataset = novel/len(all_predictions)
+    monA_d = [mon[0] for mon in monomer_smiles_d if len(mon) >= 1]
+    monB_d = [mon[1] for mon in monomer_smiles_d if len(mon) >= 2]
+    unique_mons = list(set(monA_d) | set(monB_d))
 
-novelA = 0
-for monA in monA_pred:
-    if not monA in unique_mons:
-        novelA+=1
-novelty_A = novelA/len(monA_pred)
+    # Extract additional polymer components with error handling
+    monomer_weights_predicted = []
+    monomer_con_predicted = []
+    for poly_smiles in all_predictions_can:
+        if poly_smiles != 'invalid_polymer_string':
+            try:
+                parts = poly_smiles.split("|")
+                if len(parts) > 1:
+                    weights = parts[1:-1]
+                    monomer_weights_predicted.append(weights)
+                else:
+                    monomer_weights_predicted.append([])
+                    
+                if len(parts) > 2:
+                    con = parts[-1].split("_")[0]
+                    monomer_con_predicted.append(con)
+                else:
+                    monomer_con_predicted.append("")
+            except:
+                monomer_weights_predicted.append([])
+                monomer_con_predicted.append("")
 
-novelB = 0
-for monB in monB_pred:
-    if not monB in unique_mons:
-        novelB+=1
-novelty_B = novelB/len(monB_pred)
+    # Calculate novelty metrics with error handling
+    novel = 0
+    novel_pols=[]
+    for pol in all_predictions_can:
+        if pol != 'invalid_polymer_string' and pol not in all_train_can:
+            novel += 1
+            novel_pols.append(pol)
+            
+    novelty = novel/len(all_predictions) if len(all_predictions) > 0 else 0
 
-novelboth = 0
-novelone = 0
-for monA, monB in zip(monA_pred,monB_pred):
-    if (not monB in unique_mons) and (not monA in unique_mons):
-        novelboth+=1
-    if (not monB in unique_mons) or (not monA in unique_mons):
-        novelone+=1
+    novel = 0
+    for pol in all_predictions_can:
+        if pol != 'invalid_polymer_string' and pol not in all_pols_data_can:
+            novel += 1
+            
+    novelty_full_dataset = novel/len(all_predictions) if len(all_predictions) > 0 else 0
 
-novelty_oneMon = novelone/len(monB_pred)
-novelty_both= novelboth/len(monB_pred)
+    # Safe calculation of novelty metrics for monomers
+    if len(monA_pred) > 0:
+        novelA = sum(1 for monA in monA_pred if monA not in unique_mons)
+        novelty_A = novelA/len(monA_pred)
+    else:
+        novelty_A = 0
+        
+    if len(monB_pred) > 0:
+        novelB = sum(1 for monB in monB_pred if monB not in unique_mons)
+        novelty_B = novelB/len(monB_pred)
+    else:
+        novelty_B = 0
 
-# Calculate diversity metrics
-diversity = len(list(set(all_predictions)))/len(all_predictions)
-diversity_novel = len(list(set(novel_pols)))/len(novel_pols) if novel_pols else 0
+    # Calculate combined novelty metrics
+    novelboth = 0
+    novelone = 0
+    if len(monA_pred) == len(monB_pred) and len(monA_pred) > 0:
+        for monA, monB in zip(monA_pred, monB_pred):
+            if (monB not in unique_mons) and (monA not in unique_mons):
+                novelboth += 1
+            if (monB not in unique_mons) or (monA not in unique_mons):
+                novelone += 1
 
-# Calculate overall validity
-whole_valid = len(monomer_smiles_predicted)
-validity = whole_valid/len(all_predictions)
+        novelty_oneMon = novelone/len(monB_pred)
+        novelty_both = novelboth/len(monB_pred)
+    else:
+        novelty_oneMon = 0
+        novelty_both = 0
+
+    # Calculate diversity metrics
+    diversity = len(set(p for p in all_predictions_can if p != 'invalid_polymer_string'))/len(all_predictions) if len(all_predictions) > 0 else 0
+    diversity_novel = len(set(novel_pols))/len(novel_pols) if novel_pols else 0
+
+    # Calculate overall validity
+    whole_valid = len([p for p in all_predictions_can if p != 'invalid_polymer_string'])
+    validity = whole_valid/len(all_predictions) if len(all_predictions) > 0 else 0
 
 # Create property-aware output filename
 properties_suffix = "_".join(property_names[:2]) if len(property_names) <= 2 else f"{len(property_names)}props"
@@ -228,7 +364,7 @@ metrics_filename = f'generated_polymers_metrics_{properties_suffix}.txt'
 examples_filename = f'generated_polymers_examples_{properties_suffix}.txt'
 
 # Save metrics with property context
-with open(dir_name + metrics_filename, 'w') as f:
+with open(os.path.join(dir_name, metrics_filename), 'w') as f:
     f.write(f"Generated Polymer Metrics\n")
     f.write(f"Model Properties: {', '.join(property_names)}\n")
     f.write(f"Property Count: {property_count}\n")
@@ -236,29 +372,30 @@ with open(dir_name + metrics_filename, 'w') as f:
     f.write("="*50 + "\n")
     f.write("VALIDITY METRICS:\n")
     f.write("-"*20 + "\n")
-    f.write("Gen Mon A validity: %.4f %% " % (100*validityA,))
-    f.write("Gen Mon B validity: %.4f %% " % (100*validityB,))
-    f.write("Gen validity: %.4f %% " % (100*validity,))
+    f.write(f"Valid polymer structures: {whole_valid}/{len(all_predictions)} ({100*validity:.2f}%)\n")
+    f.write(f"Gen Mon A validity: {100*validityA:.4f}%\n")
+    f.write(f"Gen Mon B validity: {100*validityB:.4f}%\n")
+    f.write(f"Gen validity: {100*validity:.4f}%\n")
     f.write("\n\nNOVELTY METRICS:\n")
     f.write("-"*20 + "\n")
-    f.write("Novelty: %.4f %% " % (100*novelty,))
-    f.write("Novelty one Mon (at least): %.4f %% " % (100*novelty_oneMon,))
-    f.write("Novelty both Mons %.4f %% " % (100*novelty_both,))
-    f.write("Novelty MonA full dataset: %.4f %% " % (100*novelty_A,))
-    f.write("Novelty MonB full dataset: %.4f %% " % (100*novelty_B,))
-    f.write("Novelty in full dataset: %.4f %% " % (100*novelty_full_dataset,))
+    f.write(f"Novelty: {100*novelty:.4f}%\n")
+    f.write(f"Novelty one Mon (at least): {100*novelty_oneMon:.4f}%\n")
+    f.write(f"Novelty both Mons {100*novelty_both:.4f}%\n")
+    f.write(f"Novelty MonA full dataset: {100*novelty_A:.4f}%\n")
+    f.write(f"Novelty MonB full dataset: {100*novelty_B:.4f}%\n")
+    f.write(f"Novelty in full dataset: {100*novelty_full_dataset:.4f}%\n")
     f.write("\n\nDIVERSITY METRICS:\n")
     f.write("-"*20 + "\n")
-    f.write("Diversity: %.4f %% " % (100*diversity,))
-    f.write("Diversity (novel polymers): %.4f %% " % (100*diversity_novel,))
+    f.write(f"Diversity: {100*diversity:.4f}%\n")
+    f.write(f"Diversity (novel polymers): {100*diversity_novel:.4f}%\n")
 
 # Save examples with property context
-with open(dir_name + examples_filename, 'w') as f:
+with open(os.path.join(dir_name, examples_filename), 'w') as f:
     f.write(f"Generated Polymer Examples\n")
     f.write(f"Model Properties: {', '.join(property_names)}\n")
     f.write(f"Total Count: {len(all_predictions)}\n")
     f.write("="*50 + "\n\n")
-    for i, polymer in enumerate(all_predictions):
+    for i, polymer in enumerate(cleaned_predictions):  # Use cleaned predictions here
         f.write(f"{i+1:4d}: {polymer}\n")
 
 # Print summary
@@ -271,5 +408,5 @@ print(f"Novelty (vs full dataset): {100*novelty_full_dataset:.2f}%")
 print(f"Diversity: {100*diversity:.2f}%")
 
 print(f"\nFiles saved successfully to:")
-print(f"1. {dir_name}{metrics_filename} - Contains all metrics")
-print(f"2. {dir_name}{examples_filename} - Contains examples of generated polymers")
+print(f"1. {os.path.join(dir_name, metrics_filename)} - Contains all metrics")
+print(f"2. {os.path.join(dir_name, examples_filename)} - Contains examples of generated polymers")

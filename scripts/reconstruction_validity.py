@@ -105,6 +105,10 @@ if not os.path.exists(dir_name):
 print(f'Validity check of validation set using inference decoding')
 print(f'Loading results from: {dir_name}')
 
+def clean_output(polymer_string):
+    """Remove all padding underscores from generated polymer strings"""
+    return polymer_string.rstrip('_')
+
 def safe_canonicalize(smile_string, sm_can, monomer_only=False):
     """Safely canonicalize a SMILES string, returning None if invalid.
     Special handling for stoichiometry values like '0.5'."""
@@ -181,6 +185,18 @@ def extract_monomer_info(polymer_string):
     except:
         return "", "", "", ""
 
+# Parse stoichiometry strings into numerical values
+def parse_stoich(s):
+    """
+    Parses a stoichiometry string like '0.5:0.5' into a list of floats.
+    Strips whitespace, removes EOS markers like '_', and rounds to 3 decimals.
+    Returns None if parsing fails.
+    """
+    try:
+        return [round(float(x.strip()), 3) for x in s.strip().replace("_", "").split(":")]
+    except:
+        return None
+
 # Load prediction and real strings
 pred_file = os.path.join(dir_name, 'all_val_prediction_strings.pkl')
 real_file = os.path.join(dir_name, 'all_val_real_strings.pkl')
@@ -201,8 +217,8 @@ with open(real_file, 'rb') as f:
 print(f"Loaded {len(all_predictions)} predictions and {len(all_real)} real samples")
 
 # Remove all '_' from the strings (EOS token)
-all_predictions = [s.split('_', 1)[0] for s in all_predictions]
-all_real = [s.split('_', 1)[0] for s in all_real]
+all_predictions = [clean_output(s) for s in all_predictions]
+all_real = [clean_output(s) for s in all_real]
 
 # Save cleaned strings to text files
 with open(os.path.join(dir_name, 'all_val_prediction_strings.txt'), 'w') as f:
@@ -341,24 +357,11 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
                     prediction_validityB.append(False)
                     rec_B.append(False)
             
-            # Improved stoichiometry reconstruction using float parsing
-            def parse_stoich(s):
-                """
-                Parses a stoichiometry string like '0.5:0.5' into a list of floats.
-                Strips whitespace, removes EOS markers like '_', and rounds to 3 decimals.
-                Returns None if parsing fails.
-                """
-                try:
-                    return [round(float(x.strip()), 3) for x in s.strip().replace("_", "").split(":")]
-                except:
-                    return None
-            
             # Compare stoichiometry as parsed floats
             if parse_stoich(stoich_p) == parse_stoich(stoich_r):
                 rec_stoich.append(True)
             else:
                 rec_stoich.append(False)
-
             
             # Check connectivity reconstruction - direct string comparison, no canonicalization
             if con_p == con_r:
@@ -376,19 +379,36 @@ for i, (s_r, s_p) in enumerate(zip(all_real, all_predictions)):
             rec_stoich.append(False)
             rec_con.append(False)
 
+# Calculate component-based full reconstruction
+print("\nComputing component-based full reconstruction...")
+component_based_rec = []
+for i in range(len(rec_A)):
+    # A polymer is considered fully reconstructed if all components match
+    if rec_A[i] and rec_B[i] and rec_stoich[i] and rec_con[i]:
+        component_based_rec.append(True)
+    else:
+        component_based_rec.append(False)
+
 # Calculate reconstruction accuracies
 if len(rec) > 0:
+    # Original exact string match accuracy
     rec_accuracy = sum(1 for entry in rec if entry) / len(rec)
+    
+    # Component-level accuracies
     rec_accuracyA = sum(1 for entry in rec_A if entry) / len(rec_A)
     rec_accuracyB = sum(1 for entry in rec_B if entry) / len(rec_B)
     rec_accuracy_stoich = sum(1 for entry in rec_stoich if entry) / len(rec_stoich)
     rec_accuracy_con = sum(1 for entry in rec_con if entry) / len(rec_con)
+    
+    # Component-based full reconstruction accuracy
+    component_based_accuracy = sum(1 for entry in component_based_rec if entry) / len(component_based_rec)
 else:
     rec_accuracy = 0
     rec_accuracyA = 0
     rec_accuracyB = 0
     rec_accuracy_stoich = 0
     rec_accuracy_con = 0
+    component_based_accuracy = 0
 
 validityA = sum(1 for entry in prediction_validityA if entry) / len(prediction_validityA)
 validityB = sum(1 for entry in prediction_validityB if entry) / len(prediction_validityB)
@@ -405,7 +425,8 @@ print(f'Homopolymers in predictions: {homopolymer_count_pred} ({100*homopolymer_
 print(f'Copolymers in real data: {copolymer_count_real} ({100*copolymer_count_real/total_samples:.1f}%)')
 print(f'Copolymers in predictions: {copolymer_count_pred} ({100*copolymer_count_pred/total_samples:.1f}%)')
 print(f'')
-print(f'Full reconstruction accuracy: {100*rec_accuracy:.2f}%')
+print(f'Full reconstruction (exact string match): {100*rec_accuracy:.2f}%')
+print(f'Component-based full reconstruction: {100*component_based_accuracy:.2f}%')
 print(f'Monomer A reconstruction: {100*rec_accuracyA:.2f}%')
 print(f'Monomer B reconstruction: {100*rec_accuracyB:.2f}%')
 print(f'Stoichiometry reconstruction: {100*rec_accuracy_stoich:.2f}%')
@@ -431,7 +452,8 @@ with open(metrics_file, 'w') as f:
     f.write(f"Copolymers in real data: {copolymer_count_real} ({100*copolymer_count_real/total_samples:.1f}%)\n")
     f.write(f"Copolymers in predictions: {copolymer_count_pred} ({100*copolymer_count_pred/total_samples:.1f}%)\n")
     f.write(f"\n")
-    f.write(f"Full reconstruction accuracy: {100*rec_accuracy:.4f}%\n")
+    f.write(f"Full reconstruction (exact string match): {100*rec_accuracy:.4f}%\n")
+    f.write(f"Component-based full reconstruction: {100*component_based_accuracy:.4f}%\n")
     f.write(f"Monomer A reconstruction: {100*rec_accuracyA:.4f}%\n")
     f.write(f"Monomer B reconstruction: {100*rec_accuracyB:.4f}%\n")
     f.write(f"Stoichiometry reconstruction: {100*rec_accuracy_stoich:.4f}%\n")
@@ -453,7 +475,8 @@ detailed_results = {
     'homopolymer_count_pred': homopolymer_count_pred,
     'copolymer_count_real': copolymer_count_real,
     'copolymer_count_pred': copolymer_count_pred,
-    'rec_accuracy': rec_accuracy,
+    'rec_accuracy': rec_accuracy,                     # Exact string match
+    'component_based_accuracy': component_based_accuracy,  # New component-based accuracy
     'rec_accuracyA': rec_accuracyA,
     'rec_accuracyB': rec_accuracyB,
     'rec_accuracy_stoich': rec_accuracy_stoich,
@@ -462,7 +485,8 @@ detailed_results = {
     'validityB': validityB,
     'property_names': property_names,
     'property_count': property_count,
-    'full_reconstruction_list': rec,
+    'exact_match_list': rec,                         # Rename to clarify this is exact matching
+    'component_based_rec_list': component_based_rec,  # New list for component-based matching
     'monA_reconstruction_list': rec_A,
     'monB_reconstruction_list': rec_B,
     'stoich_reconstruction_list': rec_stoich,

@@ -1,5 +1,5 @@
 # Now proceed with using the indices - handle variable number of properties
-property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_import sys, os
+property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_of_increases] for prop_idx in range(len(property_names))]
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
 

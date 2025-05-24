@@ -1,5 +1,4 @@
-# Now proceed with using the indices - handle variable number of properties
-property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_import sys, os
+import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
 
@@ -31,7 +30,6 @@ import time
 from datetime import datetime
 import shutil  # for backup operations
 
-# setting device on GPU if available, else CPU
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -900,7 +898,6 @@ z_embedded_BO = reducer.transform(latents_BO_np)
 latents_RE_np = np.stack(Latents_RE)
 z_embedded_RE = reducer.transform(latents_RE_np)
 plt.figure(1)
-
 
 # PCA projection colored by first property
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis')

@@ -60,6 +60,9 @@ parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"
 parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
 
+# Add missing data_augment argument
+parser.add_argument("--data_augment", help="data augmentation type", default="old", choices=["old", "new"])
+
 args = parser.parse_args()
 
 # Handle property configuration
@@ -78,13 +81,24 @@ print(f"Creating plots for {property_count} properties: {property_names}")
 seed = args.seed
 augment = args.augment #augmented or original
 tokenization = args.tokenization #oldtok or RT_tokenized
+data_augment = args.data_augment  # FIX: Define data_augment from args
+
 if args.add_latent ==1:
     add_latent=True
 elif args.add_latent ==0:
     add_latent=False
 
-# Load vocabulary
-vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+# Load vocabulary - handle path flexibility
+if args.save_dir is not None:
+    # Try custom directory first
+    vocab_file = os.path.join(args.save_dir, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
+    if not os.path.exists(vocab_file):
+        # Fallback to default location
+        vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+else:
+    vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+
+print(f"Loading vocabulary from: {vocab_file}")
 vocab = load_vocab(vocab_file=vocab_file)
 
 # Include property info in model name
@@ -97,17 +111,31 @@ if args.save_dir is not None:
 else:
     dir_name = os.path.join(main_dir_path, 'Checkpoints/', model_name)
 
+print(f"Model directory: {dir_name}")
+
 if not os.path.exists(dir_name):
     print(f"Error: Model directory does not exist: {dir_name}")
+    print("Available directories:")
+    parent_dir = os.path.dirname(dir_name)
+    if os.path.exists(parent_dir):
+        for item in os.listdir(parent_dir):
+            if os.path.isdir(os.path.join(parent_dir, item)):
+                print(f"  {item}")
     exit(1)
 
 def load_property_data(dataset_type, dir_name, property_count):
     """Load property data dynamically based on property count."""
+    print(f"\n📊 Loading {dataset_type} dataset...")
+    
     # Load latent space
     latent_file = os.path.join(dir_name, f'latent_space_{dataset_type}.npy')
+    if not os.path.exists(latent_file):
+        print(f"❌ Error: Latent space file not found: {latent_file}")
+        return None, None, None, None, None, None
+        
     with open(latent_file, 'rb') as f:
         latent_space = np.load(f)
-        print(f"Loaded latent space: {latent_space.shape}")
+        print(f"✅ Loaded latent space: {latent_space.shape}")
 
     # Load real property values (y1_all, y2_all, ...)
     properties_real = []
@@ -115,10 +143,11 @@ def load_property_data(dataset_type, dir_name, property_count):
         y_file = os.path.join(dir_name, f'y{i+1}_all_{dataset_type}.npy')
         if os.path.exists(y_file):
             with open(y_file, 'rb') as f:
-                properties_real.append(np.load(f))
-            print(f"Loaded {property_names[i]} real values: {properties_real[-1].shape}")
+                prop_data = np.load(f)
+                properties_real.append(prop_data)
+            print(f"✅ Loaded {property_names[i]} real values: {prop_data.shape}")
         else:
-            print(f"Warning: Real property file not found: {y_file}")
+            print(f"⚠️ Warning: Real property file not found: {y_file}")
             properties_real.append(np.array([]))
 
     # Load predicted property values (yp_all)
@@ -126,63 +155,103 @@ def load_property_data(dataset_type, dir_name, property_count):
     if os.path.exists(yp_file):
         with open(yp_file, 'rb') as f:
             yp_all = np.load(f)
-        print(f"Loaded predicted values: {yp_all.shape}")
+        print(f"✅ Loaded predicted values: {yp_all.shape}")
         
         # Extract individual property predictions
         properties_pred = []
         for i in range(property_count):
             if yp_all.shape[1] > i:
-                properties_pred.append([yp[i] for yp in yp_all])
+                properties_pred.append(yp_all[:, i])  # Extract column i for property i
             else:
-                print(f"Warning: Not enough properties in predicted data for {property_names[i]}")
-                properties_pred.append([])
+                print(f"⚠️ Warning: Not enough properties in predicted data for {property_names[i]}")
+                properties_pred.append(np.array([]))
     else:
-        print(f"Warning: Predicted property file not found: {yp_file}")
-        properties_pred = [[] for _ in range(property_count)]
+        print(f"⚠️ Warning: Predicted property file not found: {yp_file}")
+        properties_pred = [np.array([]) for _ in range(property_count)]
 
-    # Load other data
-    with open(os.path.join(dir_name, f'monomers_{dataset_type}'), "rb") as f:
-        monomers = pickle.load(f)
-    with open(os.path.join(dir_name, f'stoichiometry_{dataset_type}'), "rb") as f:
-        stoichiometry = pickle.load(f)
-    with open(os.path.join(dir_name, f'connectivity_{dataset_type}'), "rb") as f:
-        connectivity_pattern = pickle.load(f)
+    # Load other data with error handling
+    try:
+        with open(os.path.join(dir_name, f'monomers_{dataset_type}'), "rb") as f:
+            monomers = pickle.load(f)
+        print(f"✅ Loaded monomers data")
+    except FileNotFoundError:
+        print(f"⚠️ Warning: Monomers file not found")
+        monomers = []
+        
+    try:
+        with open(os.path.join(dir_name, f'stoichiometry_{dataset_type}'), "rb") as f:
+            stoichiometry = pickle.load(f)
+        print(f"✅ Loaded stoichiometry data")
+    except FileNotFoundError:
+        print(f"⚠️ Warning: Stoichiometry file not found")
+        stoichiometry = []
+        
+    try:
+        with open(os.path.join(dir_name, f'connectivity_{dataset_type}'), "rb") as f:
+            connectivity_pattern = pickle.load(f)
+        print(f"✅ Loaded connectivity data")
+    except FileNotFoundError:
+        print(f"⚠️ Warning: Connectivity file not found")
+        connectivity_pattern = []
 
     return latent_space, properties_real, properties_pred, monomers, stoichiometry, connectivity_pattern
 
 def perform_dimensionality_reduction(latent_space, dim_red_type, dataset_type, dir_name):
     """Perform dimensionality reduction and save/load reducer."""
+    print(f"🔍 Performing {dim_red_type.upper()} dimensionality reduction...")
+    
     if dim_red_type == "pca":
         if dataset_type == "train":
             reducer = PCA(n_components=2).fit(latent_space)
-            with open(os.path.join(dir_name, f'{dim_red_type}_fitted_{dataset_type}'), 'wb') as f:
+            reducer_file = os.path.join(dir_name, f'{dim_red_type}_fitted_{dataset_type}')
+            with open(reducer_file, 'wb') as f:
                 pickle.dump(reducer, f)
             z_embedded = reducer.transform(latent_space)
+            print(f"✅ Fitted PCA and saved to {reducer_file}")
         else:
-            with open(os.path.join(dir_name, f'{dim_red_type}_fitted_train'), 'rb') as f:
-                reducer = pickle.load(f)
-            z_embedded = reducer.transform(latent_space)
+            reducer_file = os.path.join(dir_name, f'{dim_red_type}_fitted_train')
+            try:
+                with open(reducer_file, 'rb') as f:
+                    reducer = pickle.load(f)
+                z_embedded = reducer.transform(latent_space)
+                print(f"✅ Loaded PCA from {reducer_file}")
+            except FileNotFoundError:
+                print(f"❌ Error: PCA reducer not found at {reducer_file}")
+                print("You need to run with train dataset first!")
+                return None
     
     elif dim_red_type == "umap":
         if dataset_type == "train":
             reducer = umap.UMAP(n_components=2, min_dist=0.5).fit(latent_space)
-            with open(os.path.join(dir_name, f'umap_fitted_train_{dataset_type}'), 'wb') as f:
+            reducer_file = os.path.join(dir_name, f'umap_fitted_train_{dataset_type}')
+            with open(reducer_file, 'wb') as f:
                 pickle.dump(reducer, f)
             z_embedded = reducer.embedding_
+            print(f"✅ Fitted UMAP and saved to {reducer_file}")
         else:
-            with open(os.path.join(dir_name, f'umap_fitted_train_train'), 'rb') as f:
-                reducer = pickle.load(f)
-            z_embedded = reducer.transform(latent_space)
+            reducer_file = os.path.join(dir_name, f'umap_fitted_train_train')
+            try:
+                with open(reducer_file, 'rb') as f:
+                    reducer = pickle.load(f)
+                z_embedded = reducer.transform(latent_space)
+                print(f"✅ Loaded UMAP from {reducer_file}")
+            except FileNotFoundError:
+                print(f"❌ Error: UMAP reducer not found at {reducer_file}")
+                print("You need to run with train dataset first!")
+                return None
     
     elif dim_red_type == "tsne":
         if dataset_type == "train":
-            reducer = TSNE(n_components=2).fit(latent_space)
-            with open(os.path.join(dir_name, f'{dim_red_type}_fitted_{dataset_type}'), 'wb') as f:
-                pickle.dump(reducer, f)
-            z_embedded = reducer.embedding_
+            reducer = TSNE(n_components=2, random_state=42)
+            z_embedded = reducer.fit_transform(latent_space)
+            # Note: t-SNE doesn't have a transform method, so we save the embedding directly
+            embedding_file = os.path.join(dir_name, f'{dim_red_type}_embedding_{dataset_type}.npy')
+            np.save(embedding_file, z_embedded)
+            print(f"✅ Computed t-SNE and saved embedding to {embedding_file}")
         else:
-            with open(os.path.join(dir_name, f'{dim_red_type}_fitted_train'), 'rb') as f:
-                reducer = pickle.load(f)
+            # For test set, we need to recompute t-SNE (it's not transformable)
+            print("⚠️ Warning: t-SNE doesn't support transform - computing fresh embedding for test set")
+            reducer = TSNE(n_components=2, random_state=42)
             z_embedded = reducer.fit_transform(latent_space)
     
     return z_embedded
@@ -191,46 +260,56 @@ def create_property_plots(z_embedded, properties_real, properties_pred, dataset_
     """Create plots for all properties (both real and predicted)."""
     plt.rcParams.update({'font.size': 18})
     
+    print(f"🎨 Creating property plots for {dataset_type} dataset...")
+    
     # Create plots for real property values
     for i, (prop_name, prop_values) in enumerate(zip(property_names, properties_real)):
         if len(prop_values) == 0:
-            print(f"Skipping real property plot for {prop_name} - no data")
+            print(f"⚠️ Skipping real property plot for {prop_name} - no data")
             continue
             
         fig_num = figure_offset + i * 2
-        plt.figure(fig_num)
-        plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=1, c=prop_values, cmap='viridis')
-        clb = plt.colorbar()
-        clb.ax.set_title(prop_name)
-        plt.xlabel(f"{dim_red_type} 1")
-        plt.ylabel(f"{dim_red_type} 2")
+        plt.figure(fig_num, figsize=(10, 8))
+        scatter = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=1, c=prop_values, cmap='viridis')
+        clb = plt.colorbar(scatter)
+        clb.ax.set_title(f'{prop_name} (Real)')
+        plt.xlabel(f"{dim_red_type.upper()} 1")
+        plt.ylabel(f"{dim_red_type.upper()} 2")
+        plt.title(f'{dataset_type.capitalize()} - {prop_name} Real Values')
         plt.subplots_adjust(left=0.15, right=0.85, top=0.85, bottom=0.15)
         save_path = os.path.join(dir_name, f'{dataset_type}_latent_{prop_name}_real_{dim_red_type}.png')
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved: {save_path}")
+        print(f"✅ Saved: {save_path}")
     
     # Create plots for predicted property values
     for i, (prop_name, prop_values) in enumerate(zip(property_names, properties_pred)):
         if len(prop_values) == 0:
-            print(f"Skipping predicted property plot for {prop_name} - no data")
+            print(f"⚠️ Skipping predicted property plot for {prop_name} - no data")
             continue
             
         fig_num = figure_offset + i * 2 + 1
-        plt.figure(fig_num)
-        plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=1, c=prop_values, cmap='viridis')
-        clb = plt.colorbar()
-        clb.ax.set_title(f"{prop_name} (Predicted)")
-        plt.xlabel(f"{dim_red_type} 1")
-        plt.ylabel(f"{dim_red_type} 2")
+        plt.figure(fig_num, figsize=(10, 8))
+        scatter = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=1, c=prop_values, cmap='viridis')
+        clb = plt.colorbar(scatter)
+        clb.ax.set_title(f'{prop_name} (Predicted)')
+        plt.xlabel(f"{dim_red_type.upper()} 1")
+        plt.ylabel(f"{dim_red_type.upper()} 2")
+        plt.title(f'{dataset_type.capitalize()} - {prop_name} Predicted Values')
         plt.subplots_adjust(left=0.15, right=0.85, top=0.85, bottom=0.15)
         save_path = os.path.join(dir_name, f'{dataset_type}_latent_{prop_name}_pred_{dim_red_type}.png')
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved: {save_path}")
+        print(f"✅ Saved: {save_path}")
 
 def create_monomer_plots(z_embedded, monomers, dataset_type, dim_red_type, dir_name, figure_offset):
     """Create monomer type plots."""
+    if not monomers:
+        print(f"⚠️ Skipping monomer plots - no monomer data")
+        return
+        
+    print(f"🧬 Creating monomer plots...")
+    
     # Get all the A monomers and create monomer label list samples x 1
     monomersA = {}
     sample_idx = 0 
@@ -272,21 +351,28 @@ def create_monomer_plots(z_embedded, monomers, dataset_type, dim_red_type, dir_n
     alphas = [assign_color(monomerA)[1] for key, monomerA in monomersA.items()]
 
     # Create plot
-    plt.figure(figure_offset)
+    plt.figure(figure_offset, figsize=(12, 8))
     sc = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=2, c=color_idx, cmap=cm, alpha=alphas)
     c_ticks = np.arange(n_colors) * (n_colors / (n_colors + 1)) + (2 / n_colors)
     cbar = plt.colorbar(sc, ticks=c_ticks)
     cbar.ax.set_yticklabels(all_labels)
     cbar.ax.set_title('Monomer A type')
-    plt.xlabel(f"{dim_red_type} 1")
-    plt.ylabel(f"{dim_red_type} 2")
+    plt.xlabel(f"{dim_red_type.upper()} 1")
+    plt.ylabel(f"{dim_red_type.upper()} 2")
+    plt.title(f'{dataset_type.capitalize()} - Monomer A Types')
     save_path = os.path.join(dir_name, f'{dataset_type}_latent_Amonomers_{dim_red_type}.png')
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved: {save_path}")
+    print(f"✅ Saved: {save_path}")
 
 def create_stoichiometry_plots(z_embedded, stoichiometry, dataset_type, dim_red_type, dir_name, figure_offset):
     """Create stoichiometry plots."""
+    if not stoichiometry:
+        print(f"⚠️ Skipping stoichiometry plots - no stoichiometry data")
+        return
+        
+    print(f"⚖️ Creating stoichiometry plots...")
+    
     label_color_dict = {'0.5|0.5': '#e3342f',
                         '0.25|0.75': '#f6993f',
                         '0.75|0.25': '#ffed4a'}
@@ -300,21 +386,28 @@ def create_stoichiometry_plots(z_embedded, stoichiometry, dataset_type, dim_red_
     # Get indices from color list for given labels
     color_idx = [all_colors.index(label_color_dict[st]) for st in stoichiometry]
 
-    plt.figure(figure_offset)
+    plt.figure(figure_offset, figsize=(10, 8))
     sc = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=2, c=color_idx, cmap=cm)
     c_ticks = np.arange(n_colors) * (n_colors / (n_colors + 1)) + (1 / (n_colors+1))
     cbar = plt.colorbar(sc, ticks=c_ticks)
     cbar.ax.set_yticklabels(all_labels)
     cbar.ax.set_title('Stoichiometric ratio')
-    plt.xlabel(f"{dim_red_type} 1")
-    plt.ylabel(f"{dim_red_type} 2")
+    plt.xlabel(f"{dim_red_type.upper()} 1")
+    plt.ylabel(f"{dim_red_type.upper()} 2")
+    plt.title(f'{dataset_type.capitalize()} - Stoichiometry')
     save_path = os.path.join(dir_name, f'{dataset_type}_latent_stoichiometry_{dim_red_type}.png')
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved: {save_path}")
+    print(f"✅ Saved: {save_path}")
 
 def create_connectivity_plots(z_embedded, connectivity_pattern, dataset_type, dim_red_type, dir_name, figure_offset):
     """Create connectivity plots."""
+    if not connectivity_pattern:
+        print(f"⚠️ Skipping connectivity plots - no connectivity data")
+        return
+        
+    print(f"🔗 Creating connectivity plots...")
+    
     label_color_dict = {'0.5': '#e3342f',
                         '0.375': '#f6993f',
                         '0.25': '#ffed4a'}
@@ -328,18 +421,19 @@ def create_connectivity_plots(z_embedded, connectivity_pattern, dataset_type, di
     # Get indices from color list for given labels
     color_idx = [all_colors.index(label_color_dict[st]) for st in connectivity_pattern]
 
-    plt.figure(figure_offset)
+    plt.figure(figure_offset, figsize=(10, 8))
     sc = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=2, c=color_idx, cmap=cm)
     c_ticks = np.arange(n_colors) * (n_colors / (n_colors + 1)) + (1 / (n_colors+1))
     cbar = plt.colorbar(sc, ticks=c_ticks)
     cbar.ax.set_yticklabels(all_labels)
     cbar.ax.set_title('Chain architecture')
-    plt.xlabel(f"{dim_red_type} 1")
-    plt.ylabel(f"{dim_red_type} 2")
+    plt.xlabel(f"{dim_red_type.upper()} 1")
+    plt.ylabel(f"{dim_red_type.upper()} 2")
+    plt.title(f'{dataset_type.capitalize()} - Connectivity')
     save_path = os.path.join(dir_name, f'{dataset_type}_latent_connectivity_{dim_red_type}.png')
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved: {save_path}")
+    print(f"✅ Saved: {save_path}")
 
 def process_dataset(dataset_type, dir_name, dim_red_type, figure_offset=0):
     """Process one dataset (train or test)."""
@@ -348,12 +442,20 @@ def process_dataset(dataset_type, dir_name, dim_red_type, figure_offset=0):
     print(f'{"="*60}')
     
     # Load data
-    latent_space, properties_real, properties_pred, monomers, stoichiometry, connectivity_pattern = load_property_data(
-        dataset_type, dir_name, property_count)
+    result = load_property_data(dataset_type, dir_name, property_count)
+    if result[0] is None:  # Check if loading failed
+        print(f"❌ Failed to load {dataset_type} data")
+        return figure_offset
+        
+    latent_space, properties_real, properties_pred, monomers, stoichiometry, connectivity_pattern = result
     
     # Perform dimensionality reduction
     z_embedded = perform_dimensionality_reduction(latent_space, dim_red_type, dataset_type, dir_name)
-    print(f"Dimensionality reduction completed: {z_embedded.shape}")
+    if z_embedded is None:
+        print(f"❌ Failed dimensionality reduction for {dataset_type}")
+        return figure_offset
+        
+    print(f"✅ Dimensionality reduction completed: {z_embedded.shape}")
     
     # Create property plots
     prop_figure_offset = figure_offset
@@ -365,13 +467,15 @@ def process_dataset(dataset_type, dir_name, dim_red_type, figure_offset=0):
     create_stoichiometry_plots(z_embedded, stoichiometry, dataset_type, dim_red_type, dir_name, struct_figure_offset + 1)
     create_connectivity_plots(z_embedded, connectivity_pattern, dataset_type, dim_red_type, dir_name, struct_figure_offset + 2)
     
+    print(f"🎨 Completed plotting for {dataset_type} dataset")
     return struct_figure_offset + 3
 
 # Main execution
-print(f"Starting latent space visualization")
+print(f"🎯 STARTING LATENT SPACE VISUALIZATION")
 print(f"Model directory: {dir_name}")
 print(f"Dimensionality reduction: {args.dim_red_type}")
 print(f"Properties to visualize: {property_names}")
+print(f"Data augmentation: {data_augment}")
 
 # Process train dataset
 figure_offset = process_dataset("train", dir_name, args.dim_red_type, 0)
@@ -380,7 +484,8 @@ figure_offset = process_dataset("train", dir_name, args.dim_red_type, 0)
 print('\n🔄 Now processing test set!')
 figure_offset = process_dataset("test", dir_name, args.dim_red_type, figure_offset)
 
-print('\n✅ Done!')
+print('\n🎉 VISUALIZATION COMPLETED!')
 print(f"📊 All plots saved to: {dir_name}")
 print(f"📈 Created visualizations for {property_count} properties: {property_names}")
 print(f"🗂️ Saved plots for both train and test datasets")
+print(f"🎨 Used {args.dim_red_type.upper()} for dimensionality reduction")

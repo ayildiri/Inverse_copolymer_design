@@ -1,5 +1,5 @@
 # Now proceed with using the indices - handle variable number of properties
-property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_of_increases] for prop_idx in range(len(property_names))]
+property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
 
@@ -80,7 +80,7 @@ parser.add_argument("--property_weights", type=float, nargs='+', default=None,
 parser.add_argument("--property_objectives", type=str, nargs='+', default=None, 
                     choices=["minimize", "maximize", "target"],
                     help="Objective for each property: minimize, maximize, or target a specific value")
-parser.add_argument("--objective_type", type=str, default="custom",
+parser.add_argument("--objective_type", type=str, default="EAmin",
                     choices=["EAmin", "mimick_peak", "mimick_best", "max_gap", "custom"],
                     help="Type of objective function to use (legacy option)")
 parser.add_argument("--custom_equation", type=str, default=None,

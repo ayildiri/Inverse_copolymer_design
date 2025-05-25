@@ -42,9 +42,125 @@ if device.type == 'cuda':
     print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3, 1), 'GB')
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
 
+def detect_polymer_type(smiles_part):
+    """
+    Detect if this is a homopolymer or copolymer
+    """
+    monomers = smiles_part.split(".")
+    if len(monomers) == 1:
+        return "homopolymer", monomers
+    elif len(monomers) == 2:
+        # Check if both monomers are identical (homopolymer written as A.A)
+        if monomers[0] == monomers[1]:
+            return "homopolymer", [monomers[0]]
+        else:
+            return "copolymer", monomers
+    else:
+        return "multipolymer", monomers
+
+def intelligent_rgroup_mapping(smiles_part, connectivity_part):
+    """
+    Intelligently map R-groups based on polymer type and connectivity patterns
+    """
+    import re
+    
+    # Extract R-groups from SMILES and connectivity
+    r_groups_in_smiles = set(re.findall(r'\[\*:(\d+)\]', smiles_part))
+    connectivity_pairs = re.findall(r'(\d+)-(\d+):', connectivity_part)
+    
+    # Get all R-groups mentioned in connectivity
+    conn_r_groups = set()
+    for pair in connectivity_pairs:
+        conn_r_groups.update(pair)
+    
+    polymer_type, monomers = detect_polymer_type(smiles_part)
+    
+    print(f"Polymer type: {polymer_type}")
+    print(f"R-groups in SMILES: {r_groups_in_smiles}")
+    print(f"R-groups in connectivity: {conn_r_groups}")
+    
+    # If R-groups already match, no need to change
+    if r_groups_in_smiles == conn_r_groups:
+        return smiles_part, connectivity_part
+    
+    new_smiles = smiles_part
+    new_connectivity = connectivity_part
+    
+    if polymer_type == "homopolymer":
+        # For homopolymers, map connectivity R-groups to available SMILES R-groups
+        available_r_groups = sorted(r_groups_in_smiles, key=int)
+        needed_r_groups = sorted(conn_r_groups, key=int)
+        
+        # Create mapping: connectivity R-groups → SMILES R-groups
+        mapping = {}
+        for i, needed in enumerate(needed_r_groups):
+            if i < len(available_r_groups):
+                mapping[needed] = available_r_groups[i]
+            else:
+                # If we need more R-groups than available, cycle through
+                mapping[needed] = available_r_groups[i % len(available_r_groups)]
+        
+        # Apply mapping to connectivity
+        for old, new in mapping.items():
+            new_connectivity = new_connectivity.replace(f'{old}-', f'{new}-')
+            new_connectivity = new_connectivity.replace(f'-{old}:', f'-{new}:')
+            
+        print(f"Homopolymer mapping: {mapping}")
+        
+    elif polymer_type == "copolymer":
+        # For copolymers, we expect connectivity to reference higher numbered R-groups
+        # Map them to available R-groups in SMILES
+        available_r_groups = sorted(r_groups_in_smiles, key=int)
+        needed_r_groups = sorted(set(conn_r_groups), key=int)
+        
+        if len(available_r_groups) >= 2 and len(needed_r_groups) >= 2:
+            # Standard copolymer mapping
+            mapping = {}
+            for i, needed in enumerate(needed_r_groups):
+                if i < len(available_r_groups):
+                    mapping[needed] = available_r_groups[i]
+                else:
+                    # Fallback to cycling
+                    mapping[needed] = available_r_groups[i % len(available_r_groups)]
+            
+            # Apply mapping to connectivity
+            for old, new in mapping.items():
+                new_connectivity = new_connectivity.replace(f'{old}-', f'{new}-')
+                new_connectivity = new_connectivity.replace(f'-{old}:', f'-{new}:')
+                
+            print(f"Copolymer mapping: {mapping}")
+        else:
+            # Fallback: renumber SMILES to match connectivity expectations
+            if len(needed_r_groups) <= 4:  # Common case
+                new_smiles = smiles_part
+                for i, old_r in enumerate(available_r_groups):
+                    new_r = str(i + 1)
+                    new_smiles = new_smiles.replace(f'[*:{old_r}]', f'[*:{new_r}]')
+                print(f"Renumbered SMILES R-groups to start from 1")
+                return new_smiles, connectivity_part
+    
+    else:  # multipolymer
+        # For complex polymers, use sequential mapping
+        available_r_groups = sorted(r_groups_in_smiles, key=int)
+        needed_r_groups = sorted(set(conn_r_groups), key=int)
+        
+        mapping = {}
+        for i, needed in enumerate(needed_r_groups):
+            if i < len(available_r_groups):
+                mapping[needed] = available_r_groups[i]
+        
+        # Apply mapping to connectivity
+        for old, new in mapping.items():
+            new_connectivity = new_connectivity.replace(f'{old}-', f'{new}-')
+            new_connectivity = new_connectivity.replace(f'-{old}:', f'-{new}:')
+            
+        print(f"Multipolymer mapping: {mapping}")
+    
+    return new_smiles, new_connectivity
+
 def validate_and_fix_polymer_format(poly_input):
     """
-    Validates and fixes common polymer format issues
+    Enhanced validation with intelligent R-group mapping for all polymer types
     """
     try:
         parts = poly_input.split("|")
@@ -55,64 +171,35 @@ def validate_and_fix_polymer_format(poly_input):
             return None
             
         smiles_part = parts[0]
-        stoich_parts = parts[1:-1]  # All parts between SMILES and connectivity
+        stoich_parts = parts[1:-1]
         connectivity_part = parts[-1]
         
-        # Count monomers in SMILES
+        # Count monomers
         monomers = smiles_part.split(".")
         monomer_count = len(monomers)
         
-        # Check and fix R-group numbering consistency
-        import re
-        r_groups_in_smiles = set(re.findall(r'\[\*:(\d+)\]', smiles_part))
-        r_groups_in_connectivity = set(re.findall(r'(\d+)-(\d+):', connectivity_part))
-        
-        # Flatten connectivity R-groups
-        conn_r_groups = set()
-        for pair in r_groups_in_connectivity:
-            conn_r_groups.update(pair)
-        
-        print(f"R-groups in SMILES: {r_groups_in_smiles}")
-        print(f"R-groups in connectivity: {conn_r_groups}")
-        
-        # If there's a mismatch, try to fix it
-        if r_groups_in_smiles != conn_r_groups:
-            print("R-group numbering mismatch detected, attempting to fix...")
-            
-            # Simple fix: if we have [*:2] but connectivity expects 1, renumber
-            if len(r_groups_in_smiles) == 1 and len(conn_r_groups) >= 1:
-                old_num = list(r_groups_in_smiles)[0]
-                if old_num not in conn_r_groups:
-                    # Renumber SMILES to match connectivity
-                    new_num = min(conn_r_groups)
-                    smiles_part = smiles_part.replace(f'[*:{old_num}]', f'[*:{new_num}]')
-                    print(f"Renumbered R-groups: {old_num} -> {new_num}")
+        # Intelligent R-group mapping
+        fixed_smiles, fixed_connectivity = intelligent_rgroup_mapping(smiles_part, connectivity_part)
         
         # Check stoichiometry match
         if len(stoich_parts) != monomer_count:
-            print(f"Stoichiometry mismatch: {monomer_count} monomers, {len(stoich_parts)} weights")
+            print(f"Fixing stoichiometry: {monomer_count} monomers, {len(stoich_parts)} weights")
             
-            # Fix by adjusting stoichiometry
             if monomer_count == 1:
-                # For homopolymer, use single weight
-                fixed_poly = f"{smiles_part}|1.0|{connectivity_part}"
+                stoich_parts = ["1.0"]
             elif monomer_count == 2:
-                # For copolymer, use equal weights
-                fixed_poly = f"{smiles_part}|0.5|0.5|{connectivity_part}"
+                stoich_parts = ["0.5", "0.5"]
             else:
-                # For higher order, distribute equally
                 weight = 1.0 / monomer_count
-                weights = "|".join([str(weight)] * monomer_count)
-                fixed_poly = f"{smiles_part}|{weights}|{connectivity_part}"
-                
-            print(f"Fixed polymer format: {fixed_poly}")
-            return fixed_poly
-            
-        # Return the potentially R-group-fixed version
-        return f"{smiles_part}|{('|'.join(stoich_parts))}|{connectivity_part}"
+                stoich_parts = [str(weight)] * monomer_count
+        
+        # Reconstruct the polymer string
+        fixed_poly = f"{fixed_smiles}|{('|'.join(stoich_parts))}|{fixed_connectivity}"
+        print(f"Final fixed polymer: {fixed_poly}")
+        return fixed_poly
         
     except Exception as e:
-        print(f"Error validating polymer format: {e}")
+        print(f"Error in validation: {e}")
         return None
 
 def adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name):
@@ -215,6 +302,37 @@ def adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predi
     print(f"Total valid molecules generated: {len(all_prediction_strings)}")
     return all_prediction_strings, all_reconstruction_strings, all_y_p
 
+def auto_detect_property_count_and_names(model, device):
+    """
+    Automatically detect the number of properties the model predicts
+    """
+    try:
+        # Create a random latent vector and get prediction
+        with torch.no_grad():
+            test_z = torch.randn(1, 32).to(device)
+            _, _, _, _, test_y = model.inference(data=test_z, device=device, sample=False, log_var=None)
+            
+            if torch.is_tensor(test_y):
+                property_count = test_y.shape[-1] if test_y.dim() > 1 else 1
+            else:
+                property_count = len(test_y) if hasattr(test_y, '__len__') else 1
+                
+        print(f"Auto-detected {property_count} properties from model")
+        
+        # Generate default property names
+        if property_count == 1:
+            property_names = ["property1"]
+        elif property_count == 2:
+            property_names = ["property1", "property2"]  # Could be EA, IP or bandgap, something else
+        else:
+            property_names = [f"property{i+1}" for i in range(property_count)]
+            
+        return property_count, property_names
+        
+    except Exception as e:
+        print(f"Error in auto-detection: {e}")
+        return 1, ["property1"]  # Safe fallback
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
 parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
@@ -241,10 +359,10 @@ parser.add_argument("--resume_from", type=str, default=None, help="Path to check
 parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
 
 # Add flexible property arguments
-parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
-                    help="Names of the properties to optimize")
+parser.add_argument("--property_names", type=str, nargs='+', default=None,
+                    help="Names of the properties to optimize (auto-detected if not specified)")
 parser.add_argument("--property_count", type=int, default=None,
-                    help="Number of properties (auto-detected from property_names if not specified)")
+                    help="Number of properties (auto-detected if not specified)")
 parser.add_argument("--property_targets", type=float, nargs='+', default=None,
                     help="Target values for each property (one per property)")
 parser.add_argument("--property_weights", type=float, nargs='+', default=None,
@@ -268,19 +386,6 @@ parser.add_argument("--polymer_column", type=str, default="poly_chemprop_input",
 
 args = parser.parse_args()
 
-# Handle property configuration
-property_names = args.property_names
-if args.property_count is not None:
-    property_count = args.property_count
-else:
-    property_count = len(property_names)
-
-# Validate that property count matches property names
-if len(property_names) != property_count:
-    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
-
-print(f"Optimizing model trained for {property_count} properties: {property_names}")
-
 seed = args.seed
 augment = args.augment #augmented or original
 tokenization = args.tokenization #oldtok or RT_tokenized
@@ -296,13 +401,21 @@ dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
 
-# Include property info in model name
-property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
-
-# Load model
+# Load model first to auto-detect properties
 # Create an instance of the G2S model from checkpoint
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
-filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='
+# We'll add the property string after we determine the properties
+
+# Load model without property string first
+temp_model_name = model_name + 'temp/'
+model_files = glob.glob(os.path.join(args.save_dir, 'Model_*data_DecL=*', "model_best_loss.pt"))
+
+if not model_files:
+    raise FileNotFoundError("No model files found. Please check the save directory.")
+
+# Take the first matching model file
+filepath = model_files[0]
+print(f"Loading model from: {filepath}")
 
 if os.path.isfile(filepath):
     if args.ppguided:
@@ -312,34 +425,6 @@ if os.path.isfile(filepath):
         
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
-    
-    # Get property information from model config if available
-    model_property_count = model_config.get('property_count', 2)
-    model_property_names = model_config.get('property_names', ["EA", "IP"])
-    
-    # Validate that the specified properties match the model
-    if property_count != model_property_count:
-        print(f"Warning: Specified property count ({property_count}) doesn't match model property count ({model_property_count})")
-        print(f"Using model property count: {model_property_count}")
-        property_count = model_property_count
-        
-    if property_names != model_property_names:
-        print(f"Warning: Specified property names ({property_names}) don't match model property names ({model_property_names})")
-        print(f"Using model property names: {model_property_names}") 
-        property_names = model_property_names
-    
-    print(f"Model trained for {property_count} properties: {property_names}")
-    
-    # Add warning for legacy objectives with wrong number of properties
-    if args.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap'] and property_count != 2:
-        print(f"⚠️  WARNING: Using legacy objective '{args.objective_type}' with {property_count} properties.")
-        print(f"   Legacy objectives expect exactly 2 properties (EA, IP).")
-        print(f"   Will fall back to flexible property handling with default objectives.")
-        print(f"   Consider using --objective_type custom with --custom_equation for single properties.")
-    elif args.objective_type == "custom" and property_count == 1:
-        print(f"💡 Example for single property optimization:")
-        print(f"   --objective_type custom --custom_equation 'p[0]' --maximize_equation (to maximize {property_names[0]})")
-        print(f"   --objective_type custom --custom_equation 'p[0]' (to minimize {property_names[0]})")
     
     batch_size = model_config.get('batch_size', 64)
     hidden_dimension = model_config['hidden_dimension']
@@ -356,11 +441,61 @@ if os.path.isfile(filepath):
     model.to(device)
     model.eval()
 
-# PropertyPrediction class - modified initialization
+# Now auto-detect properties from the loaded model
+auto_property_count, auto_property_names = auto_detect_property_count_and_names(model, device)
+
+# Handle property configuration with auto-detection
+if args.property_names is not None:
+    property_names = args.property_names
+    property_count = len(property_names)
+else:
+    property_names = auto_property_names
+    property_count = auto_property_count
+
+if args.property_count is not None:
+    if args.property_count != property_count:
+        print(f"Warning: Specified property count ({args.property_count}) doesn't match auto-detected count ({property_count})")
+        print(f"Using auto-detected count: {property_count}")
+
+# Validate and adjust user inputs to match detected property count
+def adjust_property_config(user_list, default_value, property_count, config_name):
+    """Adjust property configuration lists to match the detected property count"""
+    if user_list is None:
+        return [default_value] * property_count
+    elif len(user_list) < property_count:
+        print(f"Warning: {config_name} has {len(user_list)} values but model has {property_count} properties")
+        print(f"Padding with default value: {default_value}")
+        return user_list + [default_value] * (property_count - len(user_list))
+    elif len(user_list) > property_count:
+        print(f"Warning: {config_name} has {len(user_list)} values but model has {property_count} properties")
+        print(f"Truncating to first {property_count} values")
+        return user_list[:property_count]
+    else:
+        return user_list
+
+# Adjust property configurations
+property_weights = adjust_property_config(args.property_weights, 1.0, property_count, "property_weights")
+property_objectives = adjust_property_config(args.property_objectives, "minimize", property_count, "property_objectives")
+property_targets = adjust_property_config(args.property_targets, 0.0, property_count, "property_targets")
+
+print(f"Final configuration:")
+print(f"Properties ({property_count}): {property_names}")
+print(f"Objectives: {property_objectives}")
+print(f"Weights: {property_weights}")
+print(f"Targets: {property_targets}")
+
+# Now we can properly set the model name with the correct property string
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+model_name = model_name + property_str + '/'
+
+# Update the directory name
+dir_name = os.path.dirname(filepath).replace(os.path.basename(os.path.dirname(filepath)), os.path.basename(model_name.rstrip('/')))
+
+# PropertyPrediction class - enhanced for flexible properties
 class PropertyPrediction():
     def __init__(self, model, nr_vars, objective_type="custom", property_names=None, 
                  property_targets=None, property_weights=None, property_objectives=None,
-                 custom_equation=None, maximize_equation=False):
+                 custom_equation=None, maximize_equation=False, property_count=None):
         self.model_predictor = model
         self.weight_electron_affinity = 1  # Legacy - weight for electron affinity
         self.weight_ionization_potential = 1  # Legacy - weight for ionization potential
@@ -373,36 +508,71 @@ class PropertyPrediction():
         self.custom_equation = custom_equation
         self.maximize_equation = maximize_equation
         
-        # New flexible property configuration
-        self.property_names = property_names if property_names else ["EA", "IP"]
-        self.property_weights = property_weights if property_weights else [1.0] * len(self.property_names)
-        self.property_targets = property_targets
-        self.property_objectives = property_objectives if property_objectives else ["minimize"] * len(self.property_names)
+        # Flexible property configuration
+        self.property_names = property_names if property_names else ["property1"]
+        self.property_count = property_count if property_count else len(self.property_names)
+        self.property_weights = property_weights if property_weights else [1.0] * self.property_count
+        self.property_targets = property_targets if property_targets else [0.0] * self.property_count
+        self.property_objectives = property_objectives if property_objectives else ["minimize"] * self.property_count
         
         # Validate inputs
-        if self.property_weights and len(self.property_weights) != len(self.property_names):
-            raise ValueError("Number of property weights must match number of properties")
-        if self.property_targets and len(self.property_targets) != len(self.property_names):
-            raise ValueError("Number of property targets must match number of properties")
-        if self.property_objectives and len(self.property_objectives) != len(self.property_names):
-            raise ValueError("Number of property objectives must match number of properties")
+        if len(self.property_weights) != self.property_count:
+            print(f"Adjusting property_weights to match property_count ({self.property_count})")
+            self.property_weights = (self.property_weights * self.property_count)[:self.property_count]
+            
+        if len(self.property_targets) != self.property_count:
+            print(f"Adjusting property_targets to match property_count ({self.property_count})")
+            self.property_targets = (self.property_targets * self.property_count)[:self.property_count]
+            
+        if len(self.property_objectives) != self.property_count:
+            print(f"Adjusting property_objectives to match property_count ({self.property_count})")
+            self.property_objectives = (self.property_objectives * self.property_count)[:self.property_count]
             
         # Check that targets are provided for 'target' objectives
-        if self.property_objectives:
-            for i, obj in enumerate(self.property_objectives):
-                if obj == "target" and (not self.property_targets or self.property_targets[i] is None):
-                    raise ValueError(f"Target value must be provided for property {self.property_names[i]}")
+        for i, obj in enumerate(self.property_objectives):
+            if obj == "target" and self.property_targets[i] is None:
+                print(f"Warning: Target value not provided for property {self.property_names[i]}, using 0.0")
+                self.property_targets[i] = 0.0
                     
         # If using a custom equation, we need at least one property defined
         if self.custom_equation and not property_names:
             raise ValueError("Property names must be provided when using a custom equation")
 
+    def _normalize_property_predictions(self, predictions):
+        """
+        Normalize property predictions to always be a consistent format
+        """
+        if torch.is_tensor(predictions):
+            predictions = predictions.detach().cpu().numpy()
+        
+        predictions = np.array(predictions)
+        
+        # Ensure we have the right shape
+        if predictions.ndim == 1 and self.property_count == 1:
+            # Single property, single prediction
+            predictions = predictions.reshape(-1, 1)
+        elif predictions.ndim == 1 and self.property_count > 1:
+            # Multiple properties, single prediction
+            predictions = predictions.reshape(1, -1)
+        elif predictions.ndim == 2:
+            # Already in correct format
+            pass
+        else:
+            # Fallback: flatten and reshape
+            predictions = predictions.flatten().reshape(-1, self.property_count)
+        
+        # Pad or truncate to match expected property count
+        if predictions.shape[1] < self.property_count:
+            # Pad with NaN
+            padding = np.full((predictions.shape[0], self.property_count - predictions.shape[1]), np.nan)
+            predictions = np.concatenate([predictions, padding], axis=1)
+        elif predictions.shape[1] > self.property_count:
+            # Truncate
+            predictions = predictions[:, :self.property_count]
+            
+        return predictions
     
     def evaluate(self, **params):
-        # Assuming x is a 1D array containing the 32 numerical parameters
-
-        # Inference: forward pass NN prediciton of properties and beam search decoding from latent
-        #x = torch.from_numpy(np.array(list(params.values()))).to(device).to(torch.float32)
         self.eval_calls += 1
         print(f"Evaluation {self.eval_calls}: {params}")
         _vector = [params[f'x{i}'] for i in range(self.nr_vars)]
@@ -413,6 +583,10 @@ class PropertyPrediction():
             predictions, _, _, _, y = self.model_predictor.inference(data=x, device=device, sample=False, log_var=None)
         
         print(f"Step 1: Generated {len(predictions)} predictions")
+        
+        # Normalize property predictions
+        y_normalized = self._normalize_property_predictions(y)
+        print(f"Model output shape: {y_normalized.shape}, Properties expected: {self.property_count}")
         
         # Validity check of the decoded molecule + penalize invalid molecules
         prediction_strings, validity = self._calc_validity(predictions)
@@ -428,8 +602,8 @@ class PropertyPrediction():
                 "objective": self.penalty_value,
                 "latents_BO": x,
                 "latents_reencoded": [np.zeros(32)], 
-                "predictions_BO": y,
-                "predictions_reencoded": [[np.nan] * len(self.property_names)],
+                "predictions_BO": y_normalized,
+                "predictions_reencoded": [[np.nan] * self.property_count],
                 "string_decoded": prediction_strings, 
                 "string_reconstructed": [],
             }
@@ -447,17 +621,13 @@ class PropertyPrediction():
                 "objective": self.penalty_value,
                 "latents_BO": x,
                 "latents_reencoded": [np.zeros(32)], 
-                "predictions_BO": y,
-                "predictions_reencoded": [[np.nan] * len(self.property_names)],
+                "predictions_BO": y_normalized,
+                "predictions_reencoded": [[np.nan] * self.property_count],
                 "string_decoded": prediction_strings, 
                 "string_reconstructed": [],
             }
             self.results_custom[str(self.eval_calls)] = results_dict
             return self.penalty_value
-        
-        invalid_mask = (validity == 0)
-        # Encode and predict the valid molecules - handle variable number of properties
-        num_properties = len(self.property_names)
         
         # Build expanded arrays more carefully
         expanded_y_p = []
@@ -467,144 +637,43 @@ class PropertyPrediction():
         for val in validity:
             if val == 1:
                 if valid_idx < len(y_p_after_encoding_valid):
-                    expanded_y_p.append(y_p_after_encoding_valid[valid_idx])
+                    # Normalize the reencoded predictions
+                    reencoded_props = y_p_after_encoding_valid[valid_idx]
+                    if len(reencoded_props) < self.property_count:
+                        # Pad with NaN
+                        reencoded_props = reencoded_props + [np.nan] * (self.property_count - len(reencoded_props))
+                    elif len(reencoded_props) > self.property_count:
+                        # Truncate
+                        reencoded_props = reencoded_props[:self.property_count]
+                    
+                    expanded_y_p.append(reencoded_props)
                     expanded_z_p.append(z_p_after_encoding_valid[valid_idx])
                     valid_idx += 1
                 else:
                     # Fallback if we run out of valid results
-                    expanded_y_p.append([np.nan] * num_properties)
+                    expanded_y_p.append([np.nan] * self.property_count)
                     expanded_z_p.append([0] * 32)
             else:
-                expanded_y_p.append([np.nan] * num_properties)
+                expanded_y_p.append([np.nan] * self.property_count)
                 expanded_z_p.append([0] * 32)
         
         expanded_y_p = np.array(expanded_y_p)
         expanded_z_p = np.array(expanded_z_p)
-        #print(x, expanded_z_p)
-
         
-        # If using a custom equation
-        if self.objective_type == "custom" and self.custom_equation:
-            if validity[0] and not np.isnan(expanded_y_p[0]).all():
-                # Extract property values into a list
-                property_values = [expanded_y_p[~invalid_mask, i][0] for i in range(len(self.property_names)) if ~invalid_mask.any()]
-                
-                # Check if we have valid property values
-                if not property_values or any(np.isnan(val) for val in property_values):
-                    print("Warning: All property values are NaN")
-                    aggr_obj = self.penalty_value
-                else:
-                    # Create a safe evaluation environment
-                    eval_locals = {'p': property_values, 'abs': abs, 'np': np, 'math': math}
-                    
-                    try:
-                        # Evaluate the custom equation with the property values
-                        equation_result = eval(self.custom_equation, {"__builtins__": {}}, eval_locals)
-                        
-                        # Apply maximization if requested
-                        if self.maximize_equation:
-                            equation_result = -equation_result
-                            
-                        aggr_obj = -equation_result  # The negative sign is because BO maximizes by default
-                    except Exception as e:
-                        print(f"Error evaluating custom equation: {e}")
-                        aggr_obj = self.penalty_value
-            else:
-                aggr_obj = self.penalty_value
-        # If using legacy objective types, handle those
-        elif self.objective_type != "custom":
-            # Check if legacy objectives are compatible with the number of properties
-            if len(self.property_names) != 2 and self.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap']:
-                print(f"Warning: Legacy objective '{self.objective_type}' expects 2 properties (EA, IP) but model has {len(self.property_names)} properties: {self.property_names}")
-                print("Falling back to flexible property handling...")
-                # Fall through to flexible property handling
-                if validity[0] and not np.isnan(expanded_y_p[0]).all():
-                    obj_values = []
-                    
-                    for i, prop_name in enumerate(self.property_names):
-                        prop_idx = i  # Index of the property in the predicted values
-                        
-                        # Check for valid values
-                        if ~invalid_mask.any() and not np.isnan(expanded_y_p[~invalid_mask, prop_idx]).all():
-                            if self.property_objectives[i] == "minimize":
-                                # For minimization, use the raw value
-                                obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
-                            elif self.property_objectives[i] == "maximize":
-                                # For maximization, negate the value
-                                obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
-                            elif self.property_objectives[i] == "target":
-                                # For targeting a specific value, use absolute difference
-                                obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
-                            
-                            # Apply the weight
-                            obj_value *= self.property_weights[i]
-                            obj_values.append(obj_value)
-                        else:
-                            print(f"Warning: Invalid values for property {prop_name}")
-                            obj_values.append(float('inf'))  # Penalty for invalid values
-                    
-                    # Sum up all objective components
-                    if any(val == float('inf') for val in obj_values):
-                        aggr_obj = self.penalty_value
-                    else:
-                        aggr_obj = -sum(obj_values)
-                else:
-                    aggr_obj = self.penalty_value
-            else:
-                # Original legacy objective handling for 2-property models
-                if self.objective_type=='EAmin':
-                    obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-                    obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1)
-                elif self.objective_type=='mimick_peak':
-                    obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
-                    obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
-                elif self.objective_type=='mimick_best':
-                    obj1 = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
-                    obj2 = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
-                elif self.objective_type=='max_gap':
-                    obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-                    obj2 = - self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
-                
-                if validity[0] and ~invalid_mask.any() and not np.isnan(obj1).all() and not np.isnan(obj2).all():
-                    obj3 = 0
-                    aggr_obj = -(obj1[0] + obj2[0] + obj3)
-                else:
-                    obj3 = self.penalty_value
-                    aggr_obj = obj3
+        # Calculate objective based on the first valid molecule
+        first_valid_idx = np.where(validity)[0]
+        if len(first_valid_idx) == 0:
+            aggr_obj = self.penalty_value
         else:
-            # New flexible property handling without custom equation
-            if validity[0] and not np.isnan(expanded_y_p[0]).all():
-                obj_values = []
-                
-                for i, prop_name in enumerate(self.property_names):
-                    prop_idx = i  # Index of the property in the predicted values
-                    
-                    # Check for valid values
-                    if ~invalid_mask.any() and not np.isnan(expanded_y_p[~invalid_mask, prop_idx]).all():
-                        if self.property_objectives[i] == "minimize":
-                            # For minimization, use the raw value
-                            obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
-                        elif self.property_objectives[i] == "maximize":
-                            # For maximization, negate the value
-                            obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
-                        elif self.property_objectives[i] == "target":
-                            # For targeting a specific value, use absolute difference
-                            obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
-                        
-                        # Apply the weight
-                        obj_value *= self.property_weights[i]
-                        obj_values.append(obj_value)
-                    else:
-                        print(f"Warning: Invalid values for property {prop_name}")
-                        obj_values.append(float('inf'))  # Penalty for invalid values
-                
-                # Sum up all objective components
-                if any(val == float('inf') for val in obj_values):
-                    aggr_obj = self.penalty_value
-                else:
-                    aggr_obj = -sum(obj_values)
-            else:
+            first_valid = first_valid_idx[0]
+            property_values = expanded_y_p[first_valid]
+            
+            # Check for NaN values
+            if np.isnan(property_values).all():
+                print("Warning: All property values are NaN")
                 aggr_obj = self.penalty_value
+            else:
+                aggr_obj = self._calculate_objective(property_values)
         
         print(f"Step 4: Objective calculated - {aggr_obj}")
         
@@ -613,7 +682,7 @@ class PropertyPrediction():
         "objective":aggr_obj,
         "latents_BO": x,
         "latents_reencoded": expanded_z_p, 
-        "predictions_BO": y,
+        "predictions_BO": y_normalized,
         "predictions_reencoded": expanded_y_p,
         "string_decoded": prediction_strings, 
         "string_reconstructed": all_reconstructions_valid,
@@ -621,6 +690,75 @@ class PropertyPrediction():
         self.results_custom[str(self.eval_calls)] = results_dict
         
         return aggr_obj
+
+    def _calculate_objective(self, property_values):
+        """
+        Calculate objective value based on property values and configuration
+        """
+        # Replace NaN values with large penalty
+        clean_values = []
+        for i, val in enumerate(property_values):
+            if np.isnan(val):
+                clean_values.append(1000.0)  # Large penalty for NaN
+            else:
+                clean_values.append(val)
+        
+        # If using a custom equation
+        if self.objective_type == "custom" and self.custom_equation:
+            # Create a safe evaluation environment
+            eval_locals = {'p': clean_values, 'abs': abs, 'np': np, 'math': math}
+            
+            try:
+                # Evaluate the custom equation with the property values
+                equation_result = eval(self.custom_equation, {"__builtins__": {}}, eval_locals)
+                
+                # Apply maximization if requested
+                if self.maximize_equation:
+                    equation_result = -equation_result
+                    
+                return -equation_result  # The negative sign is because BO maximizes by default
+            except Exception as e:
+                print(f"Error evaluating custom equation: {e}")
+                return self.penalty_value
+        
+        # Legacy objectives (only for 2-property models)
+        elif self.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap'] and len(clean_values) >= 2:
+            if self.objective_type=='EAmin':
+                obj1 = self.weight_electron_affinity * clean_values[0]
+                obj2 = self.weight_ionization_potential * np.abs(clean_values[1] - 1)
+            elif self.objective_type=='mimick_peak':
+                obj1 = self.weight_electron_affinity * np.abs(clean_values[0] + 2)
+                obj2 = self.weight_ionization_potential * np.abs(clean_values[1] - 1.2)
+            elif self.objective_type=='mimick_best':
+                obj1 = self.weight_electron_affinity * np.abs(clean_values[0] + 2.64)
+                obj2 = self.weight_ionization_potential * np.abs(clean_values[1] - 1.61)
+            elif self.objective_type=='max_gap':
+                obj1 = self.weight_electron_affinity * clean_values[0]
+                obj2 = - self.weight_ionization_potential * clean_values[1]
+            
+            return -(obj1 + obj2)
+        
+        # Flexible property handling (default)
+        else:
+            obj_values = []
+            
+            for i in range(min(len(clean_values), self.property_count)):
+                if self.property_objectives[i] == "minimize":
+                    # For minimization, use the raw value
+                    obj_value = clean_values[i]
+                elif self.property_objectives[i] == "maximize":
+                    # For maximization, negate the value
+                    obj_value = -clean_values[i]
+                elif self.property_objectives[i] == "target":
+                    # For targeting a specific value, use absolute difference
+                    obj_value = np.abs(clean_values[i] - self.property_targets[i])
+                
+                # Apply the weight
+                obj_value *= self.property_weights[i]
+                obj_values.append(obj_value)
+            
+            # Sum up all objective components
+            return -sum(obj_values)
 
     def _make_polymer_mol(self,poly_input):
         # If making the mol works, the string is considered valid
@@ -633,7 +771,7 @@ class PropertyPrediction():
     
     def _calc_validity(self, predictions):
         """
-        Enhanced validity calculation with format fixing
+        Enhanced validity calculation with intelligent R-group fixing
         """
         prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
                                            tokenization=tokenization) for sample in range(len(predictions))]
@@ -656,34 +794,15 @@ class PropertyPrediction():
                 mols_valid.append(1)
                 fixed_strings.append(fixed_poly)
             except Exception as e:
-                # Try alternative R-group numbering as fallback
-                try:
-                    import re
-                    alternative_poly = fixed_poly
-                    r_groups = set(re.findall(r'\[\*:(\d+)\]', fixed_poly))
-                    
-                    if r_groups:
-                        # Map all R-groups to sequential numbering starting from 1
-                        for i, old_num in enumerate(sorted(r_groups), 1):
-                            alternative_poly = alternative_poly.replace(f'[*:{old_num}]', f'[*:{i}]')
-                            alternative_poly = alternative_poly.replace(f'{old_num}-', f'{i}-')
-                            alternative_poly = alternative_poly.replace(f'-{old_num}:', f'-{i}:')
-                        
-                        poly_graph = poly_smiles_to_graph(alternative_poly, np.nan, np.nan, None)
-                        mols_valid.append(1)
-                        fixed_strings.append(alternative_poly)
-                    else:
-                        mols_valid.append(0)
-                        fixed_strings.append(poly_input)
-                except:
-                    mols_valid.append(0)
-                    fixed_strings.append(poly_input)
+                print(f"Graph creation failed even after fixing: {e}")
+                mols_valid.append(0)
+                fixed_strings.append(poly_input)
         
         return fixed_strings, np.array(mols_valid)
     
     def _encode_and_predict_decode_molecules(self, predictions):
         """
-        More robust encoding with better error handling
+        More robust encoding with better error handling and flexible property support
         """
         prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
                                            tokenization=tokenization) for sample in range(len(predictions))]
@@ -702,30 +821,12 @@ class PropertyPrediction():
                     print(f"Skipping invalid polymer {i}: {poly_input}")
                     continue
                 
-                # Try to create graph
+                # Try to create graph with advanced error handling
                 try:
                     g = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
                 except Exception as graph_error:
-                    # If graph creation fails, try alternative R-group numbering
-                    print(f"Graph creation failed, trying R-group alternatives: {graph_error}")
-                    
-                    # Try renumbering all R-groups to start from 1
-                    import re
-                    alternative_poly = fixed_poly
-                    r_groups = set(re.findall(r'\[\*:(\d+)\]', fixed_poly))
-                    
-                    if r_groups:
-                        # Map all R-groups to sequential numbering starting from 1
-                        for i, old_num in enumerate(sorted(r_groups), 1):
-                            alternative_poly = alternative_poly.replace(f'[*:{old_num}]', f'[*:{i}]')
-                            alternative_poly = alternative_poly.replace(f'{old_num}-', f'{i}-')
-                            alternative_poly = alternative_poly.replace(f'-{old_num}:', f'-{i}:')
-                        
-                        print(f"Trying alternative numbering: {alternative_poly}")
-                        g = poly_smiles_to_graph(alternative_poly, np.nan, np.nan, None)
-                        fixed_poly = alternative_poly  # Use the alternative for tokenization
-                    else:
-                        raise graph_error  # Re-raise if no R-groups to fix
+                    print(f"Graph creation failed for polymer {i}: {graph_error}")
+                    continue
                 
                 # Tokenize
                 if tokenization == "oldtok":
@@ -743,7 +844,6 @@ class PropertyPrediction():
                 
             except Exception as e:
                 print(f"Error processing polymer {i}: {e}")
-                print(f"Polymer string: {s}")
                 continue
         
         if not data_list:
@@ -778,12 +878,15 @@ class PropertyPrediction():
                         sample=False, log_var=None
                     )
                     
-                    # Check for NaN values
-                    if torch.isnan(y).any():
-                        print(f"Warning: NaN detected in predictions for batch {i}")
-                        y = torch.nan_to_num(y, nan=0.0)
+                    # Normalize property predictions
+                    y_normalized = self._normalize_property_predictions(y)
                     
-                    y_p.append(y.cpu().numpy())
+                    # Check for NaN values
+                    if np.isnan(y_normalized).any():
+                        print(f"Warning: NaN detected in predictions for batch {i}")
+                        y_normalized = np.nan_to_num(y_normalized, nan=0.0)
+                    
+                    y_p.append(y_normalized)
                     z_p.append(z.cpu().numpy())
                     
                     reconstruction_strings = [combine_tokens(tokenids_to_vocab(reconstruction[sample][0].tolist(), vocab), 
@@ -794,8 +897,15 @@ class PropertyPrediction():
                     print(f"Error in batch {i}: {e}")
                     continue
         
-        # Flatten results
-        y_p_flat = [sublist.tolist() for array_ in y_p for sublist in array_]
+        # Flatten results with proper property handling
+        y_p_flat = []
+        for array_ in y_p:
+            for sublist in array_:
+                if isinstance(sublist, np.ndarray):
+                    y_p_flat.append(sublist.tolist())
+                else:
+                    y_p_flat.append(sublist)
+                    
         z_p_flat = [sublist.tolist() for array_ in z_p for sublist in array_]
         self.modified_solution = z_p_flat
 
@@ -873,7 +983,6 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 # Setup log file for monitoring
 log_file = os.path.join(dir_name, f'optimization_log_{args.opt_run}.txt')
 
-
 with open(dir_name+'latent_space_'+dataset_type+'.npy', 'rb') as f:
     latent_space = np.load(f)
 min_values = np.amin(latent_space, axis=0).tolist()
@@ -899,13 +1008,13 @@ elif cutoff==0:
 
 opt_run = args.opt_run
 
-# Instantiating the PropertyPrediction class - updated
+# Instantiating the PropertyPrediction class with flexible property support
 nr_vars = 32
 
 # Get property configuration from arguments
-property_targets = args.property_targets
-property_weights = args.property_weights
-property_objectives = args.property_objectives
+property_targets = property_targets
+property_weights = property_weights
+property_objectives = property_objectives
 objective_type = args.objective_type
 custom_equation = args.custom_equation
 maximize_equation = args.maximize_equation
@@ -919,7 +1028,8 @@ prop_predictor = PropertyPrediction(
     property_weights=property_weights,
     property_objectives=property_objectives,
     custom_equation=custom_equation,
-    maximize_equation=maximize_equation
+    maximize_equation=maximize_equation,
+    property_count=property_count
 )
 
 # Check if resuming from checkpoint
@@ -945,7 +1055,6 @@ else:
     # Initialize new optimization
     optimizer = BayesianOptimization(f=prop_predictor.evaluate, pbounds=bounds, random_state=opt_run)
     log_progress("Starting new optimization", log_file)
-
 
 # Perform optimization
 # Use EI instead of UCB for potentially better exploration
@@ -1033,7 +1142,6 @@ log_progress(f"Optimization completed. Total time: {elapsed_time:.2f} seconds", 
 final_checkpoint = save_checkpoint(optimizer, prop_predictor, total_iterations, checkpoint_dir, args.opt_run)
 log_progress(f"Final checkpoint saved: {final_checkpoint}", log_file)
 
-
 # List all checkpoints
 def list_checkpoints(checkpoint_dir, opt_run):
     """List all checkpoints for a given run"""
@@ -1057,7 +1165,6 @@ with open(summary_file, 'w') as f:
 
 log_progress(f"Checkpoint summary saved: {summary_file}", log_file)
 
-#optimizer.maximize(init_points=20, n_iter=500, acquisition_function=utility)
 results = optimizer.res
 results_custom = prop_predictor.results_custom
 
@@ -1065,8 +1172,6 @@ with open(dir_name+'optimization_results_'+str(cutoff)+'_'+str(objective_type)+'
     pickle.dump(results, f)
 with open(dir_name+'optimization_results_custom_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'wb') as f:
     pickle.dump(results_custom, f)
-
-
 
 # Get the best parameters found
 best_params = optimizer.max['params']
@@ -1082,8 +1187,8 @@ with open(dir_name+'optimization_results_custom_'+str(cutoff)+'_'+str(objective_
 
 with open(dir_name+'optimization_results_custom_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
      print(results_custom, file=fl)
-#print(results_custom)
-# Calculate distances between the BO and reencoded latents
+
+# Calculate distances between the BO and reencoded latents with flexible property support
 Latents_BO = []
 Latents_RE = []
 latent_inconsistencies = []
@@ -1158,11 +1263,11 @@ print(np.mean(latent_inconsistencies), np.std(latent_inconsistencies))
 
 import matplotlib.pyplot as plt
 
-# Extract data for the curves
+# Extract data for the curves with flexible property support
 iterations = range(len(pred_BO))
 
 # Handle different possible formats safely with proper error checking
-property_values_bo = [[] for _ in range(len(property_names))]  # Create lists for each property
+property_values_bo = [[] for _ in range(property_count)]  # Create lists for each property
 for x in pred_BO:
     # First ensure x is a numpy array that we can work with
     if torch.is_tensor(x):
@@ -1171,72 +1276,55 @@ for x in pred_BO:
         x_np = np.array(x) if not isinstance(x, np.ndarray) else x
     
     # Access elements safely - handle different array shapes
-    for prop_idx in range(len(property_names)):
+    for prop_idx in range(property_count):
         if x_np.ndim > 1 and x_np.shape[1] > prop_idx:  # Handle (1,N) shaped arrays
             property_values_bo[prop_idx].append(x_np[0, prop_idx])
         elif x_np.size > prop_idx:  # Check if flat array has enough elements
-            property_values_bo[prop_idx].append(x_np[prop_idx])
+            property_values_bo[prop_idx].append(x_np.flat[prop_idx])
         else:  # Handle arrays without enough elements
             property_values_bo[prop_idx].append(float('nan'))
 
 # Similarly handle pred_RE with proper error checking
-property_values_re = [[] for _ in range(len(property_names))]  # Create lists for each property
+property_values_re = [[] for _ in range(property_count)]  # Create lists for each property
 for x in pred_RE:
-    for prop_idx in range(len(property_names)):
+    for prop_idx in range(property_count):
         if isinstance(x, np.ndarray):
             if x.ndim > 1 and x.shape[1] > prop_idx:  # Handle (1,N) shaped arrays
                 property_values_re[prop_idx].append(x[0, prop_idx])
             elif x.size > prop_idx:  # Check if flat array has enough elements
-                property_values_re[prop_idx].append(x[prop_idx])
+                property_values_re[prop_idx].append(x.flat[prop_idx])
             else:
                 property_values_re[prop_idx].append(float('nan'))
+        elif isinstance(x, list) and len(x) > prop_idx:
+            property_values_re[prop_idx].append(x[prop_idx])
         else:
-            # Try to handle as a list or other indexable object
-            try:
-                if len(x) > prop_idx:
-                    property_values_re[prop_idx].append(x[prop_idx])
-                else:
-                    property_values_re[prop_idx].append(float('nan'))
-            except:
-                property_values_re[prop_idx].append(float('nan'))
+            property_values_re[prop_idx].append(float('nan'))
 
-# For backwards compatibility with existing code that expects EA_bo, IP_bo, etc.
-if len(property_names) >= 1:
-    EA_bo = property_values_bo[0]  # First property (could be bandgap, EA, etc.)
-    EA_re = property_values_re[0]
-if len(property_names) >= 2:
-    IP_bo = property_values_bo[1]  # Second property if available
-    IP_re = property_values_re[1]
-else:
-    # If only one property, create dummy arrays for backwards compatibility
-    IP_bo = [float('nan')] * len(EA_bo)
-    IP_re = [float('nan')] * len(EA_re)
+# Create plot with dynamic labels for all properties
+plt.figure(0, figsize=(12, 8))
 
-# Create plot with dynamic labels
-plt.figure(0)
+colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
 
-prop1_name = property_names[0] if len(property_names) >= 1 else "Property 1"
-prop2_name = property_names[1] if len(property_names) >= 2 else "Property 2"
-
-plt.plot(iterations, EA_bo, label=f'{prop1_name} (BO)')
-if len(property_names) >= 2:
-    plt.plot(iterations, IP_bo, label=f'{prop2_name} (BO)')
-plt.plot(iterations, EA_re, label=f'{prop1_name} (RE)')
-if len(property_names) >= 2:
-    plt.plot(iterations, IP_re, label=f'{prop2_name} (RE)')
+for prop_idx in range(property_count):
+    prop_name = property_names[prop_idx]
+    color = colors[prop_idx % len(colors)]
+    
+    plt.plot(iterations, property_values_bo[prop_idx], label=f'{prop_name} (BO)', 
+             color=color, linestyle='-', alpha=0.7)
+    plt.plot(iterations, property_values_re[prop_idx], label=f'{prop_name} (RE)', 
+             color=color, linestyle='--', alpha=0.7)
 
 # Add labels and legend
 plt.xlabel('Index')
 plt.ylabel('Value')
+plt.title(f'Property Optimization Progress ({property_count} properties)')
 plt.legend()
+plt.grid(True, alpha=0.3)
 plt.savefig(dir_name+'BO_objectives_'+str(cutoff)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
 plt.close()
 
-
 # Plot the training data pca and optimization points
-    
 # Dimensionality reduction
-#PCA
 # 1. Load trained latent space
 dataset_type = "train"
 with open(dir_name+'latent_space_'+dataset_type+'.npy', 'rb') as f:
@@ -1261,35 +1349,35 @@ plt.figure(1)
 # PCA projection colored by first property
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis')
 clb = plt.colorbar()
-clb.ax.set_title(f'{property_names[0]}' if len(property_names) >= 1 else 'Property 1')
+clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
 plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
 plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
 plt.xlabel('PC1')
 plt.ylabel('PC2')
+plt.title(f'PCA Projection Colored by {property_names[0]}')
 plt.savefig(dir_name+'BO_projected_to_pca_'+str(cutoff)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
 plt.close()
-#pca = PCA(n_components=2)
 
-# PCA projection colored by second property (only if it exists)
-if len(property_names) >= 2:
-    with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
-        y2_all_train = np.load(f)
-    plt.figure(1)
-    plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y2_all_train, cmap='plasma')
-    clb = plt.colorbar()
-    clb.ax.set_title(f'{property_names[1]}')
-    plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
-    plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
-    plt.xlabel('PC1')
-    plt.ylabel('PC2')
-    plt.title(f'PCA Projection Colored by {property_names[1]}')
-    plt.savefig(dir_name + 'BO_projected_to_pca_' + property_names[1] + '_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
-    plt.close()
+# PCA projection colored by other properties (if they exist)
+for prop_idx in range(1, min(property_count, 3)):  # Limit to first 3 properties for visualization
+    try:
+        with open(dir_name+f'y{prop_idx+1}_all_'+dataset_type+'.npy', 'rb') as f:
+            y_prop_all_train = np.load(f)
+        plt.figure(1)
+        plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y_prop_all_train, cmap='plasma')
+        clb = plt.colorbar()
+        clb.ax.set_title(f'{property_names[prop_idx]}')
+        plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
+        plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
+        plt.xlabel('PC1')
+        plt.ylabel('PC2')
+        plt.title(f'PCA Projection Colored by {property_names[prop_idx]}')
+        plt.savefig(dir_name + 'BO_projected_to_pca_' + property_names[prop_idx] + '_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
+        plt.close()
+    except FileNotFoundError:
+        print(f"Warning: y{prop_idx+1}_all_{dataset_type}.npy not found, skipping PCA plot for {property_names[prop_idx]}")
 
-
-
-
-### Do the same but only for improved points
+### Do the same but only for improved points with flexible property support
 def indices_of_improvement(values):
     indices_of_increases = []
 
@@ -1308,8 +1396,7 @@ def indices_of_improvement(values):
     return indices_of_increases
 
 def top_n_molecule_indices(objective_values, n_idx=10):
-    # Get the indices of 20 molecules with the highest objective values
-    # Pair each value with its index
+    # Get the indices of molecules with the highest objective values
     # Filter out NaN values and keep track of original indices
     filtered_indexed_values = [(index, value) for index, value in enumerate(objective_values) if not math.isnan(value)]
     # Sort the indexed values by the value in descending order and take n_idx best ones
@@ -1324,24 +1411,30 @@ def top_n_molecule_indices(objective_values, n_idx=10):
             _best_mols.append(decoded_mols[index])
         else:
             best_mols_count[decoded_mols[index]]+=1
-        if len(top_idxs)==20:
+        if len(top_idxs)==n_idx:
             break
 
     return top_idxs, best_mols_count
 
-# Extract data for the curves - handle variable number of properties
-if objective_type=='mimick_peak' and len(property_names) >= 2:
-    objective_values = [-(np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
-elif objective_type=='mimick_best' and len(property_names) >= 2:
-    objective_values = [-((np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61))) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
-elif objective_type=='EAmin' and len(property_names) >= 2: 
-    objective_values = [-(arr[0]+np.abs(arr[1]-1)) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
-elif objective_type =='max_gap' and len(property_names) >= 2:
-    objective_values = [-(arr[0]-arr[1]) if not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
+# Calculate objective values with flexible property support
+if objective_type in ['mimick_peak', 'mimick_best', 'EAmin', 'max_gap'] and property_count >= 2:
+    # Legacy objectives for 2+ property models
+    if objective_type=='mimick_peak':
+        objective_values = [-(np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) if len(arr) >= 2 and not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
+    elif objective_type=='mimick_best':
+        objective_values = [-((np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61))) if len(arr) >= 2 and not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
+    elif objective_type=='EAmin': 
+        objective_values = [-(arr[0]+np.abs(arr[1]-1)) if len(arr) >= 2 and not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
+    elif objective_type =='max_gap':
+        objective_values = [-(arr[0]-arr[1]) if len(arr) >= 2 and not np.isnan(arr[0]) and not np.isnan(arr[1]) else float('-inf') for arr in pred_RE]
 else:
-    # For single property models or when using custom/flexible objectives
-    # Use the first property with a simple minimization objective
-    objective_values = [-arr[0] if not np.isnan(arr[0]) else float('-inf') for arr in pred_RE]
+    # For flexible property models, use the primary property
+    if property_objectives[0] == "target":
+        objective_values = [-np.abs(arr[0] - property_targets[0]) if len(arr) >= 1 and not np.isnan(arr[0]) else float('-inf') for arr in pred_RE]
+    elif property_objectives[0] == "maximize":
+        objective_values = [arr[0] if len(arr) >= 1 and not np.isnan(arr[0]) else float('-inf') for arr in pred_RE]
+    else:  # minimize
+        objective_values = [-arr[0] if len(arr) >= 1 and not np.isnan(arr[0]) else float('-inf') for arr in pred_RE]
 
 # Find valid indices (where we have non-NaN values)
 valid_indices = [i for i, val in enumerate(objective_values) if val != float('-inf')]
@@ -1362,14 +1455,8 @@ if not valid_indices or not indices_of_increases:
         indices_of_increases = [0]
 
 # Now proceed with using the indices - handle variable number of properties
-property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_of_increases] for prop_idx in range(len(property_names))]
-property_values_re_imp = [[property_values_re[prop_idx][i] for i in indices_of_increases] for prop_idx in range(len(property_names))]
-
-# For backwards compatibility
-EA_bo_imp = property_values_bo_imp[0] if len(property_names) >= 1 else []
-EA_re_imp = property_values_re_imp[0] if len(property_names) >= 1 else []
-IP_bo_imp = property_values_bo_imp[1] if len(property_names) >= 2 else [float('nan')] * len(EA_bo_imp)
-IP_re_imp = property_values_re_imp[1] if len(property_names) >= 2 else [float('nan')] * len(EA_re_imp)
+property_values_bo_imp = [[property_values_bo[prop_idx][i] for i in indices_of_increases] for prop_idx in range(property_count)]
+property_values_re_imp = [[property_values_re[prop_idx][i] for i in indices_of_increases] for prop_idx in range(property_count)]
 
 best_z_re = [Latents_RE[i] for i in indices_of_increases]
 best_mols = {i+1: decoded_mols[i] for i in indices_of_increases}
@@ -1379,15 +1466,20 @@ best_props = {}
 for i, idx in enumerate(indices_of_increases):
     prop_values = []
     # Add RE values for each property
-    for prop_idx in range(len(property_names)):
-        prop_values.append(property_values_re[prop_idx][idx])
+    for prop_idx in range(property_count):
+        if prop_idx < len(property_values_re[idx]) if property_values_re and len(property_values_re) > idx else False:
+            prop_values.append(property_values_re[prop_idx][idx])
+        else:
+            prop_values.append(float('nan'))
     # Add BO values for each property  
-    for prop_idx in range(len(property_names)):
-        prop_values.append(property_values_bo[prop_idx][idx])
+    for prop_idx in range(property_count):
+        if prop_idx < len(property_values_bo[idx]) if property_values_bo and len(property_values_bo) > idx else False:
+            prop_values.append(property_values_bo[prop_idx][idx])
+        else:
+            prop_values.append(float('nan'))
     best_props[i+1] = prop_values
 
 best_mols_rec = {i+1: rec_mols[i] for i in indices_of_increases}
-
 
 with open(dir_name+'best_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
     print(best_mols, file=fl)
@@ -1403,16 +1495,22 @@ best_props_t20 = {}
 for i, idx in enumerate(top_20_indices):
     prop_values = []
     # Add RE values for each property
-    for prop_idx in range(len(property_names)):
-        prop_values.append(property_values_re[prop_idx][idx])
+    for prop_idx in range(property_count):
+        if prop_idx < len(property_values_re[idx]) if property_values_re and len(property_values_re) > idx else False:
+            prop_values.append(property_values_re[prop_idx][idx])
+        else:
+            prop_values.append(float('nan'))
     # Add BO values for each property  
-    for prop_idx in range(len(property_names)):
-        prop_values.append(property_values_bo[prop_idx][idx])
+    for prop_idx in range(property_count):
+        if prop_idx < len(property_values_bo[idx]) if property_values_bo and len(property_values_bo) > idx else False:
+            prop_values.append(property_values_bo[prop_idx][idx])
+        else:
+            prop_values.append(float('nan'))
     best_props_t20[i+1] = prop_values
+    
 with open(dir_name+'top20_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
     print(best_mols_t20, file=fl)
     print(best_props_t20, file=fl)
-
 
 print(objective_values)
 print(indices_of_increases)
@@ -1422,14 +1520,12 @@ z_embedded_BO_imp = reducer.transform(latents_BO_np_imp)
 latents_RE_np_imp = np.stack([Latents_RE[i] for i in indices_of_increases])
 z_embedded_RE_imp = reducer.transform(latents_RE_np_imp)
 
-plt.figure(2)
-
+plt.figure(2, figsize=(10, 8))
 
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
 clb = plt.colorbar()
-clb.ax.set_title(f'{property_names[0]}' if len(property_names) >= 1 else 'Property 1')
-#plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=1, c='black', marker="1")
-#plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=1, c='red',marker="2")
+clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
+
 # Real latent space (reencoded)
 for i, (x, y) in enumerate(z_embedded_RE_imp):
     it=indices_of_increases[i]
@@ -1442,7 +1538,6 @@ for i in range(len(z_embedded_RE_imp) - 1):
     x_end, y_end = z_embedded_RE_imp[i + 1]
     plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
               shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='red')
-
 
 for i, (x, y) in enumerate(z_embedded_BO_imp):
     it=indices_of_increases[i]
@@ -1463,14 +1558,12 @@ plt.title('Optimization in latent space')
 
 plt.savefig(dir_name+'BO_imp_projected_to_pca_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
 
-plt.figure(3)
-
+plt.figure(3, figsize=(10, 8))
 
 plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
 clb = plt.colorbar()
-clb.ax.set_title(f'{property_names[0]}' if len(property_names) >= 1 else 'Property 1')
-#plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=1, c='black', marker="1")
-#plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=1, c='red',marker="2")
+clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
+
 # Real latent space (reencoded)
 for i, (x, y) in enumerate(z_embedded_RE_imp):
     it=indices_of_increases[i]
@@ -1544,9 +1637,9 @@ else:
     all_reconstruction_strings = []
     all_y_p = []
     seed_string = ["No seed generated"]
-    y_seed = [np.array([np.nan])]
+    y_seed = [np.array([np.nan] * property_count)]
 
-# Add these debug prints BEFORE the above lines:
+# Add these debug prints:
 print(f"\nSAMPLING RESULTS CHECK:")
 print(f"all_prediction_strings length: {len(all_prediction_strings)}")
 print(f"all_reconstruction_strings length: {len(all_reconstruction_strings)}")
@@ -1601,7 +1694,6 @@ def poly_smiles_to_molecule(poly_input):
     '''
     Turns adjusted polymer smiles string into PyG data objects
     '''
-
     # Turn into RDKIT mol object
     mols = make_monomer_mols(poly_input.split("|")[0], 0, 0,  # smiles
                             fragment_weights=poly_input.split("|")[1:-1])
@@ -1631,17 +1723,17 @@ prediction_validityA= []
 prediction_validityB =[]
 data_dir = os.path.join(main_dir_path,'data/')
 
-# Load dataset CSV file for novelty analysis (UPDATED SECTION)
+# Load dataset CSV file for novelty analysis
 all_polymers_data = []
 all_train_polymers = []
 
-# Get training polymers from dict_train_loader (this part stays the same)
+# Get training polymers from dict_train_loader
 for batch, graphs in enumerate(dict_train_loader):
     data = dict_train_loader[str(batch)][0]
     train_polymers_batch = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization).split('_')[0] for sample in range(len(data))]
     all_train_polymers.extend(train_polymers_batch)
 
-# Load dataset CSV for novelty comparison (UPDATED TO USE COMMAND LINE ARG)
+# Load dataset CSV for novelty comparison
 if args.dataset_csv:
     try:
         print(f"Loading dataset from: {args.dataset_csv}")
@@ -1705,7 +1797,7 @@ if all_predictions_can and (all_polymers_data or all_train_polymers):
     with open(data_dir+'all_mons_train_can'+'.pkl', 'rb') as f:
         all_mons_can = pickle.load(f)
 
-    # C
+    # Calculate validity scores
     prediction_mols = list(map(poly_smiles_to_molecule, all_predictions))
     for mon in prediction_mols: 
         try: prediction_validityA.append(mon[0] is not None)
@@ -1813,25 +1905,21 @@ else:
 """ Plot the kde of the properties of training data and sampled data """
 from sklearn.neighbors import KernelDensity
 
-with open(dir_name+'y1_all_'+dataset_type+'.npy', 'rb') as f:
-    y1_all = np.load(f)
-# Load y2_all only if we have more than one property
-if len(property_names) >= 2:
+# Load training data for all properties
+training_property_data = []
+for prop_idx in range(property_count):
     try:
-        with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
-            y2_all = np.load(f)
+        with open(dir_name+f'y{prop_idx+1}_all_'+dataset_type+'.npy', 'rb') as f:
+            y_prop_all = np.load(f)
+            training_property_data.append(list(y_prop_all))
     except FileNotFoundError:
-        print(f"Warning: y2_all_{dataset_type}.npy not found, creating dummy data")
-        y2_all = np.full_like(y1_all, np.nan)
-else:
-    y2_all = np.full_like(y1_all, np.nan)  # Create dummy data for single property models
-    
+        print(f"Warning: y{prop_idx+1}_all_{dataset_type}.npy not found, creating dummy data")
+        # Create dummy data if file doesn't exist
+        training_property_data.append([0.0] * 100)  # Dummy data
+
 with open(dir_name+'yp_all_'+dataset_type+'.npy', 'rb') as f:
     yp_all = np.load(f)
 
-y1_all=list(y1_all)
-if len(property_names) >= 2:
-    y2_all=list(y2_all)
 yp_all_list = [yp for yp in yp_all]
 
 # debug prints:
@@ -1843,35 +1931,32 @@ if all_y_p:
     print(f"Types in all_y_p: {[type(x) for x in all_y_p[:3]]}")
 
 # Create KDE data for each property
-property_kde_data = []
-for prop_idx in range(len(property_names)):
-    if prop_idx < len(yp_all_list[0]) if yp_all_list else False:  # Check if this property exists in training data
-        yp_prop_all = [yp[prop_idx] for yp in yp_all_list]
-        yp_prop_all_seed = [yp[prop_idx] for yp in all_y_p] if all_y_p else []
-        property_kde_data.append((yp_prop_all, yp_prop_all_seed))
-    else:
-        property_kde_data.append(([], []))
-
-# Plot KDE for each property
-for prop_idx, (yp_prop_all, yp_prop_all_seed) in enumerate(property_kde_data):
-    if not yp_prop_all_seed:  # Skip if no data
+for prop_idx in range(property_count):
+    if not all_y_p:  # Skip if no data
         continue
         
-    prop_name = property_names[prop_idx] if prop_idx < len(property_names) else f"Property {prop_idx+1}"
+    prop_name = property_names[prop_idx]
     
-    # Get property data
-    if prop_idx == 0:
-        y_prop_all = y1_all
-    elif prop_idx == 1:
-        y_prop_all = y2_all
-    else:
-        # For additional properties, we'd need to load them separately
+    # Get training data for this property
+    y_prop_all = training_property_data[prop_idx] if prop_idx < len(training_property_data) else [0.0] * 100
+    
+    # Get predicted data for this property
+    yp_prop_all = [yp[prop_idx] for yp in yp_all_list if len(yp) > prop_idx]
+    yp_prop_all_seed = [yp[prop_idx] for yp in all_y_p if len(yp) > prop_idx]
+    
+    if not yp_prop_all_seed:
+        print(f"No data for property {prop_name}, skipping KDE plot")
         continue
     
     plt.figure(figsize=(10, 8))
     real_distribution = np.array([r for r in y_prop_all if not np.isnan(r)])
-    augmented_distribution = np.array([p for p in yp_prop_all])
-    seed_distribution = np.array([s for s in yp_prop_all_seed])
+    augmented_distribution = np.array([p for p in yp_prop_all if not np.isnan(p)])
+    seed_distribution = np.array([s for s in yp_prop_all_seed if not np.isnan(s)])
+
+    if len(real_distribution) == 0 or len(augmented_distribution) == 0 or len(seed_distribution) == 0:
+        print(f"Insufficient data for KDE plot of {prop_name}")
+        plt.close()
+        continue
 
     # Reshape the data
     real_distribution = real_distribution.reshape(-1, 1)
@@ -1881,39 +1966,47 @@ for prop_idx, (yp_prop_all, yp_prop_all_seed) in enumerate(property_kde_data):
     # Define bandwidth
     bandwidth = 0.1
 
-    # Fit kernel density estimators
-    kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_real.fit(real_distribution)
-    kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_augmented.fit(augmented_distribution)
-    kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_sampled_seed.fit(seed_distribution)
+    try:
+        # Fit kernel density estimators
+        kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+        kde_real.fit(real_distribution)
+        kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+        kde_augmented.fit(augmented_distribution)
+        kde_sampled_seed = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+        kde_sampled_seed.fit(seed_distribution)
 
-    # Create a range of values for the x-axis
-    x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution)), 
-                          max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution)), 1000)
-    # Evaluate the KDE on the range of values
-    real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
-    augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
-    seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
+        # Create a range of values for the x-axis
+        x_min = min(np.min(real_distribution), np.min(augmented_distribution), np.min(seed_distribution))
+        x_max = max(np.max(real_distribution), np.max(augmented_distribution), np.max(seed_distribution))
+        x_values = np.linspace(x_min, x_max, 1000)
+        
+        # Evaluate the KDE on the range of values
+        real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
+        augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
+        seed_density = np.exp(kde_sampled_seed.score_samples(x_values.reshape(-1, 1)))
 
-    # Plotting
-    plt.plot(x_values, real_density, label='Real Data', linewidth=2)
-    plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
-    plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
+        # Plotting
+        plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+        plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+        plt.plot(x_values, seed_density, label='Sampled around optimal molecule', linewidth=2)
 
-    plt.xlabel(f'{prop_name}')
-    plt.ylabel('Density')
-    plt.title(f'Kernel Density Estimation ({prop_name})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+        plt.xlabel(f'{prop_name}')
+        plt.ylabel('Density')
+        plt.title(f'Kernel Density Estimation ({prop_name})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-    # Save plot
-    plt.savefig(dir_name+f'KDE{prop_name}_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
-    plt.close()
+        # Save plot
+        plt.savefig(dir_name+f'KDE{prop_name}_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"KDE plot saved for {prop_name}")
+        
+    except Exception as e:
+        print(f"Error creating KDE plot for {prop_name}: {e}")
+        plt.close()
 
 # Add a final verification
-print(f"\nKDE plot files created for {len(property_names)} properties")
+print(f"\nKDE plot files created for {property_count} properties")
 for prop_idx, prop_name in enumerate(property_names):
     kde_file = dir_name+f'KDE{prop_name}_BO_seed'+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
     if os.path.exists(kde_file):
@@ -1924,6 +2017,9 @@ for prop_idx, prop_name in enumerate(property_names):
 
 print(f"\nOptimization completed successfully!")
 print(f"Results saved to: {dir_name}")
+print(f"Properties optimized: {property_names} ({property_count} total)")
+print(f"Property objectives: {property_objectives}")
+print(f"Property weights: {property_weights}")
 if args.dataset_csv:
     print(f"Novelty analysis performed against: {args.dataset_csv}")
 else:

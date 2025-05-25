@@ -905,29 +905,52 @@ class PropertyPrediction():
                         continue
 
                 # Convert tokens to features with debugging
+
+                # Convert tokens to features with OOV handling
                 try:
-                    print(f"DEBUG polymer {i}:")
-                    print(f"  target_tokens type: {type(target_tokens)}")
-                    print(f"  target_tokens length: {len(target_tokens) if target_tokens else 'None'}")
-                    if target_tokens and len(target_tokens) > 0:
-                        print(f"  first 3 tokens: {target_tokens[:3]}")
-                        print(f"  last 3 tokens: {target_tokens[-3:]}")
+                    print(f"Processing tokens for polymer {i}: {len(target_tokens)} tokens")
                     
-                    print(f"  vocab type: {type(vocab)}")
-                    print(f"  vocab length: {len(vocab) if vocab else 'None'}")
+                    # Handle out-of-vocabulary tokens
+                    unk_token = '_UNK'  # Based on your vocab format
+                    if unk_token not in vocab:
+                        # Try alternative UNK token names
+                        for alt_unk in ['<UNK>', 'UNK', '_UNKNOWN', '<UNKNOWN>']:
+                            if alt_unk in vocab:
+                                unk_token = alt_unk
+                                break
+                        else:
+                            # If no UNK token found, use the first vocab token
+                            unk_token = list(vocab.keys())[0]
                     
-                    # Check vocab format
-                    if hasattr(vocab, 'keys'):
-                        sample_keys = list(vocab.keys())[:3]
-                        print(f"  sample vocab keys: {sample_keys}")
+                    print(f"Using UNK token: '{unk_token}' (ID: {vocab[unk_token]})")
                     
-                    tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
+                    # Check and replace OOV tokens
+                    original_length = len(target_tokens)
+                    oov_count = 0
+                    cleaned_tokens = []
                     
-                    print(f"  SUCCESS: token_ids type: {type(tgt_token_ids)}, lens: {tgt_lens}")
+                    for token in target_tokens:
+                        if token in vocab:
+                            cleaned_tokens.append(token)
+                        else:
+                            cleaned_tokens.append(unk_token)
+                            oov_count += 1
+                    
+                    if oov_count > 0:
+                        print(f"Replaced {oov_count}/{original_length} OOV tokens with '{unk_token}'")
+                    
+                    # Use cleaned tokens for feature conversion
+                    tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=cleaned_tokens, vocab=vocab)
+                    
+                    print(f"Feature conversion successful: {len(tgt_token_ids) if hasattr(tgt_token_ids, '__len__') else 'scalar'} token IDs")
                     
                     # Validate token IDs
-                    if tgt_token_ids is None or (torch.is_tensor(tgt_token_ids) and len(tgt_token_ids) == 0):
-                        print(f"  Invalid token IDs for polymer {i}")
+                    if tgt_token_ids is None:
+                        print(f"Token IDs are None for polymer {i}")
+                        continue
+                        
+                    if torch.is_tensor(tgt_token_ids) and len(tgt_token_ids) == 0:
+                        print(f"Empty token IDs tensor for polymer {i}")
                         continue
                         
                     g.tgt_token_ids = tgt_token_ids
@@ -936,13 +959,11 @@ class PropertyPrediction():
                     
                     data_list.append(g)
                     valid_indices.append(i)
-                    print(f"  Successfully processed polymer {i}")
+                    print(f"Successfully processed polymer {i} (replaced {oov_count} OOV tokens)")
                     
                 except Exception as feature_error:
-                    print(f"  Feature conversion failed for polymer {i}: {feature_error}")
-                    print(f"  Error type: {type(feature_error)}")
-                    import traceback
-                    print(f"  Traceback: {traceback.format_exc()}")
+                    print(f"Feature conversion failed for polymer {i}: {feature_error}")
+                    print(f"Error type: {type(feature_error)}")
                     continue
                     
             except Exception as e:

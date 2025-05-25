@@ -78,7 +78,7 @@ parser.add_argument("--property_weights", type=float, nargs='+', default=None,
 parser.add_argument("--property_objectives", type=str, nargs='+', default=None, 
                     choices=["minimize", "maximize", "target"],
                     help="Objective for each property: minimize, maximize, or target a specific value")
-parser.add_argument("--objective_type", type=str, default="EAmin",
+parser.add_argument("--objective_type", type=str, default="custom",
                     choices=["EAmin", "mimick_peak", "mimick_best", "max_gap", "custom"],
                     help="Type of objective function to use (legacy option)")
 parser.add_argument("--custom_equation", type=str, default=None,

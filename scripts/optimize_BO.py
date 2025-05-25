@@ -62,6 +62,32 @@ def validate_and_fix_polymer_format(poly_input):
         monomers = smiles_part.split(".")
         monomer_count = len(monomers)
         
+        # Check and fix R-group numbering consistency
+        import re
+        r_groups_in_smiles = set(re.findall(r'\[\*:(\d+)\]', smiles_part))
+        r_groups_in_connectivity = set(re.findall(r'(\d+)-(\d+):', connectivity_part))
+        
+        # Flatten connectivity R-groups
+        conn_r_groups = set()
+        for pair in r_groups_in_connectivity:
+            conn_r_groups.update(pair)
+        
+        print(f"R-groups in SMILES: {r_groups_in_smiles}")
+        print(f"R-groups in connectivity: {conn_r_groups}")
+        
+        # If there's a mismatch, try to fix it
+        if r_groups_in_smiles != conn_r_groups:
+            print("R-group numbering mismatch detected, attempting to fix...")
+            
+            # Simple fix: if we have [*:2] but connectivity expects 1, renumber
+            if len(r_groups_in_smiles) == 1 and len(conn_r_groups) >= 1:
+                old_num = list(r_groups_in_smiles)[0]
+                if old_num not in conn_r_groups:
+                    # Renumber SMILES to match connectivity
+                    new_num = min(conn_r_groups)
+                    smiles_part = smiles_part.replace(f'[*:{old_num}]', f'[*:{new_num}]')
+                    print(f"Renumbered R-groups: {old_num} -> {new_num}")
+        
         # Check stoichiometry match
         if len(stoich_parts) != monomer_count:
             print(f"Stoichiometry mismatch: {monomer_count} monomers, {len(stoich_parts)} weights")
@@ -82,7 +108,8 @@ def validate_and_fix_polymer_format(poly_input):
             print(f"Fixed polymer format: {fixed_poly}")
             return fixed_poly
             
-        return poly_input
+        # Return the potentially R-group-fixed version
+        return f"{smiles_part}|{('|'.join(stoich_parts))}|{connectivity_part}"
         
     except Exception as e:
         print(f"Error validating polymer format: {e}")
@@ -413,35 +440,75 @@ class PropertyPrediction():
         
         print(f"Step 3: Reencoding - {len(y_p_after_encoding_valid)} successful")
         
+        # Handle case where reencoding fails completely
+        if not y_p_after_encoding_valid:
+            print("Warning: All reencoding attempts failed")
+            results_dict = {
+                "objective": self.penalty_value,
+                "latents_BO": x,
+                "latents_reencoded": [np.zeros(32)], 
+                "predictions_BO": y,
+                "predictions_reencoded": [[np.nan] * len(self.property_names)],
+                "string_decoded": prediction_strings, 
+                "string_reconstructed": [],
+            }
+            self.results_custom[str(self.eval_calls)] = results_dict
+            return self.penalty_value
+        
         invalid_mask = (validity == 0)
         # Encode and predict the valid molecules - handle variable number of properties
         num_properties = len(self.property_names)
-        expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan] * num_properties for val in list(validity)])
-        expanded_z_p = np.array([z_p_after_encoding_valid.pop(0) if val == 1 else [0] * 32 for val in list(validity)])
+        
+        # Build expanded arrays more carefully
+        expanded_y_p = []
+        expanded_z_p = []
+        valid_idx = 0
+        
+        for val in validity:
+            if val == 1:
+                if valid_idx < len(y_p_after_encoding_valid):
+                    expanded_y_p.append(y_p_after_encoding_valid[valid_idx])
+                    expanded_z_p.append(z_p_after_encoding_valid[valid_idx])
+                    valid_idx += 1
+                else:
+                    # Fallback if we run out of valid results
+                    expanded_y_p.append([np.nan] * num_properties)
+                    expanded_z_p.append([0] * 32)
+            else:
+                expanded_y_p.append([np.nan] * num_properties)
+                expanded_z_p.append([0] * 32)
+        
+        expanded_y_p = np.array(expanded_y_p)
+        expanded_z_p = np.array(expanded_z_p)
         #print(x, expanded_z_p)
 
         
         # If using a custom equation
         if self.objective_type == "custom" and self.custom_equation:
-            if validity[0]:
+            if validity[0] and not np.isnan(expanded_y_p[0]).all():
                 # Extract property values into a list
-                property_values = [expanded_y_p[~invalid_mask, i][0] for i in range(len(self.property_names))]
+                property_values = [expanded_y_p[~invalid_mask, i][0] for i in range(len(self.property_names)) if ~invalid_mask.any()]
                 
-                # Create a safe evaluation environment
-                eval_locals = {'p': property_values, 'abs': abs, 'np': np, 'math': math}
-                
-                try:
-                    # Evaluate the custom equation with the property values
-                    equation_result = eval(self.custom_equation, {"__builtins__": {}}, eval_locals)
-                    
-                    # Apply maximization if requested
-                    if self.maximize_equation:
-                        equation_result = -equation_result
-                        
-                    aggr_obj = -equation_result  # The negative sign is because BO maximizes by default
-                except Exception as e:
-                    print(f"Error evaluating custom equation: {e}")
+                # Check if we have valid property values
+                if not property_values or any(np.isnan(val) for val in property_values):
+                    print("Warning: All property values are NaN")
                     aggr_obj = self.penalty_value
+                else:
+                    # Create a safe evaluation environment
+                    eval_locals = {'p': property_values, 'abs': abs, 'np': np, 'math': math}
+                    
+                    try:
+                        # Evaluate the custom equation with the property values
+                        equation_result = eval(self.custom_equation, {"__builtins__": {}}, eval_locals)
+                        
+                        # Apply maximization if requested
+                        if self.maximize_equation:
+                            equation_result = -equation_result
+                            
+                        aggr_obj = -equation_result  # The negative sign is because BO maximizes by default
+                    except Exception as e:
+                        print(f"Error evaluating custom equation: {e}")
+                        aggr_obj = self.penalty_value
             else:
                 aggr_obj = self.penalty_value
         # If using legacy objective types, handle those
@@ -451,28 +518,36 @@ class PropertyPrediction():
                 print(f"Warning: Legacy objective '{self.objective_type}' expects 2 properties (EA, IP) but model has {len(self.property_names)} properties: {self.property_names}")
                 print("Falling back to flexible property handling...")
                 # Fall through to flexible property handling
-                if validity[0]:
+                if validity[0] and not np.isnan(expanded_y_p[0]).all():
                     obj_values = []
                     
                     for i, prop_name in enumerate(self.property_names):
                         prop_idx = i  # Index of the property in the predicted values
                         
-                        if self.property_objectives[i] == "minimize":
-                            # For minimization, use the raw value
-                            obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
-                        elif self.property_objectives[i] == "maximize":
-                            # For maximization, negate the value
-                            obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
-                        elif self.property_objectives[i] == "target":
-                            # For targeting a specific value, use absolute difference
-                            obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
-                        
-                        # Apply the weight
-                        obj_value *= self.property_weights[i]
-                        obj_values.append(obj_value)
+                        # Check for valid values
+                        if ~invalid_mask.any() and not np.isnan(expanded_y_p[~invalid_mask, prop_idx]).all():
+                            if self.property_objectives[i] == "minimize":
+                                # For minimization, use the raw value
+                                obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
+                            elif self.property_objectives[i] == "maximize":
+                                # For maximization, negate the value
+                                obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
+                            elif self.property_objectives[i] == "target":
+                                # For targeting a specific value, use absolute difference
+                                obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
+                            
+                            # Apply the weight
+                            obj_value *= self.property_weights[i]
+                            obj_values.append(obj_value)
+                        else:
+                            print(f"Warning: Invalid values for property {prop_name}")
+                            obj_values.append(float('inf'))  # Penalty for invalid values
                     
                     # Sum up all objective components
-                    aggr_obj = -sum(obj_values)
+                    if any(val == float('inf') for val in obj_values):
+                        aggr_obj = self.penalty_value
+                    else:
+                        aggr_obj = -sum(obj_values)
                 else:
                     aggr_obj = self.penalty_value
             else:
@@ -490,7 +565,7 @@ class PropertyPrediction():
                     obj1 = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
                     obj2 = - self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
                 
-                if validity[0]:
+                if validity[0] and ~invalid_mask.any() and not np.isnan(obj1).all() and not np.isnan(obj2).all():
                     obj3 = 0
                     aggr_obj = -(obj1[0] + obj2[0] + obj3)
                 else:
@@ -498,28 +573,36 @@ class PropertyPrediction():
                     aggr_obj = obj3
         else:
             # New flexible property handling without custom equation
-            if validity[0]:
+            if validity[0] and not np.isnan(expanded_y_p[0]).all():
                 obj_values = []
                 
                 for i, prop_name in enumerate(self.property_names):
                     prop_idx = i  # Index of the property in the predicted values
                     
-                    if self.property_objectives[i] == "minimize":
-                        # For minimization, use the raw value
-                        obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
-                    elif self.property_objectives[i] == "maximize":
-                        # For maximization, negate the value
-                        obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
-                    elif self.property_objectives[i] == "target":
-                        # For targeting a specific value, use absolute difference
-                        obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
-                    
-                    # Apply the weight
-                    obj_value *= self.property_weights[i]
-                    obj_values.append(obj_value)
+                    # Check for valid values
+                    if ~invalid_mask.any() and not np.isnan(expanded_y_p[~invalid_mask, prop_idx]).all():
+                        if self.property_objectives[i] == "minimize":
+                            # For minimization, use the raw value
+                            obj_value = expanded_y_p[~invalid_mask, prop_idx][0]
+                        elif self.property_objectives[i] == "maximize":
+                            # For maximization, negate the value
+                            obj_value = -expanded_y_p[~invalid_mask, prop_idx][0]
+                        elif self.property_objectives[i] == "target":
+                            # For targeting a specific value, use absolute difference
+                            obj_value = np.abs(expanded_y_p[~invalid_mask, prop_idx][0] - self.property_targets[i])
+                        
+                        # Apply the weight
+                        obj_value *= self.property_weights[i]
+                        obj_values.append(obj_value)
+                    else:
+                        print(f"Warning: Invalid values for property {prop_name}")
+                        obj_values.append(float('inf'))  # Penalty for invalid values
                 
                 # Sum up all objective components
-                aggr_obj = -sum(obj_values)
+                if any(val == float('inf') for val in obj_values):
+                    aggr_obj = self.penalty_value
+                else:
+                    aggr_obj = -sum(obj_values)
             else:
                 aggr_obj = self.penalty_value
         
@@ -572,9 +655,29 @@ class PropertyPrediction():
                 poly_graph = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
                 mols_valid.append(1)
                 fixed_strings.append(fixed_poly)
-            except:
-                mols_valid.append(0)
-                fixed_strings.append(poly_input)
+            except Exception as e:
+                # Try alternative R-group numbering as fallback
+                try:
+                    import re
+                    alternative_poly = fixed_poly
+                    r_groups = set(re.findall(r'\[\*:(\d+)\]', fixed_poly))
+                    
+                    if r_groups:
+                        # Map all R-groups to sequential numbering starting from 1
+                        for i, old_num in enumerate(sorted(r_groups), 1):
+                            alternative_poly = alternative_poly.replace(f'[*:{old_num}]', f'[*:{i}]')
+                            alternative_poly = alternative_poly.replace(f'{old_num}-', f'{i}-')
+                            alternative_poly = alternative_poly.replace(f'-{old_num}:', f'-{i}:')
+                        
+                        poly_graph = poly_smiles_to_graph(alternative_poly, np.nan, np.nan, None)
+                        mols_valid.append(1)
+                        fixed_strings.append(alternative_poly)
+                    else:
+                        mols_valid.append(0)
+                        fixed_strings.append(poly_input)
+                except:
+                    mols_valid.append(0)
+                    fixed_strings.append(poly_input)
         
         return fixed_strings, np.array(mols_valid)
     
@@ -600,7 +703,29 @@ class PropertyPrediction():
                     continue
                 
                 # Try to create graph
-                g = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                try:
+                    g = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                except Exception as graph_error:
+                    # If graph creation fails, try alternative R-group numbering
+                    print(f"Graph creation failed, trying R-group alternatives: {graph_error}")
+                    
+                    # Try renumbering all R-groups to start from 1
+                    import re
+                    alternative_poly = fixed_poly
+                    r_groups = set(re.findall(r'\[\*:(\d+)\]', fixed_poly))
+                    
+                    if r_groups:
+                        # Map all R-groups to sequential numbering starting from 1
+                        for i, old_num in enumerate(sorted(r_groups), 1):
+                            alternative_poly = alternative_poly.replace(f'[*:{old_num}]', f'[*:{i}]')
+                            alternative_poly = alternative_poly.replace(f'{old_num}-', f'{i}-')
+                            alternative_poly = alternative_poly.replace(f'-{old_num}:', f'-{i}:')
+                        
+                        print(f"Trying alternative numbering: {alternative_poly}")
+                        g = poly_smiles_to_graph(alternative_poly, np.nan, np.nan, None)
+                        fixed_poly = alternative_poly  # Use the alternative for tokenization
+                    else:
+                        raise graph_error  # Re-raise if no R-groups to fix
                 
                 # Tokenize
                 if tokenization == "oldtok":

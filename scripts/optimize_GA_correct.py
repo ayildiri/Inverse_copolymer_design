@@ -75,10 +75,12 @@ parser.add_argument("--save_dir", type=str, default=None, help="Custom directory
 parser.add_argument("--checkpoint_every", type=int, default=200, help="Save checkpoint every N iterations")
 parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume from")
 parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
-parser.add_argument("--objective_type", type=str, default="EAmin", choices=["EAmin", "mimick_peak", "mimick_best", "max_gap"], 
-                    help="Type of objective function to use")
+
+# Updated flexible property arguments
 parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
                     help="Names of the properties to optimize")
+parser.add_argument("--property_count", type=int, default=None,
+                    help="Number of properties (auto-detected from property_names if not specified)")
 parser.add_argument("--property_targets", type=float, nargs='+', default=None,
                     help="Target values for each property (one per property)")
 parser.add_argument("--property_weights", type=float, nargs='+', default=None,
@@ -86,12 +88,28 @@ parser.add_argument("--property_weights", type=float, nargs='+', default=None,
 parser.add_argument("--property_objectives", type=str, nargs='+', default=None, 
                     choices=["minimize", "maximize", "target"],
                     help="Objective for each property: minimize, maximize, or target a specific value")
+parser.add_argument("--objective_type", type=str, default="custom",
+                    choices=["EAmin", "mimick_peak", "mimick_best", "max_gap", "custom"],
+                    help="Type of objective function to use (custom is recommended for flexible property handling)")
 parser.add_argument("--custom_equation", type=str, default=None,
                     help="Custom equation for objective function. Use 'p[i]' to reference property i. Example: '(1 + p[0] - p[1])*2'")
 parser.add_argument("--maximize_equation", action="store_true", 
                     help="Maximize the custom equation instead of minimizing it")
 
 args = parser.parse_args()
+
+# Handle property configuration (from optimize_BO.py)
+property_names = args.property_names
+if args.property_count is not None:
+    property_count = args.property_count
+else:
+    property_count = len(property_names)
+
+# Validate that property count matches property names
+if len(property_names) != property_count:
+    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
+
+print(f"Optimizing model trained for {property_count} properties: {property_names}")
 
 seed = args.seed
 augment = args.augment #augmented or original
@@ -108,10 +126,12 @@ dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
 
+# Include property info in model name (from optimize_BO.py)
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+
 # Load model
 # Create an instance of the G2S model from checkpoint
-
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'/'
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
 
 if args.save_dir:
     filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
@@ -124,9 +144,39 @@ if os.path.isfile(filepath):
         model_type = G2S_VAE_PPguided
     else: 
         model_type = G2S_VAE_PPguideddisabled
+        
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
-    batch_size = model_config['batch_size']
+    
+    # Get property information from model config if available (from optimize_BO.py)
+    model_property_count = model_config.get('property_count', 2)
+    model_property_names = model_config.get('property_names', ["EA", "IP"])
+    
+    # Validate that the specified properties match the model
+    if property_count != model_property_count:
+        print(f"Warning: Specified property count ({property_count}) doesn't match model property count ({model_property_count})")
+        print(f"Using model property count: {model_property_count}")
+        property_count = model_property_count
+        
+    if property_names != model_property_names:
+        print(f"Warning: Specified property names ({property_names}) don't match model property names ({model_property_names})")
+        print(f"Using model property names: {model_property_names}") 
+        property_names = model_property_names
+    
+    print(f"Model trained for {property_count} properties: {property_names}")
+    
+    # Add warning for legacy objectives with wrong number of properties
+    if args.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap'] and property_count != 2:
+        print(f"⚠️  WARNING: Using legacy objective '{args.objective_type}' with {property_count} properties.")
+        print(f"   Legacy objectives expect exactly 2 properties (EA, IP).")
+        print(f"   Will fall back to flexible property handling with default objectives.")
+        print(f"   Consider using --objective_type custom with --custom_equation for single properties.")
+    elif args.objective_type == "custom" and property_count == 1:
+        print(f"💡 Example for single property optimization:")
+        print(f"   --objective_type custom --custom_equation 'p[0]' --maximize_equation (to maximize {property_names[0]})")
+        print(f"   --objective_type custom --custom_equation 'p[0]' (to minimize {property_names[0]})")
+    
+    batch_size = model_config.get('batch_size', 64)
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
     model_config["max_alpha"]=args.max_alpha
@@ -155,7 +205,7 @@ log_file = os.path.join(dir_name, f'optimization_log_GA_{args.opt_run}.txt')
 
 # Property_optimization_problem class - modified initialization
 class Property_optimization_problem(Problem):
-    def __init__(self, model, x_min, x_max, objective_type="EAmin", property_names=None, 
+    def __init__(self, model, x_min, x_max, objective_type="custom", property_names=None, 
                  property_targets=None, property_weights=None, property_objectives=None,
                  custom_equation=None, maximize_equation=False):
         # Determine number of objectives based on property configuration
@@ -257,18 +307,37 @@ class Property_optimization_problem(Problem):
                     out["F"][i, 0] = self.penalty_value
         # Handle legacy objective types
         elif self.objective_type != "custom":
-            if self.objective_type=='mimick_peak':
-                out["F"][validity_mask, 0] = self.weight_electron_affinity * np.abs(np.array(y.cpu())[validity_mask,0]+2)
-                out["F"][validity_mask, 1] = self.weight_ionization_potential * np.abs(np.array(y.cpu())[validity_mask,1] - 1.2)
-            elif self.objective_type=='mimick_best':
-                out["F"][validity_mask, 0] = self.weight_electron_affinity * np.abs(np.array(y.cpu())[validity_mask,0]+2.64)
-                out["F"][validity_mask, 1] = self.weight_ionization_potential * np.abs(np.array(y.cpu())[validity_mask,1] - 1.61)
-            elif self.objective_type=='EAmin':
-                out["F"][validity_mask, 0] = self.weight_electron_affinity * np.array(y.cpu())[validity_mask,0]
-                out["F"][validity_mask, 1] = self.weight_ionization_potential * np.abs(np.array(y.cpu())[validity_mask,1] - 1.0)
-            elif self.objective_type=='max_gap':
-                out["F"][validity_mask, 0] = self.weight_electron_affinity * np.array(y.cpu())[validity_mask,0]
-                out["F"][validity_mask, 1] = -self.weight_ionization_potential * np.array(y.cpu())[validity_mask,1]
+            # Check if legacy objectives are compatible with the number of properties
+            if len(self.property_names) != 2 and self.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap']:
+                print(f"Warning: Legacy objective '{self.objective_type}' expects 2 properties (EA, IP) but model has {len(self.property_names)} properties: {self.property_names}")
+                print("Falling back to flexible property handling...")
+                # Fall through to flexible property handling
+                for i, prop_name in enumerate(self.property_names):
+                    prop_idx = i  # Index of the property in the predicted values
+                    
+                    if self.property_objectives[i] == "minimize":
+                        # For minimization, use the raw value
+                        out["F"][validity_mask, i] = self.property_weights[i] * np.array(y.cpu())[validity_mask, prop_idx]
+                    elif self.property_objectives[i] == "maximize":
+                        # For maximization, negate the value
+                        out["F"][validity_mask, i] = -self.property_weights[i] * np.array(y.cpu())[validity_mask, prop_idx]
+                    elif self.property_objectives[i] == "target":
+                        # For targeting a specific value, use absolute difference
+                        out["F"][validity_mask, i] = self.property_weights[i] * np.abs(np.array(y.cpu())[validity_mask, prop_idx] - self.property_targets[i])
+            else:
+                # Original legacy objective handling for 2-property models
+                if self.objective_type=='mimick_peak':
+                    out["F"][validity_mask, 0] = self.weight_electron_affinity * np.abs(np.array(y.cpu())[validity_mask,0]+2)
+                    out["F"][validity_mask, 1] = self.weight_ionization_potential * np.abs(np.array(y.cpu())[validity_mask,1] - 1.2)
+                elif self.objective_type=='mimick_best':
+                    out["F"][validity_mask, 0] = self.weight_electron_affinity * np.abs(np.array(y.cpu())[validity_mask,0]+2.64)
+                    out["F"][validity_mask, 1] = self.weight_ionization_potential * np.abs(np.array(y.cpu())[validity_mask,1] - 1.61)
+                elif self.objective_type=='EAmin':
+                    out["F"][validity_mask, 0] = self.weight_electron_affinity * np.array(y.cpu())[validity_mask,0]
+                    out["F"][validity_mask, 1] = self.weight_ionization_potential * np.abs(np.array(y.cpu())[validity_mask,1] - 1.0)
+                elif self.objective_type=='max_gap':
+                    out["F"][validity_mask, 0] = self.weight_electron_affinity * np.array(y.cpu())[validity_mask,0]
+                    out["F"][validity_mask, 1] = -self.weight_ionization_potential * np.array(y.cpu())[validity_mask,1]
         else:
             # New flexible property handling
             for i, prop_name in enumerate(self.property_names):
@@ -291,7 +360,9 @@ class Property_optimization_problem(Problem):
         # Encode and predict the valid molecules
         predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
         y_p_after_encoding_valid, z_p_after_encoding_valid, all_reconstructions_valid, _=self._encode_and_predict_molecules(predictions_valid)
-        expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan,np.nan] for val in list(validity)])
+        # Handle variable number of properties
+        num_properties = len(self.property_names)
+        expanded_y_p = np.array([y_p_after_encoding_valid.pop(0) if val == 1 else [np.nan] * num_properties for val in list(validity)])
         expanded_z_p = np.array([z_p_after_encoding_valid.pop(0) if val == 1 else [0] * 32 for val in list(validity)])
         all_reconstructions = [all_reconstructions_valid.pop(0) if val == 1 else "" for val in list(validity)]
         print("Evaluation should not change")
@@ -326,18 +397,35 @@ class Property_optimization_problem(Problem):
                         
         # Handle legacy objective types for corrected values
         elif self.objective_type != "custom":
-            if self.objective_type=='mimick_peak':
-                out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
-                out["F_corrected"][~invalid_mask, 1] = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
-            elif self.objective_type=='mimick_best':
-                out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
-                out["F_corrected"][~invalid_mask, 1] = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
-            elif self.objective_type=='EAmin':
-                out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-                out["F_corrected"][~invalid_mask, 1] = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.0)
-            elif self.objective_type=='max_gap':
-                out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
-                out["F_corrected"][~invalid_mask, 1] = -self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
+            # Check if legacy objectives are compatible with the number of properties
+            if len(self.property_names) != 2 and self.objective_type in ['EAmin', 'mimick_peak', 'mimick_best', 'max_gap']:
+                # Fall through to flexible property handling for corrected values
+                for i, prop_name in enumerate(self.property_names):
+                    prop_idx = i  # Index of the property in the predicted values
+                    
+                    if self.property_objectives[i] == "minimize":
+                        # For minimization, use the raw value
+                        out["F_corrected"][~invalid_mask, i] = self.property_weights[i] * expanded_y_p[~invalid_mask, prop_idx]
+                    elif self.property_objectives[i] == "maximize":
+                        # For maximization, negate the value
+                        out["F_corrected"][~invalid_mask, i] = -self.property_weights[i] * expanded_y_p[~invalid_mask, prop_idx]
+                    elif self.property_objectives[i] == "target":
+                        # For targeting a specific value, use absolute difference
+                        out["F_corrected"][~invalid_mask, i] = self.property_weights[i] * np.abs(expanded_y_p[~invalid_mask, prop_idx] - self.property_targets[i])
+            else:
+                # Original legacy objective handling for corrected values
+                if self.objective_type=='mimick_peak':
+                    out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2)
+                    out["F_corrected"][~invalid_mask, 1] = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.2)
+                elif self.objective_type=='mimick_best':
+                    out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * np.abs(expanded_y_p[~invalid_mask, 0] + 2.64)
+                    out["F_corrected"][~invalid_mask, 1] = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.61)
+                elif self.objective_type=='EAmin':
+                    out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
+                    out["F_corrected"][~invalid_mask, 1] = self.weight_ionization_potential * np.abs(expanded_y_p[~invalid_mask, 1] - 1.0)
+                elif self.objective_type=='max_gap':
+                    out["F_corrected"][~invalid_mask, 0] = self.weight_electron_affinity * expanded_y_p[~invalid_mask, 0]
+                    out["F_corrected"][~invalid_mask, 1] = -self.weight_ionization_potential * expanded_y_p[~invalid_mask, 1]
         else:
             # New flexible property handling for corrected values
             for i, prop_name in enumerate(self.property_names):
@@ -581,12 +669,11 @@ if not cutoff==0.0:
 # Initialize the problem
 opt_run = args.opt_run
 
-# Instantiating the problem - updated
-objective_type = args.objective_type
-property_names = args.property_names
+# Get property configuration from arguments (updated from optimize_BO.py)
 property_targets = args.property_targets
 property_weights = args.property_weights
 property_objectives = args.property_objectives
+objective_type = args.objective_type
 custom_equation = args.custom_equation
 maximize_equation = args.maximize_equation
 
@@ -920,16 +1007,44 @@ for idx, (pop, res) in enumerate(list(results_custom.items())):
 import matplotlib.pyplot as plt
 
 iterations = range(len(pred_RE))
-EA_re= [arr[0].cpu() for arr in pred_RE]
-IP_re = [arr[1].cpu() for arr in pred_RE]
-EA_re_c= [arr[0] for arr in pred_RE_corrected]
-IP_re_c = [arr[1] for arr in pred_RE_corrected]
 
-# Create plot
+# Handle different possible formats safely with proper error checking
+property_values_re = [[] for _ in range(len(property_names))]  # Create lists for each property
+property_values_re_corrected = [[] for _ in range(len(property_names))]  # Create lists for each property
+
+for x in pred_RE:
+    for prop_idx in range(len(property_names)):
+        if torch.is_tensor(x):
+            x_val = x.cpu()[prop_idx] if x.size() > prop_idx else float('nan')
+        elif hasattr(x, '__getitem__') and len(x) > prop_idx:
+            x_val = x[prop_idx]
+        else:
+            x_val = float('nan')
+        property_values_re[prop_idx].append(x_val)
+
+for x in pred_RE_corrected:
+    for prop_idx in range(len(property_names)):
+        if hasattr(x, '__getitem__') and len(x) > prop_idx:
+            x_val = x[prop_idx]
+        else:
+            x_val = float('nan')
+        property_values_re_corrected[prop_idx].append(x_val)
+
+# For backwards compatibility
+EA_re = property_values_re[0] if len(property_names) >= 1 else []
+IP_re = property_values_re[1] if len(property_names) >= 2 else [float('nan')] * len(EA_re)
+EA_re_c = property_values_re_corrected[0] if len(property_names) >= 1 else []
+IP_re_c = property_values_re_corrected[1] if len(property_names) >= 2 else [float('nan')] * len(EA_re_c)
+
+# Create plot with dynamic labels
 plt.figure(0)
 
-plt.plot(iterations, EA_re, label='EA (RE)')
-plt.plot(iterations, IP_re, label='IP (RE)')
+prop1_name = property_names[0] if len(property_names) >= 1 else "Property 1"
+prop2_name = property_names[1] if len(property_names) >= 2 else "Property 2"
+
+plt.plot(iterations, EA_re, label=f'{prop1_name} (RE)')
+if len(property_names) >= 2:
+    plt.plot(iterations, IP_re, label=f'{prop2_name} (RE)')
 
 # Add labels and legend
 plt.xlabel('Index')
@@ -942,15 +1057,24 @@ plt.close()
 try:
     with open(dir_name+'y1_all_'+dataset_type+'.npy', 'rb') as f:
         y1_all = np.load(f)
-    with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
-        y2_all = np.load(f)
+    # Load y2_all only if we have more than one property
+    if len(property_names) >= 2:
+        try:
+            with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
+                y2_all = np.load(f)
+        except FileNotFoundError:
+            print(f"Warning: y2_all_{dataset_type}.npy not found, creating dummy data")
+            y2_all = np.full_like(y1_all, np.nan)
+    else:
+        y2_all = np.full_like(y1_all, np.nan)  # Create dummy data for single property models
+        
     with open(dir_name+'yp_all_'+dataset_type+'.npy', 'rb') as f:
         yp_all = np.load(f)
 
     y1_all = list(y1_all)
-    y2_all = list(y2_all)
-    yp1_all = [yp[0] for yp in yp_all]
-    yp2_all = [yp[1] for yp in yp_all]
+    if len(property_names) >= 2:
+        y2_all = list(y2_all)
+    yp_all_list = [yp for yp in yp_all]
     
     # Fix data types to ensure all are numpy arrays for KDE
     def ensure_numpy_array(data_list):
@@ -968,98 +1092,71 @@ try:
                     continue
         return np.array(result)
 
-    yp1_all_ga = ensure_numpy_array([x.cpu().numpy() if torch.is_tensor(x) else x for x in EA_re])
-    yp2_all_ga = ensure_numpy_array([x.cpu().numpy() if torch.is_tensor(x) else x for x in IP_re])
+    # Create KDE data for each property
+    for prop_idx in range(len(property_names)):
+        prop_name = property_names[prop_idx]
+        
+        # Get training data for this property
+        if prop_idx == 0:
+            y_prop_all = y1_all
+            yp_prop_all = [yp[0] for yp in yp_all_list] if yp_all_list else []
+        elif prop_idx == 1:
+            y_prop_all = y2_all
+            yp_prop_all = [yp[1] for yp in yp_all_list] if yp_all_list and len(yp_all_list[0]) > 1 else []
+        else:
+            continue  # Skip additional properties for now
+        
+        yp_prop_all_ga = ensure_numpy_array(property_values_re[prop_idx])
 
-    log_progress("Generating KDE plots for property distributions...", log_file)
+        log_progress(f"Generating KDE plots for {prop_name} distributions...", log_file)
 
-    """ y1 """
-    plt.figure(figsize=(10, 8))
-    real_distribution = np.array([r for r in y1_all if not np.isnan(r)])
-    augmented_distribution = np.array([p for p in yp1_all])
-    ga_distribution = yp1_all_ga
+        plt.figure(figsize=(10, 8))
+        real_distribution = np.array([r for r in y_prop_all if not np.isnan(r)])
+        augmented_distribution = np.array([p for p in yp_prop_all])
+        ga_distribution = yp_prop_all_ga
 
-    # Reshape the data
-    real_distribution = real_distribution.reshape(-1, 1)
-    augmented_distribution = augmented_distribution.reshape(-1, 1)
-    ga_distribution = ga_distribution.reshape(-1, 1)
+        # Reshape the data
+        real_distribution = real_distribution.reshape(-1, 1)
+        augmented_distribution = augmented_distribution.reshape(-1, 1)
+        ga_distribution = ga_distribution.reshape(-1, 1)
 
-    # Define bandwidth
-    bandwidth = 0.1
+        # Define bandwidth
+        bandwidth = 0.1
 
-    # Fit kernel density estimator for real data
-    kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_real.fit(real_distribution)
-    # Fit kernel density estimator for augmented data
-    kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_augmented.fit(augmented_distribution)
-    # Fit kernel density estimator for GA data
-    kde_ga = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_ga.fit(ga_distribution)
+        # Fit kernel density estimator for real data
+        kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+        kde_real.fit(real_distribution)
+        # Fit kernel density estimator for augmented data
+        kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+        kde_augmented.fit(augmented_distribution)
+        # Fit kernel density estimator for GA data
+        kde_ga = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+        kde_ga.fit(ga_distribution)
 
-    # Create a range of values for the x-axis
-    x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(ga_distribution)), 
-                          max(np.max(real_distribution), np.max(augmented_distribution), np.max(ga_distribution)), 1000)
-    # Evaluate the KDE
-    real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
-    augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
-    ga_density = np.exp(kde_ga.score_samples(x_values.reshape(-1, 1)))
+        # Create a range of values for the x-axis
+        x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(ga_distribution)), 
+                              max(np.max(real_distribution), np.max(augmented_distribution), np.max(ga_distribution)), 1000)
+        # Evaluate the KDE
+        real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
+        augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
+        ga_density = np.exp(kde_ga.score_samples(x_values.reshape(-1, 1)))
 
-    # Plotting
-    plt.plot(x_values, real_density, label='Real Data', linewidth=2)
-    plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
-    plt.plot(x_values, ga_density, label='GA Optimized', linewidth=2)
+        # Plotting
+        plt.plot(x_values, real_density, label='Real Data', linewidth=2)
+        plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
+        plt.plot(x_values, ga_density, label='GA Optimized', linewidth=2)
 
-    plt.xlabel('EA (eV)')
-    plt.ylabel('Density')
-    plt.title('Kernel Density Estimation (Electron affinity)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    kde_file1 = dir_name+'KDEy1_GA_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
-    plt.savefig(kde_file1, dpi=150, bbox_inches='tight')
-    plt.close()
-
-    """ y2 """
-    plt.figure(figsize=(10, 8))
-    real_distribution = np.array([r for r in y2_all if not np.isnan(r)])
-    augmented_distribution = np.array([p for p in yp2_all])
-    ga_distribution = yp2_all_ga
-
-    # Reshape the data
-    real_distribution = real_distribution.reshape(-1, 1)
-    augmented_distribution = augmented_distribution.reshape(-1, 1)
-    ga_distribution = ga_distribution.reshape(-1, 1)
-
-    # Fit KDEs
-    kde_real = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_real.fit(real_distribution)
-    kde_augmented = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_augmented.fit(augmented_distribution)
-    kde_ga = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde_ga.fit(ga_distribution)
-
-    # Create x values and evaluate
-    x_values = np.linspace(min(np.min(real_distribution), np.min(augmented_distribution), np.min(ga_distribution)), 
-                          max(np.max(real_distribution), np.max(augmented_distribution), np.max(ga_distribution)), 1000)
-    real_density = np.exp(kde_real.score_samples(x_values.reshape(-1, 1)))
-    augmented_density = np.exp(kde_augmented.score_samples(x_values.reshape(-1, 1)))
-    ga_density = np.exp(kde_ga.score_samples(x_values.reshape(-1, 1)))
-
-    # Plot
-    plt.plot(x_values, real_density, label='Real Data', linewidth=2)
-    plt.plot(x_values, augmented_density, label='Augmented Data', linewidth=2)
-    plt.plot(x_values, ga_density, label='GA Optimized', linewidth=2)
-
-    plt.xlabel('IP (eV)')
-    plt.ylabel('Density')
-    plt.title('Kernel Density Estimation (Ionization potential)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    kde_file2 = dir_name+'KDEy2_GA_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
-    plt.savefig(kde_file2, dpi=150, bbox_inches='tight')
-    plt.close()
+        plt.xlabel(f'{prop_name}')
+        plt.ylabel('Density')
+        plt.title(f'Kernel Density Estimation ({prop_name})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        kde_file = dir_name+f'KDE{prop_name}_GA_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+        plt.savefig(kde_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        log_progress(f"KDE plot saved: {kde_file}", log_file)
     
-    log_progress(f"KDE plots saved: {kde_file1} and {kde_file2}", log_file)
 except Exception as e:
     log_progress(f"Error generating KDE plots: {str(e)}", log_file)
 
@@ -1104,36 +1201,60 @@ def top_n_molecule_indices(objective_values, decoded_mols, n_idx=10):
 
     return top_idxs, best_mols_count
 
-# Extract data for the curves
-if objective_type=='mimick_peak':
-    objective_values = [(np.abs(arr.cpu()[0]+2)+np.abs(arr.cpu()[1]-1.2)) for arr in pred_RE]
+# Extract data for the curves - handle variable number of properties
+if objective_type=='mimick_peak' and len(property_names) >= 2:
+    objective_values = [(np.abs(arr.cpu()[0]+2)+np.abs(arr.cpu()[1]-1.2)) if torch.is_tensor(arr) else (np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) for arr in pred_RE]
     objective_values_c = [(np.abs(arr[0]+2)+np.abs(arr[1]-1.2)) for arr in pred_RE_corrected]
-elif objective_type=='mimick_best':
-    objective_values = [(np.abs(arr.cpu()[0]+2.64)+np.abs(arr.cpu()[1]-1.61)) for arr in pred_RE]
+elif objective_type=='mimick_best' and len(property_names) >= 2:
+    objective_values = [(np.abs(arr.cpu()[0]+2.64)+np.abs(arr.cpu()[1]-1.61)) if torch.is_tensor(arr) else (np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61)) for arr in pred_RE]
     objective_values_c = [(np.abs(arr[0]+2.64)+np.abs(arr[1]-1.61)) for arr in pred_RE_corrected]
-elif objective_type=='EAmin': 
-    objective_values = [arr.cpu()[0]+np.abs(arr.cpu()[1]-1) for arr in pred_RE]
+elif objective_type=='EAmin' and len(property_names) >= 2: 
+    objective_values = [arr.cpu()[0]+np.abs(arr.cpu()[1]-1) if torch.is_tensor(arr) else arr[0]+np.abs(arr[1]-1) for arr in pred_RE]
     objective_values_c = [arr[0]+np.abs(arr[1]-1) for arr in pred_RE_corrected]
-elif objective_type =='max_gap':
-    objective_values = [arr.cpu()[0]-arr.cpu()[1] for arr in pred_RE]
+elif objective_type =='max_gap' and len(property_names) >= 2:
+    objective_values = [arr.cpu()[0]-arr.cpu()[1] if torch.is_tensor(arr) else arr[0]-arr[1] for arr in pred_RE]
     objective_values_c = [arr[0]-arr[1] for arr in pred_RE_corrected]
+else:
+    # For single property models or when using custom/flexible objectives
+    # Use the first property with a simple minimization objective
+    objective_values = [arr.cpu()[0] if torch.is_tensor(arr) else arr[0] for arr in pred_RE]
+    objective_values_c = [arr[0] for arr in pred_RE_corrected]
 
 indices_of_increases = indices_of_improvement(objective_values)
 
-
+# Build best results with correct number of properties
 EA_re_imp = [EA_re[i] for i in indices_of_increases]
-IP_re_imp = [IP_re[i] for i in indices_of_increases]
+IP_re_imp = [IP_re[i] for i in indices_of_increases] if len(property_names) >= 2 else []
 best_z_re = [Latents_RE[i] for i in indices_of_increases]
 best_mols = {i+1: decoded_mols[i] for i in indices_of_increases}
-best_props = {i+1: [EA_re[i],IP_re[i]] for i in indices_of_increases}
+
+# Build best_props with correct number of properties
+best_props = {}
+for i, idx in enumerate(indices_of_increases):
+    prop_values = []
+    for prop_idx in range(len(property_names)):
+        prop_values.append(property_values_re[prop_idx][idx])
+    best_props[i+1] = prop_values
+
 with open(dir_name+'best_mols_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
     print(best_mols, file=fl)
     print(best_props, file=fl)
 
 top_20_indices, top_20_mols = top_n_molecule_indices(objective_values, decoded_mols, n_idx=20)
 best_mols_t20 = {i+1: decoded_mols[i] for i in top_20_indices}
-best_props_t20 = {i+1: [EA_re[i], IP_re[i]] for i in top_20_indices}
-best_props_t20_c = {i+1: [EA_re_c[i], IP_re_c[i]] for i in top_20_indices}
+
+# Build best_props_t20 with correct number of properties
+best_props_t20 = {}
+best_props_t20_c = {}
+for i, idx in enumerate(top_20_indices):
+    prop_values = []
+    prop_values_c = []
+    for prop_idx in range(len(property_names)):
+        prop_values.append(property_values_re[prop_idx][idx])
+        prop_values_c.append(property_values_re_corrected[prop_idx][idx])
+    best_props_t20[i+1] = prop_values
+    best_props_t20_c[i+1] = prop_values_c
+
 best_objs_t20 = {i+1: objective_values[i] for i in top_20_indices}
 best_objs_t20_c = {i+1: objective_values_c[i] for i in top_20_indices}
 with open(dir_name+'top20_mols_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:

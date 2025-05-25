@@ -1137,7 +1137,29 @@ plt.title('Optimization in latent space')
 
 plt.savefig(dir_name+'BO_imp_projected_to_pca_onlyred_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
 
+# === DEBUG CHECK: BEFORE SAMPLING ===
+print(f"Length of decoded_mols: {len(decoded_mols)}")
+print(f"Length of Latents_RE: {len(Latents_RE)}")
+if len(decoded_mols) > 0:
+    print(f"Example decoded mol: {decoded_mols[-1]}")
+else:
+    print("No decoded molecules available.")
 
+if len(Latents_RE) > 0:
+    print(f"Example latent RE: {Latents_RE[-1][:5]} ...")
+else:
+    print("No reencoded latent vectors available.")
+
+# === TEST DECODABILITY OF RANDOM LATENT ===
+print("\nTesting decoding from a random latent vector:")
+with torch.no_grad():
+    z_test = torch.randn(1, 32).to(device)
+    pred_test, _, _, _, _ = model.inference(z_test, device=device, sample=False, log_var=None)
+    try:
+        decoded_test = combine_tokens(tokenids_to_vocab(pred_test[0][0].tolist(), vocab), tokenization=tokenization)
+        print("Decoded string from random latent:", decoded_test)
+    except Exception as e:
+        print("Failed to decode random latent. Error:", e)
 
 """ Sample around seed molecule - seed being the optimal solution found by optimizer """
 # Sample around the optimal molecule and predict the property values

@@ -29,6 +29,7 @@ from data_processing.rdkit_poly import make_polymer_mol
 import time
 from datetime import datetime
 import shutil  # for backup operations
+import re
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -40,6 +41,152 @@ if device.type == 'cuda':
     print('Memory Usage:')
     print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3, 1), 'GB')
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
+
+def validate_and_fix_polymer_format(poly_input):
+    """
+    Validates and fixes common polymer format issues
+    """
+    try:
+        parts = poly_input.split("|")
+        
+        # Check if we have enough parts
+        if len(parts) < 3:
+            print(f"Warning: Insufficient parts in polymer input: {poly_input}")
+            return None
+            
+        smiles_part = parts[0]
+        stoich_parts = parts[1:-1]  # All parts between SMILES and connectivity
+        connectivity_part = parts[-1]
+        
+        # Count monomers in SMILES
+        monomers = smiles_part.split(".")
+        monomer_count = len(monomers)
+        
+        # Check stoichiometry match
+        if len(stoich_parts) != monomer_count:
+            print(f"Stoichiometry mismatch: {monomer_count} monomers, {len(stoich_parts)} weights")
+            
+            # Fix by adjusting stoichiometry
+            if monomer_count == 1:
+                # For homopolymer, use single weight
+                fixed_poly = f"{smiles_part}|1.0|{connectivity_part}"
+            elif monomer_count == 2:
+                # For copolymer, use equal weights
+                fixed_poly = f"{smiles_part}|0.5|0.5|{connectivity_part}"
+            else:
+                # For higher order, distribute equally
+                weight = 1.0 / monomer_count
+                weights = "|".join([str(weight)] * monomer_count)
+                fixed_poly = f"{smiles_part}|{weights}|{connectivity_part}"
+                
+            print(f"Fixed polymer format: {fixed_poly}")
+            return fixed_poly
+            
+        return poly_input
+        
+    except Exception as e:
+        print(f"Error validating polymer format: {e}")
+        return None
+
+def adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name):
+    """
+    Adaptive sampling with multiple strategies
+    """
+    all_prediction_strings = []
+    all_reconstruction_strings = []
+    all_y_p = []
+    
+    print("Starting adaptive sampling around best solution...")
+    
+    # Strategy 1: Small noise sampling
+    for noise_level in [0.01, 0.05, 0.1]:  # Multiple noise levels
+        print(f"Trying noise level: {noise_level}")
+        
+        for r in range(3):  # Fewer samples per noise level
+            try:
+                # Create noise
+                noise = torch.tensor(np.random.normal(0, noise_level, size=seed_z.size()), 
+                                   dtype=torch.float, device=device)
+                seed_z_noise = seed_z + noise
+                
+                # Ensure we stay within bounds
+                seed_z_noise = torch.clamp(seed_z_noise, -3, 3)  # Reasonable bounds
+                
+                with torch.no_grad():
+                    predictions, _, _, _, y = model.inference(data=seed_z_noise, device=device, 
+                                                            sample=False, log_var=None)
+                    
+                    prediction_strings, validity = prop_predictor._calc_validity(predictions)
+                    predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
+                    prediction_strings_valid = [j for j, valid in zip(prediction_strings, validity) if valid]
+                    
+                    if predictions_valid:  # Only process if we have valid predictions
+                        y_p_valid, z_p_valid, reconstructions_valid, _ = prop_predictor._encode_and_predict_decode_molecules(predictions_valid)
+                        all_prediction_strings.extend(prediction_strings_valid)
+                        all_reconstruction_strings.extend(reconstructions_valid)
+                        all_y_p.extend(y_p_valid)
+                        
+                        print(f"  Generated {len(predictions_valid)} valid molecules with noise {noise_level}")
+                        
+                        # If we got good results, continue with this noise level
+                        if len(predictions_valid) >= 8:  # Good success rate
+                            break
+                    
+            except Exception as e:
+                print(f"  Error with noise level {noise_level}, attempt {r}: {e}")
+                continue
+        
+        # If we have enough samples, break
+        if len(all_prediction_strings) >= 20:
+            break
+    
+    # Strategy 2: If still no results, try interpolation with training data
+    if not all_prediction_strings:
+        print("Trying interpolation strategy...")
+        try:
+            # Load some training latents for interpolation
+            with open(os.path.join(args.save_dir, model_name, 'latent_space_train.npy'), 'rb') as f:
+                train_latents = np.load(f)
+            
+            # Sample random training points
+            random_indices = np.random.choice(len(train_latents), size=5, replace=False)
+            
+            for idx in random_indices:
+                train_point = torch.tensor(train_latents[idx], dtype=torch.float, device=device).unsqueeze(0)
+                
+                # Interpolate between seed and training point
+                for alpha in [0.1, 0.3, 0.5]:
+                    interpolated = alpha * seed_z[0:1] + (1 - alpha) * train_point
+                    interpolated = interpolated.repeat(16, 1)  # Batch size
+                    
+                    try:
+                        with torch.no_grad():
+                            predictions, _, _, _, y = model.inference(data=interpolated, device=device, 
+                                                                    sample=False, log_var=None)
+                            
+                            prediction_strings, validity = prop_predictor._calc_validity(predictions)
+                            predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
+                            prediction_strings_valid = [j for j, valid in zip(prediction_strings, validity) if valid]
+                            
+                            if predictions_valid:
+                                y_p_valid, z_p_valid, reconstructions_valid, _ = prop_predictor._encode_and_predict_decode_molecules(predictions_valid)
+                                all_prediction_strings.extend(prediction_strings_valid[:5])  # Limit samples
+                                all_reconstruction_strings.extend(reconstructions_valid[:5])
+                                all_y_p.extend(y_p_valid[:5])
+                                
+                                print(f"  Interpolation generated {len(predictions_valid)} valid molecules")
+                    except Exception as e:
+                        print(f"  Interpolation error: {e}")
+                        continue
+                
+                if len(all_prediction_strings) >= 15:
+                    break
+                    
+        except Exception as e:
+            print(f"Interpolation strategy failed: {e}")
+    
+    print(f"Total valid molecules generated: {len(all_prediction_strings)}")
+    return all_prediction_strings, all_reconstruction_strings, all_y_p
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
@@ -56,7 +203,7 @@ parser.add_argument("--ppguided", type=int, default=1)
 parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.0004)
 parser.add_argument("--max_alpha", type=float, default=0.2)
-parser.add_argument("--epsilon", type=float, default=1.0)
+parser.add_argument("--epsilon", type=float, default=0.05)  # Reduced default
 parser.add_argument("--max_iter", type=int, default=1000)
 parser.add_argument("--max_time", type=int, default=3600)
 parser.add_argument("--stopping_type", type=str, default="iter", choices=["iter","time"])
@@ -230,18 +377,42 @@ class PropertyPrediction():
         # Inference: forward pass NN prediciton of properties and beam search decoding from latent
         #x = torch.from_numpy(np.array(list(params.values()))).to(device).to(torch.float32)
         self.eval_calls += 1
-        print(params)
+        print(f"Evaluation {self.eval_calls}: {params}")
         _vector = [params[f'x{i}'] for i in range(self.nr_vars)]
-        print(_vector)
+        print(f"Parameter vector: {_vector}")
         
         x = torch.from_numpy(np.array(_vector)).to(device).to(torch.float32)
         with torch.no_grad():
             predictions, _, _, _, y = self.model_predictor.inference(data=x, device=device, sample=False, log_var=None)
+        
+        print(f"Step 1: Generated {len(predictions)} predictions")
+        
         # Validity check of the decoded molecule + penalize invalid molecules
         prediction_strings, validity = self._calc_validity(predictions)
         predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
         prediction_strings_valid = [j for j, valid in zip(prediction_strings, validity) if valid]
+        
+        print(f"Step 2: Validity check - {sum(validity)}/{len(validity)} valid")
+        
+        # Early return if no valid molecules
+        if not any(validity):
+            print("Warning: No valid molecules generated in this iteration")
+            results_dict = {
+                "objective": self.penalty_value,
+                "latents_BO": x,
+                "latents_reencoded": [np.zeros(32)], 
+                "predictions_BO": y,
+                "predictions_reencoded": [[np.nan] * len(self.property_names)],
+                "string_decoded": prediction_strings, 
+                "string_reconstructed": [],
+            }
+            self.results_custom[str(self.eval_calls)] = results_dict
+            return self.penalty_value
+        
         y_p_after_encoding_valid, z_p_after_encoding_valid, all_reconstructions_valid, _ = self._encode_and_predict_decode_molecules(predictions_valid)
+        
+        print(f"Step 3: Reencoding - {len(y_p_after_encoding_valid)} successful")
+        
         invalid_mask = (validity == 0)
         # Encode and predict the valid molecules - handle variable number of properties
         num_properties = len(self.property_names)
@@ -352,8 +523,9 @@ class PropertyPrediction():
             else:
                 aggr_obj = self.penalty_value
         
+        print(f"Step 4: Objective calculated - {aggr_obj}")
+        
         # results
-
         results_dict = {
         "objective":aggr_obj,
         "latents_BO": x,
@@ -364,8 +536,6 @@ class PropertyPrediction():
         "string_reconstructed": all_reconstructions_valid,
         }
         self.results_custom[str(self.eval_calls)] = results_dict
-        
-        # Remove the verbose printing that interferes with default output
         
         return aggr_obj
 
@@ -379,68 +549,127 @@ class PropertyPrediction():
             return 0
     
     def _calc_validity(self, predictions):
-        # Molecule validity check     
-        # Return a boolean array indicating whether each solution is valid or not
-        prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
-        mols_valid= []
+        """
+        Enhanced validity calculation with format fixing
+        """
+        prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
+                                           tokenization=tokenization) for sample in range(len(predictions))]
+        mols_valid = []
+        fixed_strings = []
+        
         for _s in prediction_strings:
-            poly_input = _s[:-1] # Last element is the _ char
-            poly_input_nocan=None
-            poly_label1 = np.nan
-            poly_label2 = np.nan
-            try: 
-                poly_graph=poly_smiles_to_graph(poly_input, poly_label1, poly_label2, poly_input_nocan)
-                mols_valid.append(1)
-            except:
-                poly_graph = None
+            poly_input = _s[:-1]  # Remove last character
+            
+            # Try to validate and fix format
+            fixed_poly = validate_and_fix_polymer_format(poly_input)
+            
+            if fixed_poly is None:
                 mols_valid.append(0)
-        mols_valid = np.array(mols_valid) # List of lists
-        return prediction_strings, mols_valid
+                fixed_strings.append(poly_input)
+                continue
+                
+            try:
+                poly_graph = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                mols_valid.append(1)
+                fixed_strings.append(fixed_poly)
+            except:
+                mols_valid.append(0)
+                fixed_strings.append(poly_input)
+        
+        return fixed_strings, np.array(mols_valid)
     
     def _encode_and_predict_decode_molecules(self, predictions):
-        # create data that can be encoded again
-        prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
+        """
+        More robust encoding with better error handling
+        """
+        prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
+                                           tokenization=tokenization) for sample in range(len(predictions))]
         data_list = []
-        print(prediction_strings)
+        valid_indices = []
+        
+        print(f"Processing {len(prediction_strings)} prediction strings...")
+        
         for i, s in enumerate(prediction_strings):
-            poly_input = s[:-1] # Last element is the _ char
-            poly_input_nocan=None
-            poly_label1 = np.nan
-            poly_label2 = np.nan
-            g = poly_smiles_to_graph(poly_input, poly_label1, poly_label2, poly_input_nocan)
-            if tokenization=="oldtok":
-                target_tokens = tokenize_poly_input(poly_input=poly_input)
-            elif tokenization=="RT_tokenized":
-                target_tokens = tokenize_poly_input_RTlike(poly_input=poly_input)
-            tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
-            g.tgt_token_ids = tgt_token_ids
-            g.tgt_token_lens = tgt_lens
-            g.to(device)
-            data_list.append(g)
-        data_loader = DataLoader(dataset=data_list, batch_size=64, shuffle=False)
+            try:
+                poly_input = s[:-1]  # Remove last character
+                
+                # Validate format first
+                fixed_poly = validate_and_fix_polymer_format(poly_input)
+                if fixed_poly is None:
+                    print(f"Skipping invalid polymer {i}: {poly_input}")
+                    continue
+                
+                # Try to create graph
+                g = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                
+                # Tokenize
+                if tokenization == "oldtok":
+                    target_tokens = tokenize_poly_input(poly_input=fixed_poly)
+                elif tokenization == "RT_tokenized":
+                    target_tokens = tokenize_poly_input_RTlike(poly_input=fixed_poly)
+                
+                tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
+                g.tgt_token_ids = tgt_token_ids
+                g.tgt_lens = tgt_lens
+                g.to(device)
+                
+                data_list.append(g)
+                valid_indices.append(i)
+                
+            except Exception as e:
+                print(f"Error processing polymer {i}: {e}")
+                print(f"Polymer string: {s}")
+                continue
+        
+        if not data_list:
+            print("No valid polymers to encode!")
+            return [], [], [], None
+        
+        print(f"Successfully processed {len(data_list)} valid polymers")
+        
+        # Continue with encoding...
+        data_loader = DataLoader(dataset=data_list, batch_size=min(64, len(data_list)), shuffle=False)
         dict_data_loader = MP_Matrix_Creator(data_loader, device)
-
-        #Encode and predict
-        batches = list(range(len(dict_data_loader)))
+        
         y_p = []
         z_p = []
         all_reconstructions = []
+        
         with torch.no_grad():
-            for i, batch in enumerate(batches):
-                data = dict_data_loader[str(batch)][0]
-                data.to(device)
-                dest_is_origin_matrix = dict_data_loader[str(batch)][1]
-                dest_is_origin_matrix.to(device)
-                inc_edges_to_atom_matrix = dict_data_loader[str(batch)][2]
-                inc_edges_to_atom_matrix.to(device)
+            for i, batch in enumerate(range(len(dict_data_loader))):
+                try:
+                    data = dict_data_loader[str(batch)][0]
+                    data.to(device)
+                    dest_is_origin_matrix = dict_data_loader[str(batch)][1]
+                    dest_is_origin_matrix.to(device)
+                    inc_edges_to_atom_matrix = dict_data_loader[str(batch)][2]
+                    inc_edges_to_atom_matrix.to(device)
 
-                # Perform a single forward pass.
-                reconstruction, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
-                y_p.append(y.cpu().numpy())
-                z_p.append(z.cpu().numpy())
-                reconstruction_strings = [combine_tokens(tokenids_to_vocab(reconstruction[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(reconstruction))]
-                all_reconstructions.extend(reconstruction_strings)
-        #Return the predictions from the encoded latents
+                    # Forward pass
+                    reconstruction, _, _, z, y = model.inference(
+                        data=data, device=device, 
+                        dest_is_origin_matrix=dest_is_origin_matrix, 
+                        inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, 
+                        sample=False, log_var=None
+                    )
+                    
+                    # Check for NaN values
+                    if torch.isnan(y).any():
+                        print(f"Warning: NaN detected in predictions for batch {i}")
+                        y = torch.nan_to_num(y, nan=0.0)
+                    
+                    y_p.append(y.cpu().numpy())
+                    z_p.append(z.cpu().numpy())
+                    
+                    reconstruction_strings = [combine_tokens(tokenids_to_vocab(reconstruction[sample][0].tolist(), vocab), 
+                                                           tokenization=tokenization) for sample in range(len(reconstruction))]
+                    all_reconstructions.extend(reconstruction_strings)
+                    
+                except Exception as e:
+                    print(f"Error in batch {i}: {e}")
+                    continue
+        
+        # Flatten results
         y_p_flat = [sublist.tolist() for array_ in y_p for sublist in array_]
         z_p_flat = [sublist.tolist() for array_ in z_p for sublist in array_]
         self.modified_solution = z_p_flat
@@ -525,7 +754,7 @@ with open(dir_name+'latent_space_'+dataset_type+'.npy', 'rb') as f:
 min_values = np.amin(latent_space, axis=0).tolist()
 max_values = np.amax(latent_space, axis=0).tolist()
 
-cutoff=-0.05
+cutoff=-0.1  # Slightly wider bounds than original
 
 if not cutoff==0.0:
     transformed_min_values = []
@@ -594,8 +823,8 @@ else:
 
 
 # Perform optimization
-#utility = UtilityFunction(kind="ei", kappa=2.5, xi=0.01)
-utility = UtilityFunction(kind="ucb")
+# Use EI instead of UCB for potentially better exploration
+utility = UtilityFunction(kind="ei", kappa=2.5, xi=0.1)
 
 # Define the time limit in seconds
 stopping_type = args.stopping_type # time or iter
@@ -613,7 +842,7 @@ log_progress(f"Starting optimization with {max_iter} iterations", log_file)
 
 # Initial exploration if not resuming
 if not args.resume_from:
-    init_points = 20
+    init_points = 30  # Increased from 20
     print("Performing initial exploration...")
     optimizer.maximize(init_points=init_points, n_iter=0, acquisition_function=utility)
 else:
@@ -1164,52 +1393,33 @@ with torch.no_grad():
 """ Sample around seed molecule - seed being the optimal solution found by optimizer """
 # Sample around the optimal molecule and predict the property values
 
-all_prediction_strings=[]
-all_reconstruction_strings=[]
-
-
 # Add these debug prints BEFORE the above line:
 print(f"\nCHECKING BEST MOLECULE:")
 print(f"best_z_re length: {len(best_z_re) if 'best_z_re' in locals() else 'not found'}")
 print(f"best_z_re type: {type(best_z_re) if 'best_z_re' in locals() else 'not found'}")
 if 'best_z_re' in locals() and len(best_z_re) > 0:
     print(f"Last best_z_re: {best_z_re[-1]}")
+    
+    seed_z = best_z_re[-1] # last reencoded best molecule
+    
+    # extract the predictions of best molecule together with the latents of best molecule(by encoding? or BO one)
+    seed_z = torch.from_numpy(np.array(seed_z)).unsqueeze(0).repeat(64,1).to(device).to(torch.float32)
+    print(seed_z)
+    with torch.no_grad():
+        predictions, _, _, _, y_seed = model.inference(data=seed_z, device=device, sample=False, log_var=None)
+        seed_string = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
+    
+    # Use the new adaptive sampling function
+    all_prediction_strings, all_reconstruction_strings, all_y_p = adaptive_sampling_around_seed(
+        model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name
+    )
 else:
     print("No valid best molecules found!")
-
-seed_z = best_z_re[-1] # last reencoded best molecule
-
-# extract the predictions of best molecule together with the latents of best molecule(by encoding? or BO one)
-seed_z = torch.from_numpy(np.array(seed_z)).unsqueeze(0).repeat(64,1).to(device).to(torch.float32)
-print(seed_z)
-with torch.no_grad():
-    predictions, _, _, _, y_seed = model.inference(data=seed_z, device=device, sample=False, log_var=None)
-    seed_string = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
-sampled_z = []
-all_y_p = []
-#model.eval()
-
-with torch.no_grad():
-    # Define the mean and standard deviation of the Gaussian noise
-    for r in range(8):
-        mean = 0
-        std = args.epsilon
-        
-        # Create a tensor of the same size as the original tensor with random noise
-        noise = torch.tensor(np.random.normal(mean, std, size=seed_z.size()), dtype=torch.float, device=device)
-
-        # Add the noise to the original tensor
-        seed_z_noise = seed_z + noise
-        sampled_z.append(seed_z_noise.cpu().numpy())
-        predictions, _, _, _, y = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
-        prediction_strings, validity = prop_predictor._calc_validity(predictions)
-        predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
-        prediction_strings_valid = [j for j, valid in zip(prediction_strings, validity) if valid]
-        y_p_after_encoding_valid, z_p_after_encoding_valid, reconstructions_valid, _ = prop_predictor._encode_and_predict_decode_molecules(predictions_valid)
-        all_prediction_strings.extend(prediction_strings_valid)
-        all_reconstruction_strings.extend(reconstructions_valid)
-        all_y_p.extend(y_p_after_encoding_valid)
-
+    all_prediction_strings = []
+    all_reconstruction_strings = []
+    all_y_p = []
+    seed_string = ["No seed generated"]
+    y_seed = [np.array([np.nan])]
 
 # Add these debug prints BEFORE the above lines:
 print(f"\nSAMPLING RESULTS CHECK:")
@@ -1592,4 +1802,4 @@ print(f"Results saved to: {dir_name}")
 if args.dataset_csv:
     print(f"Novelty analysis performed against: {args.dataset_csv}")
 else:
-    print("No external dataset provided")
+    print("No external dataset provided for novelty analysis")

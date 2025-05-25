@@ -66,7 +66,7 @@ parser.add_argument("--checkpoint_every", type=int, default=200, help="Save chec
 parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint file to resume from")
 parser.add_argument("--monitor_every", type=int, default=50, help="Print progress every N iterations")
 
-# Add flexible property arguments (from generate.py)
+# Add flexible property arguments
 parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
                     help="Names of the properties to optimize")
 parser.add_argument("--property_count", type=int, default=None,
@@ -86,10 +86,15 @@ parser.add_argument("--custom_equation", type=str, default=None,
 parser.add_argument("--maximize_equation", action="store_true", 
                     help="Maximize the custom equation instead of minimizing it")
 
+# Add CSV dataset argument
+parser.add_argument("--dataset_csv", type=str, default=None,
+                    help="Path to the CSV file containing polymer data for novelty analysis. Should have 'poly_chemprop_input' column.")
+parser.add_argument("--polymer_column", type=str, default="poly_chemprop_input",
+                    help="Name of the column containing polymer SMILES in the CSV file (default: poly_chemprop_input)")
 
 args = parser.parse_args()
 
-# Handle property configuration (from generate.py)
+# Handle property configuration
 property_names = args.property_names
 if args.property_count is not None:
     property_count = args.property_count
@@ -117,7 +122,7 @@ dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
 
-# Include property info in model name (from generate.py)
+# Include property info in model name
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 
 # Load model
@@ -134,7 +139,7 @@ if os.path.isfile(filepath):
     checkpoint = torch.load(filepath, map_location=torch.device('cpu'))
     model_config = checkpoint["model_config"]
     
-    # Get property information from model config if available (from generate.py)
+    # Get property information from model config if available
     model_property_count = model_config.get('property_count', 2)
     model_property_names = model_config.get('property_names', ["EA", "IP"])
     
@@ -179,7 +184,7 @@ if os.path.isfile(filepath):
 
 # PropertyPrediction class - modified initialization
 class PropertyPrediction():
-    def __init__(self, model, nr_vars, objective_type="EAmin", property_names=None, 
+    def __init__(self, model, nr_vars, objective_type="custom", property_names=None, 
                  property_targets=None, property_weights=None, property_objectives=None,
                  custom_equation=None, maximize_equation=False):
         self.model_predictor = model
@@ -913,6 +918,8 @@ plt.close()
 
 # PCA projection colored by second property (only if it exists)
 if len(property_names) >= 2:
+    with open(dir_name+'y2_all_'+dataset_type+'.npy', 'rb') as f:
+        y2_all_train = np.load(f)
     plt.figure(1)
     plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y2_all_train, cmap='plasma')
     clb = plt.colorbar()
@@ -1054,7 +1061,7 @@ with open(dir_name+'top20_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+str(sto
 
 
 print(objective_values)
-print(indices_of_improvement)
+print(indices_of_increases)
 latents_BO_np_imp = np.stack([Latents_BO[i] for i in indices_of_increases])
 z_embedded_BO_imp = reducer.transform(latents_BO_np_imp)
 
@@ -1190,25 +1197,46 @@ print(f"all_y_p length: {len(all_y_p)}")
 if all_y_p:
     print(f"First 3 y_p values: {all_y_p[:3]}")
     print(f"Types in all_y_p: {[type(x) for x in all_y_p[:3]]}")
-print(f'Saving generated strings')
 
-i=0
-with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
-    f.write("Seed string decoded: " + seed_string[0] + "\n")
-    f.write("Prediction: "+ str(y_seed[0]))
-    f.write("The results, sampling around the best population are the following\n")
-    for l1,l2 in zip(all_reconstruction_strings,all_prediction_strings):
-        if l1 == l2:
-            f.write("decoded molecule from GA selection is encoded and decoded to the same molecule\n")
-            f.write(l1 + "\n")
-            f.write("The predicted properties from z(reencoded) are: " + str(all_y_p[i]) + "\n")
-        else:
-            f.write("Sampled molecule around BO seed: ")
-            f.write(l2 + "\n")
-            f.write("Encoded and decoded sampled molecule: ")
-            f.write(l1 + "\n")
-            f.write("The predicted properties from z(reencoded) are: " + str(all_y_p[i]) + "\n")
-        i+=1
+# Check if sampling produced any valid results
+if not all_prediction_strings:
+    print("Warning: No valid molecules generated during sampling around seed")
+    print("This may indicate issues with the latent space bounds or model validity")
+    
+    # Create results file with warning
+    with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
+        f.write("WARNING: No valid molecules generated during sampling around seed\n")
+        f.write("Seed string decoded: " + (seed_string[0] if 'seed_string' in locals() and seed_string else "No seed generated") + "\n")
+        f.write("Prediction: " + str(y_seed[0] if 'y_seed' in locals() and len(y_seed) > 0 else "No predictions") + "\n")
+        f.write("This may indicate:\n")
+        f.write("1. Latent space bounds are too restrictive\n") 
+        f.write("2. Model has difficulty generating valid molecules in this region\n")
+        f.write("3. Epsilon value for noise may be too large\n")
+    
+    # Set empty lists for the rest of the analysis
+    all_predictions = []
+    all_predictions_can = []
+    
+else:
+    print(f'Saving generated strings')
+
+    i=0
+    with open(dir_name+'results_around_BO_seed_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
+        f.write("Seed string decoded: " + seed_string[0] + "\n")
+        f.write("Prediction: "+ str(y_seed[0]))
+        f.write("The results, sampling around the best population are the following\n")
+        for l1,l2 in zip(all_reconstruction_strings,all_prediction_strings):
+            if l1 == l2:
+                f.write("decoded molecule from GA selection is encoded and decoded to the same molecule\n")
+                f.write(l1 + "\n")
+                f.write("The predicted properties from z(reencoded) are: " + str(all_y_p[i]) + "\n")
+            else:
+                f.write("Sampled molecule around BO seed: ")
+                f.write(l2 + "\n")
+                f.write("Encoded and decoded sampled molecule: ")
+                f.write(l1 + "\n")
+                f.write("The predicted properties from z(reencoded) are: " + str(all_y_p[i]) + "\n")
+            i+=1
 
 """ Check the molecules around the optimized seed """
 
@@ -1231,167 +1259,199 @@ data_augment ="old"
 vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
 vocab = load_vocab(vocab_file=vocab_file)
 
-all_predictions=all_prediction_strings.copy()
-sm_can = SmilesEnumCanon()
-all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
+# Handle the case where no predictions were generated
+if all_prediction_strings:
+    all_predictions=all_prediction_strings.copy()
+    sm_can = SmilesEnumCanon()
+    all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
+else:
+    print("No prediction strings to analyze - skipping detailed novelty analysis")
+    all_predictions = []
+    all_predictions_can = []
+    sm_can = SmilesEnumCanon()
+
 prediction_validityA= []
 prediction_validityB =[]
 data_dir = os.path.join(main_dir_path,'data/')
 
-
-if augment=="augmented":
-    df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop.csv')
-elif augment=="augmented_canonical":
-    df = pd.read_csv(main_dir_path+'/data/dataset-combined-canonical-poly_chemprop.csv')
-elif augment=="augmented_enum":
-    df = pd.read_csv(main_dir_path+'/data/dataset-combined-enumerated2_poly_chemprop.csv')
-all_polymers_data= []
+# Load dataset CSV file for novelty analysis (UPDATED SECTION)
+all_polymers_data = []
 all_train_polymers = []
 
+# Get training polymers from dict_train_loader (this part stays the same)
 for batch, graphs in enumerate(dict_train_loader):
     data = dict_train_loader[str(batch)][0]
     train_polymers_batch = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization).split('_')[0] for sample in range(len(data))]
     all_train_polymers.extend(train_polymers_batch)
-for i in range(len(df.loc[:, 'poly_chemprop_input'])):
-    poly_input = df.loc[i, 'poly_chemprop_input']
-    all_polymers_data.append(poly_input)
 
- 
-all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
-all_train_can = list(map(sm_can.canonicalize, all_train_polymers))
-all_pols_data_can = list(map(sm_can.canonicalize, all_polymers_data))
-monomers= [s.split("|")[0].split(".") for s in all_train_polymers]
-monomers_all=[mon for sub_list in monomers for mon in sub_list]
-all_mons_can = []
-for m in monomers_all:
-    m_can = sm_can.canonicalize(m, monomer_only=True, stoich_con_info=False)
-    modified_string = re.sub(r'\*\:\d+', '*', m_can)
-    all_mons_can.append(modified_string)
-all_mons_can = list(set(all_mons_can))
-print(len(all_mons_can), all_mons_can[1:3])
+# Load dataset CSV for novelty comparison (UPDATED TO USE COMMAND LINE ARG)
+if args.dataset_csv:
+    try:
+        print(f"Loading dataset from: {args.dataset_csv}")
+        df = pd.read_csv(args.dataset_csv)
+        
+        # Check if the specified column exists
+        if args.polymer_column in df.columns:
+            for i in range(len(df.loc[:, args.polymer_column])):
+                poly_input = df.loc[i, args.polymer_column]
+                all_polymers_data.append(poly_input)
+            print(f"Loaded {len(all_polymers_data)} polymers from {args.polymer_column} column")
+        else:
+            print(f"Warning: Column '{args.polymer_column}' not found in CSV file")
+            print(f"Available columns: {list(df.columns)}")
+            print("Using empty dataset for novelty analysis")
+            all_polymers_data = []
+            
+    except FileNotFoundError:
+        print(f"Error: Dataset CSV file not found: {args.dataset_csv}")
+        print("Using empty dataset for novelty analysis")
+        all_polymers_data = []
+    except Exception as e:
+        print(f"Error loading dataset CSV: {e}")
+        print("Using empty dataset for novelty analysis")
+        all_polymers_data = []
+else:
+    print("No dataset CSV provided (--dataset_csv). Skipping novelty analysis against external dataset.")
+    all_polymers_data = []
 
-with open(data_dir+'all_train_pols_can'+'.pkl', 'wb') as f:
-    pickle.dump(all_train_can, f)
-with open(data_dir+'all_pols_data_can'+'.pkl', 'wb') as f:
-    pickle.dump(all_pols_data_can, f)
-with open(data_dir+'all_mons_train_can'+'.pkl', 'wb') as f:
-    pickle.dump(all_mons_can, f)
+# Continue with the rest of the novelty analysis only if we have data to analyze
+if all_predictions_can and (all_polymers_data or all_train_polymers):
+    all_predictions_can = list(map(sm_can.canonicalize, all_predictions))
+    all_train_can = list(map(sm_can.canonicalize, all_train_polymers))
+    all_pols_data_can = list(map(sm_can.canonicalize, all_polymers_data)) if all_polymers_data else []
+    
+    monomers= [s.split("|")[0].split(".") for s in all_train_polymers]
+    monomers_all=[mon for sub_list in monomers for mon in sub_list]
+    all_mons_can = []
+    for m in monomers_all:
+        m_can = sm_can.canonicalize(m, monomer_only=True, stoich_con_info=False)
+        modified_string = re.sub(r'\*\:\d+', '*', m_can)
+        all_mons_can.append(modified_string)
+    all_mons_can = list(set(all_mons_can))
+    print(len(all_mons_can), all_mons_can[1:3] if len(all_mons_can) > 2 else all_mons_can)
 
-with open(data_dir+'all_train_pols_can'+'.pkl', 'rb') as f:
-    all_train_can = pickle.load(f)
-with open(data_dir+'all_pols_data_can'+'.pkl', 'rb') as f:
-    all_pols_data_can= pickle.load(f)
-with open(data_dir+'all_mons_train_can'+'.pkl', 'rb') as f:
-    all_mons_can = pickle.load(f)
+    # Save canonicalized data for future use
+    with open(data_dir+'all_train_pols_can'+'.pkl', 'wb') as f:
+        pickle.dump(all_train_can, f)
+    if all_pols_data_can:
+        with open(data_dir+'all_pols_data_can'+'.pkl', 'wb') as f:
+            pickle.dump(all_pols_data_can, f)
+    with open(data_dir+'all_mons_train_can'+'.pkl', 'wb') as f:
+        pickle.dump(all_mons_can, f)
 
+    # Load back the data (optional, could skip this step)
+    with open(data_dir+'all_train_pols_can'+'.pkl', 'rb') as f:
+        all_train_can = pickle.load(f)
+    if all_pols_data_can:
+        with open(data_dir+'all_pols_data_can'+'.pkl', 'rb') as f:
+            all_pols_data_can= pickle.load(f)
+    with open(data_dir+'all_mons_train_can'+'.pkl', 'rb') as f:
+        all_mons_can = pickle.load(f)
 
-# C
-prediction_mols = list(map(poly_smiles_to_molecule, all_predictions))
-for mon in prediction_mols: 
-    try: prediction_validityA.append(mon[0] is not None)
-    except: prediction_validityA.append(False)
-    try: prediction_validityB.append(mon[1] is not None)
-    except: prediction_validityB.append(False)
+    # C
+    prediction_mols = list(map(poly_smiles_to_molecule, all_predictions))
+    for mon in prediction_mols: 
+        try: prediction_validityA.append(mon[0] is not None)
+        except: prediction_validityA.append(False)
+        try: prediction_validityB.append(mon[1] is not None)
+        except: prediction_validityB.append(False)
 
+    # Evaluation of validation set reconstruction accuracy (inference)
+    monomer_smiles_predicted = [poly_smiles.split("|")[0].split('.') for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
+    monomer_comb_predicted = [poly_smiles.split("|")[0] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
+    monomer_comb_train = [poly_smiles.split("|")[0] for poly_smiles in all_train_can if poly_smiles]
 
-#predBvalid = []
-#for mon in prediction_mols:
-#    try: 
-#        predBvalid.append(mon[1] is not None)
-#    except: 
-#        predBvalid.append(False)
+    monA_pred = [mon[0] for mon in monomer_smiles_predicted if len(mon) > 0]
+    monB_pred = [mon[1] for mon in monomer_smiles_predicted if len(mon) > 1]
+    monA_pred_gen = []
+    monB_pred_gen = []
+    for m_c in monomer_smiles_predicted:
+        if len(m_c) > 0:
+            ma = m_c[0]
+            ma_can = sm_can.canonicalize(ma, monomer_only=True, stoich_con_info=False)
+            monA_pred_gen.append(re.sub(r'\*\:\d+', '*', ma_can))
+        
+        if len(m_c) > 1:
+            mb = m_c[1]
+            mb_can = sm_can.canonicalize(mb, monomer_only=True, stoich_con_info=False)
+            monB_pred_gen.append(re.sub(r'\*\:\d+', '*', mb_can))
 
-#prediction_validityB.append(predBvalid)
-#reconstructed_SmilesA = list(map(Chem.MolToSmiles, [mon[0] for mon in prediction_mols]))
-#reconstructed_SmilesB = list(map(Chem.MolToSmiles, [mon[1] for mon in prediction_validity]))
+    monomer_weights_predicted = [poly_smiles.split("|")[1:-1] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
+    monomer_con_predicted = [poly_smiles.split("|")[-1].split("_")[0] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
 
+    validityA = sum(prediction_validityA)/len(prediction_validityA) if prediction_validityA else 0
+    validityB = sum(prediction_validityB)/len(prediction_validityB) if prediction_validityB else 0
 
-# Evaluation of validation set reconstruction accuracy (inference)
-monomer_smiles_predicted = [poly_smiles.split("|")[0].split('.') for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
-monomer_comb_predicted = [poly_smiles.split("|")[0] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
-monomer_comb_train = [poly_smiles.split("|")[0] for poly_smiles in all_train_can if poly_smiles]
+    # Novelty metrics
+    novel = 0
+    novel_pols=[]
+    for pol in monomer_comb_predicted:
+        if pol not in monomer_comb_train:
+            novel+=1
+            novel_pols.append(pol)
+    novelty_mon_comb = novel/len(monomer_comb_predicted) if monomer_comb_predicted else 0
+    
+    novel = 0
+    novel_pols_full=[]
+    for pol in all_predictions_can:
+        if pol not in all_train_can:
+            novel+=1
+            novel_pols_full.append(pol)
+    novelty = novel/len(all_predictions_can) if all_predictions_can else 0
+    
+    # Novelty against external dataset (if provided)
+    if all_pols_data_can:
+        novel = 0
+        for pol in all_predictions_can:
+            if pol not in all_pols_data_can:
+                novel+=1
+        novelty_full_dataset = novel/len(all_predictions_can) if all_predictions_can else 0
+    else:
+        novelty_full_dataset = 0
+        
+    novelA = 0
+    novelAs = []
+    for monA in monA_pred_gen:
+        if monA not in all_mons_can:
+            novelA+=1
+            novelAs.append(monA)
+    print(novelAs, len(list(set(novelAs))))
+    novelty_A = novelA/len(monA_pred_gen) if monA_pred_gen else 0
+    
+    novelB = 0
+    novelBs = []
+    for monB in monB_pred_gen:
+        if monB not in all_mons_can:
+            novelB+=1
+            novelBs.append(monB)
+    print(novelBs, len(list(set(novelBs))))
 
-monA_pred = [mon[0] for mon in monomer_smiles_predicted]
-monB_pred = [mon[1] for mon in monomer_smiles_predicted]
-monA_pred_gen = []
-monB_pred_gen = []
-for m_c in monomer_smiles_predicted:
-    ma = m_c[0]
-    mb = m_c[1]
-    ma_can = sm_can.canonicalize(ma, monomer_only=True, stoich_con_info=False)
+    novelty_B = novelB/len(monB_pred_gen) if monB_pred_gen else 0
 
-    monA_pred_gen.append(re.sub(r'\*\:\d+', '*', ma_can))
-    mb_can = sm_can.canonicalize(mb, monomer_only=True, stoich_con_info=False)
-    monB_pred_gen.append(re.sub(r'\*\:\d+', '*', mb_can))
+    diversity = len(list(set(all_predictions_can)))/len(all_predictions_can) if all_predictions_can else 0
+    diversity_novel = len(list(set(novel_pols_full)))/len(novel_pols_full) if novel_pols_full else 0
 
-monomer_weights_predicted = [poly_smiles.split("|")[1:-1] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
-monomer_con_predicted = [poly_smiles.split("|")[-1].split("_")[0] for poly_smiles in all_predictions_can if poly_smiles != 'invalid_polymer_string']
+    classes_stoich = [['0.5','0.5'],['0.25','0.75'],['0.75','0.25']]
+    classes_con = ['<1-3:0.25:0.25<1-4:0.25:0.25<2-3:0.25:0.25<2-4:0.25:0.25<1-2:0.25:0.25<3-4:0.25:0.25<1-1:0.25:0.25<2-2:0.25:0.25<3-3:0.25:0.25<4-4:0.25:0.25','<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5','<1-2:0.375:0.375<1-1:0.375:0.375<2-2:0.375:0.375<3-4:0.375:0.375<3-3:0.375:0.375<4-4:0.375:0.375<1-3:0.125:0.125<1-4:0.125:0.125<2-3:0.125:0.125<2-4:0.125:0.125']
+    whole_valid = len(monomer_smiles_predicted)
+    validity = whole_valid/len(all_predictions) if all_predictions else 0
+    
+    with open(dir_name+'novelty_BO_seed_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
+        f.write("Gen Mon A validity: %.4f %% Gen Mon B validity: %.4f %% "% (100*validityA, 100*validityB,))
+        f.write("Gen validity: %.4f %% "% (100*validity,))
+        f.write("Novelty: %.4f %% "% (100*novelty,))
+        f.write("Novelty (mon_comb): %.4f %% "% (100*novelty_mon_comb,))
+        f.write("Novelty MonA full dataset: %.4f %% "% (100*novelty_A,))
+        f.write("Novelty MonB full dataset: %.4f %% "% (100*novelty_B,))
+        if all_pols_data_can:
+            f.write("Novelty in external dataset: %.4f %% "% (100*novelty_full_dataset,))
+        f.write("Diversity: %.4f %% "% (100*diversity,))
+        f.write("Diversity (novel polymers): %.4f %% "% (100*diversity_novel,))
 
-
-#prediction_validityA= [num for elem in prediction_validityA for num in elem]
-#prediction_validityB = [num for elem in prediction_validityB for num in elem]
-validityA = sum(prediction_validityA)/len(prediction_validityA)
-validityB = sum(prediction_validityB)/len(prediction_validityB)
-
-# Novelty metrics
-novel = 0
-novel_pols=[]
-for pol in monomer_comb_predicted:
-    if not pol in monomer_comb_train:
-        novel+=1
-        novel_pols.append(pol)
-novelty_mon_comb = novel/len(monomer_comb_predicted)
-novel = 0
-novel_pols=[]
-for pol in all_predictions_can:
-    if not pol in all_train_can:
-        novel+=1
-        novel_pols.append(pol)
-novelty = novel/len(all_predictions_can)
-novel = 0
-for pol in all_predictions_can:
-    if not pol in all_pols_data_can:
-        novel+=1
-novelty_full_dataset = novel/len(all_predictions_can)
-novelA = 0
-novelAs = []
-for monA in monA_pred_gen:
-    if not monA in all_mons_can:
-        novelA+=1
-        novelAs.append(monA)
-print(novelAs, len(list(set(novelAs))))
-novelty_A = novelA/len(monA_pred_gen)
-novelB = 0
-novelBs = []
-for monB in monB_pred_gen:
-    if not monB in all_mons_can:
-        novelB+=1
-        novelBs.append(monB)
-print(novelBs, len(list(set(novelBs))))
-
-novelty_B = novelB/len(monB_pred_gen)
-
-diversity = len(list(set(all_predictions_can)))/len(all_predictions_can)
-diversity_novel = len(list(set(novel_pols)))/len(novel_pols)
-
-classes_stoich = [['0.5','0.5'],['0.25','0.75'],['0.75','0.25']]
-#if data_augment=='new':
-#    classes_con = ['<1-3:0.25:0.25<1-4:0.25:0.25<2-3:0.25:0.25<2-4:0.25:0.25<1-2:0.25:0.25<3-4:0.25:0.25<1-1:0.25:0.25<2-2:0.25:0.25<3-3:0.25:0.25<4-4:0.25:0.25','<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5','<1-2:0.375:0.375<1-1:0.375:0.375<2-2:0.375:0.375<3-4:0.375:0.375<3-3:0.375:0.375<4-4:0.375:0.375<1-3:0.125:0.125<1-4:0.125:0.125<2-3:0.125:0.125<2-4:0.125:0.125']
-#else:
-classes_con = ['<1-3:0.25:0.25<1-4:0.25:0.25<2-3:0.25:0.25<2-4:0.25:0.25<1-2:0.25:0.25<3-4:0.25:0.25<1-1:0.25:0.25<2-2:0.25:0.25<3-3:0.25:0.25<4-4:0.25:0.25','<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5','<1-2:0.375:0.375<1-1:0.375:0.375<2-2:0.375:0.375<3-4:0.375:0.375<3-3:0.375:0.375<4-4:0.375:0.375<1-3:0.125:0.125<1-4:0.125:0.125<2-3:0.125:0.125<2-4:0.125:0.125']
-whole_valid = len(monomer_smiles_predicted)
-validity = whole_valid/len(all_predictions)
-with open(dir_name+'novelty_BO_seed_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
-    f.write("Gen Mon A validity: %.4f %% Gen Mon B validity: %.4f %% "% (100*validityA, 100*validityB,))
-    f.write("Gen validity: %.4f %% "% (100*validity,))
-    f.write("Novelty: %.4f %% "% (100*novelty,))
-    f.write("Novelty (mon_comb): %.4f %% "% (100*novelty_mon_comb,))
-    f.write("Novelty MonA full dataset: %.4f %% "% (100*novelty_A,))
-    f.write("Novelty MonB full dataset: %.4f %% "% (100*novelty_B,))
-    f.write("Novelty in full dataset: %.4f %% "% (100*novelty_full_dataset,))
-    f.write("Diversity: %.4f %% "% (100*diversity,))
-    f.write("Diversity (novel polymers): %.4f %% "% (100*diversity_novel,))
-
+else:
+    # Create a minimal novelty file when no analysis is possible
+    with open(dir_name+'novelty_BO_seed_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as f:
+        f.write("No valid molecules generated for novelty analysis\n")
 
 """ Plot the kde of the properties of training data and sampled data """
 from sklearn.neighbors import KernelDensity
@@ -1504,3 +1564,10 @@ for prop_idx, prop_name in enumerate(property_names):
         print(f"KDE{prop_name} file: {size} bytes")
     else:
         print(f"KDE{prop_name} file: Not created")
+
+print(f"\nOptimization completed successfully!")
+print(f"Results saved to: {dir_name}")
+if args.dataset_csv:
+    print(f"Novelty analysis performed against: {args.dataset_csv}")
+else:
+    print("No external dataset provided for novel

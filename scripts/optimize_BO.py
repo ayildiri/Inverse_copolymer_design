@@ -1570,4 +1570,4 @@ print(f"Results saved to: {dir_name}")
 if args.dataset_csv:
     print(f"Novelty analysis performed against: {args.dataset_csv}")
 else:
-    print("No external dataset provided for novel
+    print("No external dataset provided")

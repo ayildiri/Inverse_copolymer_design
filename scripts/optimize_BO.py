@@ -903,14 +903,31 @@ class PropertyPrediction():
                     except:
                         print(f"All tokenization methods failed for polymer {i}")
                         continue
-                
-                # Convert tokens to features
+
+                # Convert tokens to features with debugging
                 try:
+                    print(f"DEBUG polymer {i}:")
+                    print(f"  target_tokens type: {type(target_tokens)}")
+                    print(f"  target_tokens length: {len(target_tokens) if target_tokens else 'None'}")
+                    if target_tokens and len(target_tokens) > 0:
+                        print(f"  first 3 tokens: {target_tokens[:3]}")
+                        print(f"  last 3 tokens: {target_tokens[-3:]}")
+                    
+                    print(f"  vocab type: {type(vocab)}")
+                    print(f"  vocab length: {len(vocab) if vocab else 'None'}")
+                    
+                    # Check vocab format
+                    if hasattr(vocab, 'keys'):
+                        sample_keys = list(vocab.keys())[:3]
+                        print(f"  sample vocab keys: {sample_keys}")
+                    
                     tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
                     
+                    print(f"  SUCCESS: token_ids type: {type(tgt_token_ids)}, lens: {tgt_lens}")
+                    
                     # Validate token IDs
-                    if tgt_token_ids is None or len(tgt_token_ids) == 0:
-                        print(f"Invalid token IDs for polymer {i}")
+                    if tgt_token_ids is None or (torch.is_tensor(tgt_token_ids) and len(tgt_token_ids) == 0):
+                        print(f"  Invalid token IDs for polymer {i}")
                         continue
                         
                     g.tgt_token_ids = tgt_token_ids
@@ -919,10 +936,13 @@ class PropertyPrediction():
                     
                     data_list.append(g)
                     valid_indices.append(i)
-                    print(f"Successfully processed polymer {i}")
+                    print(f"  Successfully processed polymer {i}")
                     
                 except Exception as feature_error:
-                    print(f"Feature conversion failed for polymer {i}: {feature_error}")
+                    print(f"  Feature conversion failed for polymer {i}: {feature_error}")
+                    print(f"  Error type: {type(feature_error)}")
+                    import traceback
+                    print(f"  Traceback: {traceback.format_exc()}")
                     continue
                     
             except Exception as e:

@@ -158,9 +158,36 @@ def intelligent_rgroup_mapping(smiles_part, connectivity_part):
     
     return new_smiles, new_connectivity
 
+def remove_duplicate_connections(connectivity_part):
+    """
+    Remove duplicate connections from connectivity string
+    """
+    try:
+        # Split by '<' and filter out empty strings
+        connections = [conn for conn in connectivity_part.split('<') if conn.strip()]
+        
+        # Remove duplicates while preserving order
+        unique_connections = []
+        seen = set()
+        
+        for conn in connections:
+            if conn not in seen:
+                unique_connections.append(conn)
+                seen.add(conn)
+        
+        # Rebuild connectivity string
+        if unique_connections:
+            return '<' + '<'.join(unique_connections)
+        else:
+            return connectivity_part  # Return original if parsing fails
+            
+    except Exception as e:
+        print(f"Error removing duplicate connections: {e}")
+        return connectivity_part
+
 def validate_and_fix_polymer_format(poly_input):
     """
-    Enhanced validation with intelligent R-group mapping for all polymer types
+    Enhanced validation with duplicate connection removal and better formatting
     """
     try:
         parts = poly_input.split("|")
@@ -180,6 +207,9 @@ def validate_and_fix_polymer_format(poly_input):
         
         # Intelligent R-group mapping
         fixed_smiles, fixed_connectivity = intelligent_rgroup_mapping(smiles_part, connectivity_part)
+        
+        # Remove duplicate connections and fix connectivity format
+        fixed_connectivity = remove_duplicate_connections(fixed_connectivity)
         
         # Check stoichiometry match
         if len(stoich_parts) != monomer_count:
@@ -802,7 +832,7 @@ class PropertyPrediction():
     
     def _encode_and_predict_decode_molecules(self, predictions):
         """
-        More robust encoding with better error handling and flexible property support
+        More robust encoding with better error handling and tokenization fixes
         """
         prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
                                            tokenization=tokenization) for sample in range(len(predictions))]
@@ -814,6 +844,7 @@ class PropertyPrediction():
         for i, s in enumerate(prediction_strings):
             try:
                 poly_input = s[:-1]  # Remove last character
+                print(f"Original polymer {i}: {poly_input}")
                 
                 # Validate format first
                 fixed_poly = validate_and_fix_polymer_format(poly_input)
@@ -821,95 +852,157 @@ class PropertyPrediction():
                     print(f"Skipping invalid polymer {i}: {poly_input}")
                     continue
                 
-                # Try to create graph with advanced error handling
+                print(f"Fixed polymer {i}: {fixed_poly}")
+                
+                # Try to create graph with enhanced error handling
                 try:
                     g = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                    print(f"Graph creation successful for polymer {i}")
                 except Exception as graph_error:
                     print(f"Graph creation failed for polymer {i}: {graph_error}")
+                    # Try alternative format
+                    try:
+                        # Simple fallback: use basic connectivity format
+                        parts = fixed_poly.split("|")
+                        if len(parts) >= 3:
+                            simplified_poly = f"{parts[0]}|{parts[1]}|<1-1:1.0:1.0"
+                            print(f"Trying simplified format: {simplified_poly}")
+                            g = poly_smiles_to_graph(simplified_poly, np.nan, np.nan, None)
+                            fixed_poly = simplified_poly
+                            print(f"Simplified format worked for polymer {i}")
+                        else:
+                            raise graph_error
+                    except:
+                        print(f"Both original and simplified formats failed for polymer {i}")
+                        continue
+                
+                # Tokenize with error handling
+                try:
+                    if tokenization == "oldtok":
+                        target_tokens = tokenize_poly_input(poly_input=fixed_poly)
+                    elif tokenization == "RT_tokenized":
+                        target_tokens = tokenize_poly_input_RTlike(poly_input=fixed_poly)
+                    
+                    print(f"Tokenization successful for polymer {i}: {len(target_tokens)} tokens")
+                    
+                    # Check if tokenization produced valid results
+                    if not target_tokens or len(target_tokens) == 0:
+                        print(f"Empty tokenization result for polymer {i}")
+                        continue
+                        
+                except Exception as token_error:
+                    print(f"Tokenization failed for polymer {i}: {token_error}")
+                    # Try alternative tokenization
+                    try:
+                        # Fallback: try the other tokenization method
+                        if tokenization == "RT_tokenized":
+                            target_tokens = tokenize_poly_input(poly_input=fixed_poly)
+                        else:
+                            target_tokens = tokenize_poly_input_RTlike(poly_input=fixed_poly)
+                        print(f"Alternative tokenization worked for polymer {i}")
+                    except:
+                        print(f"All tokenization methods failed for polymer {i}")
+                        continue
+                
+                # Convert tokens to features
+                try:
+                    tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
+                    
+                    # Validate token IDs
+                    if tgt_token_ids is None or len(tgt_token_ids) == 0:
+                        print(f"Invalid token IDs for polymer {i}")
+                        continue
+                        
+                    g.tgt_token_ids = tgt_token_ids
+                    g.tgt_lens = tgt_lens
+                    g.to(device)
+                    
+                    data_list.append(g)
+                    valid_indices.append(i)
+                    print(f"Successfully processed polymer {i}")
+                    
+                except Exception as feature_error:
+                    print(f"Feature conversion failed for polymer {i}: {feature_error}")
                     continue
-                
-                # Tokenize
-                if tokenization == "oldtok":
-                    target_tokens = tokenize_poly_input(poly_input=fixed_poly)
-                elif tokenization == "RT_tokenized":
-                    target_tokens = tokenize_poly_input_RTlike(poly_input=fixed_poly)
-                
-                tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=target_tokens, vocab=vocab)
-                g.tgt_token_ids = tgt_token_ids
-                g.tgt_lens = tgt_lens
-                g.to(device)
-                
-                data_list.append(g)
-                valid_indices.append(i)
-                
+                    
             except Exception as e:
-                print(f"Error processing polymer {i}: {e}")
+                print(f"Unexpected error processing polymer {i}: {e}")
+                print(f"Polymer string: {s}")
                 continue
+        
+        print(f"Successfully processed {len(data_list)} out of {len(prediction_strings)} polymers")
         
         if not data_list:
             print("No valid polymers to encode!")
             return [], [], [], None
         
-        print(f"Successfully processed {len(data_list)} valid polymers")
-        
         # Continue with encoding...
-        data_loader = DataLoader(dataset=data_list, batch_size=min(64, len(data_list)), shuffle=False)
-        dict_data_loader = MP_Matrix_Creator(data_loader, device)
-        
-        y_p = []
-        z_p = []
-        all_reconstructions = []
-        
-        with torch.no_grad():
-            for i, batch in enumerate(range(len(dict_data_loader))):
-                try:
-                    data = dict_data_loader[str(batch)][0]
-                    data.to(device)
-                    dest_is_origin_matrix = dict_data_loader[str(batch)][1]
-                    dest_is_origin_matrix.to(device)
-                    inc_edges_to_atom_matrix = dict_data_loader[str(batch)][2]
-                    inc_edges_to_atom_matrix.to(device)
+        try:
+            data_loader = DataLoader(dataset=data_list, batch_size=min(32, len(data_list)), shuffle=False)  # Smaller batch size
+            dict_data_loader = MP_Matrix_Creator(data_loader, device)
+            
+            y_p = []
+            z_p = []
+            all_reconstructions = []
+            
+            with torch.no_grad():
+                for i, batch in enumerate(range(len(dict_data_loader))):
+                    try:
+                        data = dict_data_loader[str(batch)][0]
+                        data.to(device)
+                        dest_is_origin_matrix = dict_data_loader[str(batch)][1]
+                        dest_is_origin_matrix.to(device)
+                        inc_edges_to_atom_matrix = dict_data_loader[str(batch)][2]
+                        inc_edges_to_atom_matrix.to(device)
 
-                    # Forward pass
-                    reconstruction, _, _, z, y = model.inference(
-                        data=data, device=device, 
-                        dest_is_origin_matrix=dest_is_origin_matrix, 
-                        inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, 
-                        sample=False, log_var=None
-                    )
-                    
-                    # Normalize property predictions
-                    y_normalized = self._normalize_property_predictions(y)
-                    
-                    # Check for NaN values
-                    if np.isnan(y_normalized).any():
-                        print(f"Warning: NaN detected in predictions for batch {i}")
-                        y_normalized = np.nan_to_num(y_normalized, nan=0.0)
-                    
-                    y_p.append(y_normalized)
-                    z_p.append(z.cpu().numpy())
-                    
-                    reconstruction_strings = [combine_tokens(tokenids_to_vocab(reconstruction[sample][0].tolist(), vocab), 
-                                                           tokenization=tokenization) for sample in range(len(reconstruction))]
-                    all_reconstructions.extend(reconstruction_strings)
-                    
-                except Exception as e:
-                    print(f"Error in batch {i}: {e}")
-                    continue
-        
-        # Flatten results with proper property handling
-        y_p_flat = []
-        for array_ in y_p:
-            for sublist in array_:
-                if isinstance(sublist, np.ndarray):
-                    y_p_flat.append(sublist.tolist())
-                else:
-                    y_p_flat.append(sublist)
-                    
-        z_p_flat = [sublist.tolist() for array_ in z_p for sublist in array_]
-        self.modified_solution = z_p_flat
+                        # Forward pass
+                        reconstruction, _, _, z, y = model.inference(
+                            data=data, device=device, 
+                            dest_is_origin_matrix=dest_is_origin_matrix, 
+                            inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, 
+                            sample=False, log_var=None
+                        )
+                        
+                        # Normalize property predictions
+                        y_normalized = self._normalize_property_predictions(y)
+                        
+                        # Check for NaN values
+                        if np.isnan(y_normalized).any():
+                            print(f"Warning: NaN detected in predictions for batch {i}")
+                            y_normalized = np.nan_to_num(y_normalized, nan=0.0)
+                        
+                        y_p.append(y_normalized)
+                        z_p.append(z.cpu().numpy())
+                        
+                        reconstruction_strings = [combine_tokens(tokenids_to_vocab(reconstruction[sample][0].tolist(), vocab), 
+                                                               tokenization=tokenization) for sample in range(len(reconstruction))]
+                        all_reconstructions.extend(reconstruction_strings)
+                        
+                        print(f"Batch {i} processed successfully: {len(reconstruction_strings)} reconstructions")
+                        
+                    except Exception as e:
+                        print(f"Error in batch {i}: {e}")
+                        continue
+            
+            # Flatten results with proper property handling
+            y_p_flat = []
+            for array_ in y_p:
+                for sublist in array_:
+                    if isinstance(sublist, np.ndarray):
+                        y_p_flat.append(sublist.tolist())
+                    else:
+                        y_p_flat.append(sublist)
+                        
+            z_p_flat = [sublist.tolist() for array_ in z_p for sublist in array_]
+            self.modified_solution = z_p_flat
 
-        return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
+            print(f"Encoding completed: {len(y_p_flat)} property predictions, {len(z_p_flat)} latent vectors, {len(all_reconstructions)} reconstructions")
+            
+            return y_p_flat, z_p_flat, all_reconstructions, dict_data_loader
+            
+        except Exception as e:
+            print(f"Error in encoding pipeline: {e}")
+            return [], [], [], None
 
 def save_checkpoint(optimizer, prop_predictor, iteration, checkpoint_dir, opt_run):
     """Save optimization checkpoint"""

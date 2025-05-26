@@ -60,7 +60,7 @@ def check_polymer_validity(mona_smiles, monb_smiles):
         
     return True, "Valid polymer structure"
 
-def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts):
+def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts, weights=None):
     """
     Create a proper attachment scheme based on monomer structures
     
@@ -68,22 +68,28 @@ def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts):
         is_homopolymer: Whether monomers are identical
         mona_pts: List of attachment point numbers in MonA
         monb_pts: List of attachment point numbers in MonB
+        weights: Connection weight values as tuple or list (a_weight, b_weight) or single value
+                Default is (0.5, 0.5) if not specified
     
     Returns:
         Connectivity string appropriate for the structure
     """
+    # Set default weights if not provided
+    if weights is None:
+        a_weight = b_weight = 0.5
+    elif isinstance(weights, (list, tuple)) and len(weights) >= 2:
+        a_weight = weights[0]
+        b_weight = weights[1]
+    else:
+        # Single value provided
+        a_weight = b_weight = weights
+    
     connectivity = ""
     
-    # For homopolymers, connect same positions between units
-    if is_homopolymer:
-        for a_pt in mona_pts:
-            for b_pt in monb_pts:
-                connectivity += f"<{a_pt}-{b_pt}:0.5:0.5"
-    else:
-        # For copolymers, connect all available positions
-        for a_pt in mona_pts:
-            for b_pt in monb_pts:
-                connectivity += f"<{a_pt}-{b_pt}:0.5:0.5"
+    # For homopolymers and copolymers, connect all available positions
+    for a_pt in mona_pts:
+        for b_pt in monb_pts:
+            connectivity += f"<{a_pt}-{b_pt}:{a_weight}:{b_weight}"
     
     return connectivity
 
@@ -117,7 +123,7 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     """
     Create properly formatted poly_chemprop_input string with chemical validity checks
     """
-    # FIX: Ensure stoichiometry uses decimal points not hyphens
+    # Ensure stoichiometry uses decimal points not hyphens
     if isinstance(stoich, str):
         stoich = stoich.replace('-', '.')
     
@@ -147,11 +153,30 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     
     # Use provided connectivity or generate appropriate scheme
     if connectivity is None:
-        connectivity = create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points)
+        # Parse stoichiometry to determine weights - default to 0.5 if parsing fails
+        try:
+            if isinstance(stoich, str) and '|' in stoich:
+                # Format like "0.7|0.3"
+                parts = stoich.split('|')
+                if len(parts) >= 2:
+                    weights = (float(parts[0]), float(parts[1]))
+                else:
+                    weights = 0.5
+            else:
+                weights = 0.5
+        except:
+            weights = 0.5
+            
+        connectivity = create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points, weights)
     
-    # Always ensure connectivity uses hyphens, not dots
+    # Always ensure connectivity format is correct (hyphens for connections, dots for weights)
     if connectivity is not None:
-        connectivity = connectivity.replace('.', '-')
+        # Ensure connection points use hyphens, not dots
+        connectivity = re.sub(r'<(\d+)\.(\d+):', r'<\1-\2:', connectivity)
+        
+        # Fix weight values - replace hyphens with dots in weight values
+        # This regex matches patterns like ":0-5:" and replaces them with ":0.5:"
+        connectivity = re.sub(r':(\d+)-(\d+):', r':\1.\2:', connectivity)
     
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
 
@@ -254,7 +279,7 @@ def interactive_column_selection(df, interactive=True):
             except:
                 print("Please enter valid numbers separated by commas")
     
-    # For choice == '3' (manual column entry), replace the existing code with:
+    # For choice == '3' (manual column entry)
     else:  # choice == '3'
         try:
             # Try to use ipywidgets for larger input box
@@ -367,7 +392,7 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     else:
         df['stoich'].fillna(stoichiometry, inplace=True)
         
-    # FIX: Replace hyphens with decimal points in stoichiometry values
+    # Replace hyphens with decimal points in stoichiometry values
     if 'stoich' in df.columns and df['stoich'].dtype == 'object':
         print("Fixing stoichiometry format: replacing hyphens with decimal points")
         df['stoich'] = df['stoich'].astype(str).str.replace('-', '.')
@@ -379,9 +404,9 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         # Replace null values with None rather than a string
         df['connectivity'] = df['connectivity'].where(pd.notnull(df['connectivity']), None)
         
-        # FIX: Make sure connectivity uses hyphens not dots
+        # Fix connectivity format - ensure connection points use hyphens, weights use dots
         df['connectivity'] = df['connectivity'].apply(
-            lambda x: x.replace('.', '-') if isinstance(x, str) else x
+            lambda x: fix_connectivity_format(x) if isinstance(x, str) else x
         )
     
     # Handle target columns
@@ -425,32 +450,29 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     columns_to_keep = ['poly_chemprop_input'] + final_target_columns
     df_final = df[columns_to_keep].copy()
     
-    # FIX: Final check for hyphens in the polymer string
+    # Final check for format issues
     print("Performing final check for format issues...")
-    def fix_polymer_format(poly_str):
-        if not isinstance(poly_str, str):
-            return poly_str
-            
-        parts = poly_str.split('|')
-        if len(parts) < 3:
-            return poly_str
-            
-        # Replace hyphens with dots in stoichiometry sections
-        for i in range(1, len(parts) - 1):  # Skip SMILES and connectivity sections
-            parts[i] = parts[i].replace('-', '.')
-            
-        # For connectivity part, ONLY replace dots between attachment points
-        # NOT in the numeric values
-        if len(parts) >= 3:
-            connectivity = parts[-1]
-            # Use regex to ONLY replace dots between numbers when they follow a < character
-            # This targets only the connection points (<1.3) not the weight values (0.5)
-            fixed_connectivity = re.sub(r'<(\d+)\.(\d+)', r'<\1-\2', connectivity)
-            parts[-1] = fixed_connectivity
-            
-        return '|'.join(parts)
-        
     df_final['poly_chemprop_input'] = df_final['poly_chemprop_input'].apply(fix_polymer_format)
+    
+    # Verify connectivity format
+    problematic_rows = []
+    for i, row in df_final.iterrows():
+        poly_str = row['poly_chemprop_input']
+        if isinstance(poly_str, str) and '|' in poly_str:
+            parts = poly_str.split('|')
+            if len(parts) >= 3:
+                connectivity = parts[-1]
+                # Check if there are any weight values with hyphens instead of dots
+                if re.search(r':(\d+)-(\d+):', connectivity):
+                    problematic_rows.append(poly_str)
+    
+    if problematic_rows:
+        print(f"Found {len(problematic_rows)} problematic rows")
+        print("First few problematic values:")
+        for i, row in enumerate(problematic_rows[:5]):
+            print(row)
+        print("Fixing connectivity format...")
+        df_final['poly_chemprop_input'] = df_final['poly_chemprop_input'].apply(fix_polymer_format)
     
     # Save to output file
     df_final.to_csv(output_file, index=False)
@@ -480,6 +502,44 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
         print(f"   Attachment points: {attachment_points}")
     
     return df_final, final_target_columns, column_mapping
+
+def fix_connectivity_format(connectivity_str):
+    """
+    Fixes connectivity format to ensure:
+    1. Connection points use hyphens (e.g., <1-3:)
+    2. Weight values use dots (e.g., :0.5:0.5)
+    """
+    if not connectivity_str:
+        return connectivity_str
+    
+    # First, ensure connection points use hyphens
+    formatted = re.sub(r'<(\d+)\.(\d+):', r'<\1-\2:', connectivity_str)
+    
+    # Then fix weight values - replace hyphens with dots
+    formatted = re.sub(r':(\d+)-(\d+):', r':\1.\2:', formatted)
+    
+    return formatted
+
+def fix_polymer_format(poly_str):
+    """
+    Fixes overall polymer format issues, particularly in connectivity patterns
+    """
+    if not isinstance(poly_str, str):
+        return poly_str
+        
+    parts = poly_str.split('|')
+    if len(parts) < 3:
+        return poly_str
+        
+    # Replace hyphens with dots in stoichiometry sections
+    for i in range(1, len(parts) - 1):  # Skip SMILES and connectivity sections
+        parts[i] = parts[i].replace('-', '.')
+        
+    # For connectivity part, fix format
+    if len(parts) >= 3:
+        parts[-1] = fix_connectivity_format(parts[-1])
+        
+    return '|'.join(parts)
 
 def main():
     parser = argparse.ArgumentParser(description='Preprocess polymer data for poly_chemprop with interactive target handling')

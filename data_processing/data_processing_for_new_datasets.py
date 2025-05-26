@@ -86,7 +86,7 @@ def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts, weights
     connectivity = ""
     for a_pt in mona_pts:
         for b_pt in monb_pts:
-            connectivity += f"<{a_pt}-{b_pt}:{a_weight:.4f}:{b_weight:.4f}"
+            connectivity += f"<{a_pt}-{b_pt}:{float(a_weight):.4f}:{float(b_weight):.4f}"
 
     return connectivity
 

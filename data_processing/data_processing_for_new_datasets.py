@@ -63,14 +63,14 @@ def check_polymer_validity(mona_smiles, monb_smiles):
 def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts, weights=None):
     """
     Create a proper attachment scheme based on monomer structures
-    
+
     Args:
         is_homopolymer: Whether monomers are identical
         mona_pts: List of attachment point numbers in MonA
         monb_pts: List of attachment point numbers in MonB
         weights: Connection weight values as tuple or list (a_weight, b_weight) or single value
-                Default is (0.5, 0.5) if not specified
-    
+                 Default is (0.5, 0.5) if not specified
+
     Returns:
         Connectivity string appropriate for the structure
     """
@@ -81,16 +81,13 @@ def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts, weights
         a_weight = weights[0]
         b_weight = weights[1]
     else:
-        # Single value provided
         a_weight = b_weight = weights
-    
+
     connectivity = ""
-    
-    # For homopolymers and copolymers, connect all available positions
     for a_pt in mona_pts:
         for b_pt in monb_pts:
-            connectivity += f"<{a_pt}-{b_pt}:{a_weight}:{b_weight}"
-    
+            connectivity += f"<{a_pt}-{b_pt}:{a_weight:.4f}:{b_weight:.4f}"
+
     return connectivity
 
 def prepare_homopolymer(monomer_smiles):
@@ -126,37 +123,28 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     # Ensure stoichiometry uses decimal points not hyphens
     if isinstance(stoich, str):
         stoich = stoich.replace('-', '.')
-    
+
     can_mona = canonicalize_smiles(mona)
-    
-    # Determine if this is a homopolymer
     is_homopolymer = (monb == mona)
-    
+
     if is_homopolymer:
-        # Handle homopolymer case
         can_mona, can_monb = prepare_homopolymer(can_mona)
     else:
-        # Different monomers - just canonicalize
         can_monb = canonicalize_smiles(monb)
-    
+
     if can_mona is None or can_monb is None:
         return None
-    
-    # Check if polymer structure is valid
+
     is_valid, _ = check_polymer_validity(can_mona, can_monb)
     if not is_valid:
         return None
-    
-    # Extract attachment points
+
     mona_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_mona)])
     monb_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_monb)])
-    
-    # Use provided connectivity or generate appropriate scheme
+
     if connectivity is None:
-        # Parse stoichiometry to determine weights - default to 0.5 if parsing fails
         try:
             if isinstance(stoich, str) and '|' in stoich:
-                # Format like "0.7|0.3"
                 parts = stoich.split('|')
                 if len(parts) >= 2:
                     weights = (float(parts[0]), float(parts[1]))
@@ -166,18 +154,9 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
                 weights = 0.5
         except:
             weights = 0.5
-            
+
         connectivity = create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points, weights)
-    
-    # Always ensure connectivity format is correct (hyphens for connections, dots for weights)
-    if connectivity is not None:
-        # Ensure connection points use hyphens, not dots
-        connectivity = re.sub(r'<(\d+)\.(\d+):', r'<\1-\2:', connectivity)
-        
-        # Fix weight values - replace hyphens with dots in weight values
-        # This regex matches patterns like ":0-5:" and replaces them with ":0.5:"
-        connectivity = re.sub(r':(\d+)-(\d+):', r':\1.\2:', connectivity)
-    
+
     return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
 
 def detect_target_columns(df, exclude_columns=None):

@@ -120,10 +120,7 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     """
     Create properly formatted poly_chemprop_input string with chemical validity checks
     """
-    # Ensure stoichiometry uses decimal points not hyphens
-    if isinstance(stoich, str):
-        stoich = stoich.replace('-', '.')
-
+    # Canonicalize monomers
     can_mona = canonicalize_smiles(mona)
     is_homopolymer = (monb == mona)
 
@@ -135,29 +132,37 @@ def make_poly_chemprop_input(mona, monb, stoich, connectivity=None):
     if can_mona is None or can_monb is None:
         return None
 
+    # Validate structure
     is_valid, _ = check_polymer_validity(can_mona, can_monb)
     if not is_valid:
         return None
 
+    # Extract attachment point numbers
     mona_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_mona)])
     monb_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_monb)])
 
-    if connectivity is None:
-        try:
-            if isinstance(stoich, str) and '|' in stoich:
-                parts = stoich.split('|')
-                if len(parts) >= 2:
-                    weights = (float(parts[0]), float(parts[1]))
-                else:
-                    weights = 0.5
-            else:
-                weights = 0.5
-        except:
-            weights = 0.5
+    # Sanitize stoichiometry values (e.g., replace "0-5" → "0.5")
+    if isinstance(stoich, str):
+        stoich_clean = stoich.replace('-', '.')
+    else:
+        stoich_clean = str(stoich)
 
+    # Determine weights
+    try:
+        parts = stoich_clean.split('|')
+        if len(parts) >= 2:
+            weights = (float(parts[0]), float(parts[1]))
+        else:
+            weights = 0.5
+    except:
+        weights = 0.5
+
+    # Build connectivity if not given
+    if connectivity is None:
         connectivity = create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points, weights)
 
-    return f"{can_mona}.{can_monb}|{stoich}|{connectivity}"
+    return f"{can_mona}.{can_monb}|{stoich_clean}|{connectivity}"
+
 
 def detect_target_columns(df, exclude_columns=None):
     """

@@ -68,27 +68,34 @@ def create_polymer_attachment_scheme(is_homopolymer, mona_pts, monb_pts, weights
         is_homopolymer: Whether monomers are identical
         mona_pts: List of attachment point numbers in MonA
         monb_pts: List of attachment point numbers in MonB
-        weights: Connection weight values as tuple or list (a_weight, b_weight) or single value
-                 Default is (0.5, 0.5) if not specified
+        weights: Tuple/list (a_weight, b_weight) or single float
 
     Returns:
         Connectivity string appropriate for the structure
     """
-    # Set default weights if not provided
+    # Default weights
     if weights is None:
         a_weight = b_weight = 0.5
     elif isinstance(weights, (list, tuple)) and len(weights) >= 2:
-        a_weight = weights[0]
-        b_weight = weights[1]
+        a_weight, b_weight = float(weights[0]), float(weights[1])
     else:
-        a_weight = b_weight = weights
+        a_weight = b_weight = float(weights)
+
+    # ✅ Normalize weights
+    total = a_weight + b_weight
+    if total == 0:
+        # Avoid division by zero, fallback to equal weights
+        a_weight = b_weight = 0.5
+    else:
+        a_weight = a_weight / total
+        b_weight = b_weight / total
 
     connectivity = ""
     for a_pt in mona_pts:
         for b_pt in monb_pts:
-            connectivity += f"<{a_pt}-{b_pt}:{float(a_weight):.3f}:{float(b_weight):.3f}"
-
+            connectivity += f"<{a_pt}-{b_pt}:{a_weight:.3f}:{b_weight:.3f}"
     return connectivity
+
 
 def prepare_homopolymer(monomer_smiles):
     """

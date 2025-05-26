@@ -434,29 +434,7 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     columns_to_keep = ['poly_chemprop_input'] + final_target_columns
     df_final = df[columns_to_keep].copy()
     
-    # Final check for format issues
-    print("Performing final check for format issues...")
-    df_final['poly_chemprop_input'] = df_final['poly_chemprop_input'].apply(fix_polymer_format)
     
-    # Verify connectivity format
-    problematic_rows = []
-    for i, row in df_final.iterrows():
-        poly_str = row['poly_chemprop_input']
-        if isinstance(poly_str, str) and '|' in poly_str:
-            parts = poly_str.split('|')
-            if len(parts) >= 3:
-                connectivity = parts[-1]
-                # Check if there are any weight values with hyphens instead of dots
-                if re.search(r':(\d+)-(\d+):', connectivity):
-                    problematic_rows.append(poly_str)
-    
-    if problematic_rows:
-        print(f"Found {len(problematic_rows)} problematic rows")
-        print("First few problematic values:")
-        for i, row in enumerate(problematic_rows[:5]):
-            print(row)
-        print("Fixing connectivity format...")
-        df_final['poly_chemprop_input'] = df_final['poly_chemprop_input'].apply(fix_polymer_format)
     
     # Save to output file
     df_final.to_csv(output_file, index=False)
@@ -487,43 +465,6 @@ def preprocess_polymer_data(input_file, output_file, target_columns=None, column
     
     return df_final, final_target_columns, column_mapping
 
-def fix_connectivity_format(connectivity_str):
-    """
-    Fixes connectivity format to ensure:
-    1. Connection points use hyphens (e.g., <1-3:)
-    2. Weight values use dots (e.g., :0.5:0.5)
-    """
-    if not connectivity_str:
-        return connectivity_str
-    
-    # First, ensure connection points use hyphens
-    formatted = re.sub(r'<(\d+)\.(\d+):', r'<\1-\2:', connectivity_str)
-    
-    # Then fix weight values - replace hyphens with dots
-    formatted = re.sub(r':(\d+)-(\d+):', r':\1.\2:', formatted)
-    
-    return formatted
-
-def fix_polymer_format(poly_str):
-    """
-    Fixes overall polymer format issues, particularly in connectivity patterns
-    """
-    if not isinstance(poly_str, str):
-        return poly_str
-        
-    parts = poly_str.split('|')
-    if len(parts) < 3:
-        return poly_str
-        
-    # Replace hyphens with dots in stoichiometry sections
-    for i in range(1, len(parts) - 1):  # Skip SMILES and connectivity sections
-        parts[i] = parts[i].replace('-', '.')
-        
-    # For connectivity part, fix format
-    if len(parts) >= 3:
-        parts[-1] = fix_connectivity_format(parts[-1])
-        
-    return '|'.join(parts)
 
 def main():
     parser = argparse.ArgumentParser(description='Preprocess polymer data for poly_chemprop with interactive target handling')

@@ -83,11 +83,10 @@ if device.type == 'cuda':
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
-parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Add after beta parameter
-parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -98,6 +97,9 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
+parser.add_argument("--save_dir", type=str, required=True, help="Path to load model results from and save analysis to")
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to custom dataset files (will use default naming pattern if not specified)")
 
 # Add flexible property arguments for consistency with other scripts
 parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
@@ -130,11 +132,23 @@ if args.add_latent ==1:
 elif args.add_latent ==0:
     add_latent=False
 
-dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+# Handle dataset path flexibility
+if args.dataset_path:
+    # Use custom dataset path
+    train_data_path = os.path.join(args.dataset_path, f'dict_train_loader_{augment}_{tokenization}.pt')
+    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
+else:
+    # Use default paths
+    train_data_path = main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt'
+    vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+
+print(f"Loading training data from: {train_data_path}")
+print(f"Loading vocabulary from: {vocab_file_path}")
+
+dict_train_loader = torch.load(train_data_path)
 dataset_type = "test"
 data_augment ="old"
-vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
-vocab = load_vocab(vocab_file=vocab_file)
+vocab = load_vocab(vocab_file=vocab_file_path)
 
 # Include property info in model name for consistency with other scripts
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
@@ -204,13 +218,42 @@ for i in range(min(args.sample_analysis, len(cleaned_predictions))):
     
     print("-" * 80)
 
-# Load appropriate dataset based on augmentation type
-if augment == "original":
-    df = pd.read_csv(main_dir_path+'/data/dataset-poly_chemprop.csv')
-elif augment == "augmented":
-    df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop.csv')
+# Handle dataset CSV files with flexible paths
+if args.dataset_path:
+    # Look for CSV files in the dataset path first, then fall back to main data directory
+    csv_files = {
+        "original": "dataset-poly_chemprop.csv",
+        "augmented": "dataset-combined-poly_chemprop.csv"
+    }
+    
+    csv_file = csv_files.get(augment, csv_files["augmented"])
+    
+    # Try dataset path first
+    csv_path = os.path.join(args.dataset_path, csv_file)
+    if not os.path.exists(csv_path):
+        # Fall back to main data directory
+        csv_path = os.path.join(main_dir_path, 'data', csv_file)
+        print(f"CSV not found in dataset path, using: {csv_path}")
+    else:
+        print(f"Loading CSV from dataset path: {csv_path}")
 else:
-    raise ValueError(f"Unknown augment type: {augment}")
+    # Use default paths
+    if augment == "original":
+        csv_path = main_dir_path+'/data/dataset-poly_chemprop.csv'
+    elif augment == "augmented":
+        csv_path = main_dir_path+'/data/dataset-combined-poly_chemprop.csv'
+    else:
+        raise ValueError(f"Unknown augment type: {augment}")
+    print(f"Loading CSV from default path: {csv_path}")
+
+# Load appropriate dataset based on augmentation type
+if not os.path.exists(csv_path):
+    print(f"Warning: CSV file not found at {csv_path}")
+    print("Creating empty dataframe - novelty metrics will be affected")
+    df = pd.DataFrame(columns=['poly_chemprop_input'])
+else:
+    df = pd.read_csv(csv_path)
+    print(f"Loaded dataset CSV with {len(df)} entries")
 
 all_polymers_data= []
 all_train_polymers = []

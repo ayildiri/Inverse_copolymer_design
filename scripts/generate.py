@@ -48,10 +48,12 @@ parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"
                     help="Names of the properties used in the model")
 parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to custom dataset files (will use default naming pattern if not specified)")
 parser.add_argument("--save_properties", action="store_true",
                     help="Save predicted properties of generated molecules")
-# Add option to enforce homopolymer format
-parser.add_argument("--enforce_homopolymer", action="store_true",
+# FIXED: Add argument to control homopolymer enforcement with default=False
+parser.add_argument("--enforce_homopolymer", action="store_true", default=False,
                     help="Enforce homopolymer format in generated structures")
 
 args = parser.parse_args()
@@ -81,7 +83,21 @@ elif args.add_latent ==0:
 
 dataset_type = "test"
 data_augment = "old" # new or old
-dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+
+# Handle dataset path flexibility
+if args.dataset_path:
+    # Use custom dataset path
+    data_path = os.path.join(args.dataset_path, f'dict_test_loader_{augment}_{tokenization}.pt')
+    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
+else:
+    # Use default paths
+    data_path = main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt'
+    vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+
+print(f"Loading test data from: {data_path}")
+print(f"Loading vocabulary from: {vocab_file_path}")
+
+dict_test_loader = torch.load(data_path)
 
 num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
@@ -138,7 +154,7 @@ def process_generated_string(polymer_string, enforce_homopolymer=False):
 
 # Include property info in model name
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
-model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+property_str+'/'
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
 filepath = os.path.join(args.save_dir, model_name, "model_best_loss.pt")
 
@@ -173,11 +189,10 @@ if os.path.isfile(filepath):
     embedding_dimension = model_config['embedding_dim']
     model_config["max_alpha"] = args.max_alpha
     
-    vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
-    vocab = load_vocab(vocab_file=vocab_file)
+    vocab = load_vocab(vocab_file=vocab_file_path)
     
     if model_config['loss']=="wce":
-        class_weights = token_weights(vocab_file)
+        class_weights = token_weights(vocab_file_path)
         class_weights = torch.FloatTensor(class_weights)
         model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dimension,device,model_config,vocab,seed, loss_weights=class_weights, add_latent=add_latent)
     else: 

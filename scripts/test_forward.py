@@ -35,7 +35,7 @@ parser.add_argument("--augment", help="options: augmented, original", default="a
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
 parser.add_argument("--embedding_dim", type=int, help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
-parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])  # Added alpha parameter
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -48,16 +48,9 @@ parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
 parser.add_argument("--batch_size", type=int, default=64, help="Batch size for testing")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
-
-# Add flexible property arguments
-parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
-                    help="Names of the properties used in the model")
-parser.add_argument("--property_count", type=int, default=None,
-                    help="Number of properties (auto-detected from property_names if not specified)")
-
-# ADD THE DATASET_PATH ARGUMENT
-parser.add_argument("--dataset_path", type=str, default=None,
-                    help="Path to custom dataset files (will use default naming pattern if not specified)")
+parser.add_argument("--dataset_path", type=str, default=None, help="Path to custom dataset files")
+parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"], help="Names of the properties used in the model")
+parser.add_argument("--property_count", type=int, default=None, help="Number of properties (auto-detected from property_names if not specified)")
 
 args = parser.parse_args()
 
@@ -75,29 +68,26 @@ if len(property_names) != property_count:
 print(f"Testing model for {property_count} properties: {property_names}")
 
 seed = args.seed
-augment = args.augment #augmented or original
-tokenization = args.tokenization #oldtok or RT_tokenized
+augment = args.augment
+tokenization = args.tokenization
 if args.add_latent ==1:
     add_latent=True
 elif args.add_latent ==0:
     add_latent=False
 
 dataset_type = "train"
-data_augment = "old" # new or old
+data_augment = "old"
 
-# MODIFIED DATA LOADING LOGIC TO SUPPORT CUSTOM DATASET PATH
+# Handle dataset path configuration
 if args.dataset_path:
-    # Use custom dataset path
     data_path_prefix = os.path.join(args.dataset_path, f'dict_{{}}_loader_{augment}_{tokenization}.pt')
     vocab_file = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
     print(f"Using custom dataset path: {args.dataset_path}")
 else:
-    # Use default paths
     data_path_prefix = main_dir_path+'/data/dict_{}_loader_'+augment+'_'+tokenization+'.pt'
     vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
     print(f"Using default dataset path: {main_dir_path}/data/")
 
-# Load training data
 dict_train_loader = torch.load(data_path_prefix.format('train'))
 
 num_node_features = dict_train_loader['0'][0].num_node_features
@@ -142,8 +132,6 @@ if os.path.isfile(filepath):
     batch_size = model_config['batch_size']
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
-    
-    # Load vocabulary using the configured path
     vocab = load_vocab(vocab_file=vocab_file)
     
     if model_config['loss']=="wce":
@@ -194,7 +182,7 @@ if os.path.isfile(filepath):
         
         # Initialize lists for properties dynamically
         latents = []
-        properties_real = [[] for _ in range(property_count)]  # List of lists for each property
+        properties_real = [[] for _ in range(property_count)]
         y_p = []
         monomers = []
         stoichiometry = []
@@ -318,8 +306,6 @@ if os.path.isfile(filepath):
     print('='*60)
     
     dataset_type = "test"
-    
-    # MODIFIED TEST LOADER TO USE CONFIGURED PATH
     dict_test_loader = torch.load(data_path_prefix.format('test'))
     run_forward_pass(dict_test_loader, 'test')
 

@@ -66,8 +66,8 @@ parser.add_argument("--dataset_path", type=str, default=None,
                     help="Path to custom dataset files (will use default naming pattern if not specified)")
 parser.add_argument("--save_properties", action="store_true",
                     help="Save property predictions alongside reconstruction results")
-# Add argument to control homopolymer enforcement
-parser.add_argument("--enforce_homopolymer", action="store_true", default=True,
+# FIXED: Add argument to control homopolymer enforcement with default=False
+parser.add_argument("--enforce_homopolymer", action="store_true", default=False,
                     help="Enforce homopolymer format in predicted structures")
 
 args = parser.parse_args()

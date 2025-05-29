@@ -55,6 +55,10 @@ parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"
 parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
 
+# ADD THE DATASET_PATH ARGUMENT
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to custom dataset files (will use default naming pattern if not specified)")
+
 args = parser.parse_args()
 
 # Handle property configuration
@@ -80,7 +84,21 @@ elif args.add_latent ==0:
 
 dataset_type = "train"
 data_augment = "old" # new or old
-dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+
+# MODIFIED DATA LOADING LOGIC TO SUPPORT CUSTOM DATASET PATH
+if args.dataset_path:
+    # Use custom dataset path
+    data_path_prefix = os.path.join(args.dataset_path, f'dict_{{}}_loader_{augment}_{tokenization}.pt')
+    vocab_file = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
+    print(f"Using custom dataset path: {args.dataset_path}")
+else:
+    # Use default paths
+    data_path_prefix = main_dir_path+'/data/dict_{}_loader_'+augment+'_'+tokenization+'.pt'
+    vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    print(f"Using default dataset path: {main_dir_path}/data/")
+
+# Load training data
+dict_train_loader = torch.load(data_path_prefix.format('train'))
 
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
@@ -124,7 +142,8 @@ if os.path.isfile(filepath):
     batch_size = model_config['batch_size']
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
-    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    
+    # Load vocabulary using the configured path
     vocab = load_vocab(vocab_file=vocab_file)
     
     if model_config['loss']=="wce":
@@ -299,7 +318,9 @@ if os.path.isfile(filepath):
     print('='*60)
     
     dataset_type = "test"
-    dict_test_loader = torch.load(main_dir_path+'/data/dict_test_loader_'+augment+'_'+tokenization+'.pt')
+    
+    # MODIFIED TEST LOADER TO USE CONFIGURED PATH
+    dict_test_loader = torch.load(data_path_prefix.format('test'))
     run_forward_pass(dict_test_loader, 'test')
 
     print('\n' + '='*60)

@@ -37,11 +37,10 @@ if device.type == 'cuda':
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--augment", help="options: augmented, original", default="augmented", choices=["augmented", "original"])
-parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--tokenization", help="options: oldtok, RT_tokenized", default="oldtok", choices=["oldtok", "RT_tokenized"])
-parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to load model checkpoints from and save results to")
 parser.add_argument("--embedding_dim", help="latent dimension (equals word embedding dimension in this model)", default=32)
 parser.add_argument("--beta", default=1, help="option: <any number>, schedule", choices=["normalVAE","schedule"])
+parser.add_argument("--alpha", default="fixed", choices=["fixed","schedule"])
 parser.add_argument("--loss", default="ce", choices=["ce","wce"])
 parser.add_argument("--AE_Warmup", default=False, action='store_true')
 parser.add_argument("--seed", type=int, default=42)
@@ -52,6 +51,9 @@ parser.add_argument("--dec_layers", type=int, default=4)
 parser.add_argument("--max_beta", type=float, default=0.1)
 parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
+parser.add_argument("--save_dir", type=str, required=True, help="Path to load model results from and save plots to")
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to custom dataset files (will use default naming pattern if not specified)")
 parser.add_argument("--dim_red_type", default="pca", choices=["umap", "pca", "tsne"])
 
 # Add flexible property arguments
@@ -59,9 +61,6 @@ parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"
                     help="Names of the properties to visualize")
 parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
-
-# Add missing data_augment argument
-parser.add_argument("--data_augment", help="data augmentation type", default="old", choices=["old", "new"])
 
 args = parser.parse_args()
 
@@ -81,37 +80,34 @@ print(f"Creating plots for {property_count} properties: {property_names}")
 seed = args.seed
 augment = args.augment #augmented or original
 tokenization = args.tokenization #oldtok or RT_tokenized
-data_augment = args.data_augment  # FIX: Define data_augment from args
+data_augment = "old"  # Fixed value for consistency
 
 if args.add_latent ==1:
     add_latent=True
 elif args.add_latent ==0:
     add_latent=False
 
-# Load vocabulary - handle path flexibility
-if args.save_dir is not None:
-    # Try custom directory first
-    vocab_file = os.path.join(args.save_dir, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
-    if not os.path.exists(vocab_file):
-        # Fallback to default location
-        vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+# Handle vocabulary path flexibility
+if args.dataset_path:
+    # Use custom dataset path
+    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
 else:
-    vocab_file = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    # Use default path
+    vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
 
-print(f"Loading vocabulary from: {vocab_file}")
-vocab = load_vocab(vocab_file=vocab_file)
+print(f"Loading vocabulary from: {vocab_file_path}")
+vocab = load_vocab(vocab_file=vocab_file_path)
 
-# Include property info in model name
+# Include property info in model name for consistency
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+f'{data_augment}data_DecL={args.dec_layers}_beta={args.beta}_alpha={args.alpha}_maxbeta={args.max_beta}_maxalpha={args.max_alpha}eps={args.epsilon}_loss={args.loss}_augment={args.augment}_tokenization={args.tokenization}_AE_warmup={args.AE_Warmup}_init={args.initialization}_seed={args.seed}_add_latent={add_latent}_pp-guided={args.ppguided}_props={property_str}/'
 
 # Determine save directory
-if args.save_dir is not None:
-    dir_name = os.path.join(args.save_dir, model_name)
-else:
-    dir_name = os.path.join(main_dir_path, 'Checkpoints/', model_name)
+dir_name = os.path.join(args.save_dir, model_name)
 
 print(f"Model directory: {dir_name}")
+print(f"Dimensionality reduction method: {args.dim_red_type}")
+print(f"Properties to visualize: {property_names}")
 
 if not os.path.exists(dir_name):
     print(f"Error: Model directory does not exist: {dir_name}")
@@ -475,7 +471,6 @@ print(f"🎯 STARTING LATENT SPACE VISUALIZATION")
 print(f"Model directory: {dir_name}")
 print(f"Dimensionality reduction: {args.dim_red_type}")
 print(f"Properties to visualize: {property_names}")
-print(f"Data augmentation: {data_augment}")
 
 # Process train dataset
 figure_offset = process_dataset("train", dir_name, args.dim_red_type, 0)

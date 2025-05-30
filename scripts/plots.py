@@ -369,18 +369,79 @@ def create_stoichiometry_plots(z_embedded, stoichiometry, dataset_type, dim_red_
         
     print(f"⚖️ Creating stoichiometry plots...")
     
-    label_color_dict = {'0.5|0.5': '#e3342f',
-                        '0.25|0.75': '#f6993f',
-                        '0.75|0.25': '#ffed4a'}
-    all_labels = list(label_color_dict.keys())
-    all_colors = list(label_color_dict.values())
+    # Enhanced mapping to handle both fractional and ratio formats
+    label_color_dict = {
+        # Fractional format
+        '0.5|0.5': '#e3342f',
+        '0.25|0.75': '#f6993f', 
+        '0.75|0.25': '#ffed4a',
+        # Ratio format (pipe separated)
+        '1|1': '#e3342f',
+        '1|3': '#f6993f',
+        '3|1': '#ffed4a'
+    }
+    
+    # Standardized labels for display
+    ratio_labels = {'1:1': '#e3342f', '1:3': '#f6993f', '3:1': '#ffed4a'}
+    all_colors = list(ratio_labels.values())
+    all_labels = list(ratio_labels.keys())
     n_colors = len(all_colors)
     cm = LinearSegmentedColormap.from_list('custom_colormap', all_colors, N=n_colors)
-    labels = {'0.5|0.5':'1:1','0.25|0.75':'1:3','0.75|0.25':'3:1'}
-    all_labels = [labels[x] for x in all_labels]
 
-    # Get indices from color list for given labels
-    color_idx = [all_colors.index(label_color_dict[st]) for st in stoichiometry]
+    # Function to normalize stoichiometry format
+    def normalize_stoich(st):
+        """Convert any stoichiometry format to standard ratio format"""
+        try:
+            if '|' not in st:
+                return None
+                
+            parts = st.split('|')
+            if len(parts) != 2:
+                return None
+                
+            # Parse the numbers
+            a, b = float(parts[0]), float(parts[1])
+            
+            # Convert to standard ratios
+            if abs(a - b) < 0.1:  # Equal ratios (1:1)
+                return '1:1'
+            elif a < b:  # More B than A
+                if abs(a/b - 1/3) < 0.1:  # 1:3 ratio
+                    return '1:3'
+            else:  # More A than B  
+                if abs(b/a - 1/3) < 0.1:  # 3:1 ratio
+                    return '3:1'
+            
+            # Default to closest standard ratio
+            if a < b:
+                return '1:3'
+            else:
+                return '3:1'
+                
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    # Get indices from color list for given labels with error handling
+    color_idx = []
+    unknown_stoich = set()
+    
+    for st in stoichiometry:
+        # First try direct lookup
+        if st in label_color_dict:
+            color_idx.append(all_colors.index(label_color_dict[st]))
+        else:
+            # Try to normalize the format
+            normalized = normalize_stoich(st)
+            if normalized and normalized in ratio_labels:
+                color_idx.append(all_colors.index(ratio_labels[normalized]))
+            else:
+                # Unknown format - use default color (1:1)
+                color_idx.append(0)
+                unknown_stoich.add(st)
+    
+    if unknown_stoich:
+        print(f"⚠️ Warning: Unknown stoichiometry formats found: {unknown_stoich}")
+        print(f"   These will be plotted as 1:1 ratio")
 
     plt.figure(figure_offset, figsize=(10, 8))
     sc = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=2, c=color_idx, cmap=cm)
@@ -404,18 +465,79 @@ def create_connectivity_plots(z_embedded, connectivity_pattern, dataset_type, di
         
     print(f"🔗 Creating connectivity plots...")
     
-    label_color_dict = {'0.5': '#e3342f',
-                        '0.375': '#f6993f',
-                        '0.25': '#ffed4a'}
-    all_labels = list(label_color_dict.keys())
-    all_colors = list(label_color_dict.values())
+    # Enhanced mapping to handle different connectivity formats
+    label_color_dict = {
+        # Original float format
+        '0.5': '#e3342f',      # Alternating
+        '0.375': '#f6993f',    # Block  
+        '0.25': '#ffed4a',     # Random
+        # Alternative string formats
+        'alternating': '#e3342f',
+        'block': '#f6993f',
+        'random': '#ffed4a',
+        'alt': '#e3342f',
+        'blk': '#f6993f',
+        'rand': '#ffed4a'
+    }
+    
+    # Standard labels for display
+    standard_labels = {'Alternating': '#e3342f', 'Block': '#f6993f', 'Random': '#ffed4a'}
+    all_colors = list(standard_labels.values())
+    all_labels = list(standard_labels.keys())
     n_colors = len(all_colors)
     cm = LinearSegmentedColormap.from_list('custom_colormap', all_colors, N=n_colors)
-    labels = {'0.5':'Alternating','0.25':'Random','0.375':'Block'}
-    all_labels = [labels[x] for x in all_labels]
 
-    # Get indices from color list for given labels
-    color_idx = [all_colors.index(label_color_dict[st]) for st in connectivity_pattern]
+    # Function to normalize connectivity format
+    def normalize_connectivity(conn):
+        """Convert any connectivity format to standard type"""
+        try:
+            conn_str = str(conn).lower().strip()
+            
+            # Direct string matches
+            if conn_str in ['alternating', 'alt']:
+                return 'Alternating'
+            elif conn_str in ['block', 'blk']:
+                return 'Block' 
+            elif conn_str in ['random', 'rand']:
+                return 'Random'
+            
+            # Float value matches
+            try:
+                conn_float = float(conn_str)
+                if abs(conn_float - 0.5) < 0.05:
+                    return 'Alternating'
+                elif abs(conn_float - 0.375) < 0.05:
+                    return 'Block'
+                elif abs(conn_float - 0.25) < 0.05:
+                    return 'Random'
+            except ValueError:
+                pass
+                
+            return None
+        except:
+            return None
+
+    # Get indices from color list for given labels with error handling
+    color_idx = []
+    unknown_conn = set()
+    
+    for conn in connectivity_pattern:
+        # First try direct lookup
+        if str(conn) in label_color_dict:
+            color_idx.append(all_colors.index(label_color_dict[str(conn)]))
+        else:
+            # Try to normalize the format
+            normalized = normalize_connectivity(conn)
+            if normalized and normalized in standard_labels:
+                color_idx.append(all_colors.index(standard_labels[normalized]))
+            else:
+                # Unknown format - use default color (Alternating)
+                color_idx.append(0)
+                unknown_conn.add(str(conn))
+    
+    if unknown_conn:
+        print(f"⚠️ Warning: Unknown connectivity formats found: {unknown_conn}")
+        print(f"   These will be plotted as Alternating type")
 
     plt.figure(figure_offset, figsize=(10, 8))
     sc = plt.scatter(z_embedded[:, 0], z_embedded[:, 1], s=2, c=color_idx, cmap=cm)

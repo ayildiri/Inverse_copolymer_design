@@ -271,12 +271,12 @@ if os.path.isfile(filepath):
         # Save results
         print(f"Saving results for {dataset_name} set...")
         
-        # Save common results
-        with open(os.path.join(dir_name, f'stoichiometry_{dataset_name}'), 'wb') as f:
+        # Save common results with .pkl extensions
+        with open(os.path.join(dir_name, f'stoichiometry_{dataset_name}.pkl'), 'wb') as f:
             pickle.dump(stoichiometry, f)
-        with open(os.path.join(dir_name, f'connectivity_{dataset_name}'), 'wb') as f:
+        with open(os.path.join(dir_name, f'connectivity_{dataset_name}.pkl'), 'wb') as f:
             pickle.dump(connectivity_pattern, f)
-        with open(os.path.join(dir_name, f'monomers_{dataset_name}'), 'wb') as f:
+        with open(os.path.join(dir_name, f'monomers_{dataset_name}.pkl'), 'wb') as f:
             pickle.dump(monomers, f)
         with open(os.path.join(dir_name, f'latent_space_{dataset_name}.npy'), 'wb') as f:
             np.save(f, latent_space)

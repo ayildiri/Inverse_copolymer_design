@@ -275,6 +275,103 @@ class SequenceDecoder(nn.Module):
                 reduction="none"
             )
 
+    # 🔥 NEW VALIDATION METHODS
+    def validate_parentheses(self, smiles_tokens):
+        """Check if parentheses are balanced in current SMILES"""
+        paren_count = 0
+        for token in smiles_tokens:
+            if token == '(':
+                paren_count += 1
+            elif token == ')':
+                paren_count -= 1
+                if paren_count < 0:  # Too many closing
+                    return False
+        return True  # Allow unfinished sequences during generation
+
+    def validate_rings(self, smiles_tokens):
+        """Check if ring numbers appear properly"""
+        from collections import defaultdict
+        ring_counts = defaultdict(int)
+        
+        for token in smiles_tokens:
+            if token.isdigit():
+                ring_counts[token] += 1
+        
+        # During generation, allow incomplete rings but reject clear errors
+        for ring_num, count in ring_counts.items():
+            if count > 2:  # Ring opened and closed multiple times = error
+                return False
+        return True
+
+    def validate_length(self, current_length):
+        """Check if sequence length is within reasonable bounds"""
+        MAX_POLYMER_LENGTH = 300
+        return current_length < MAX_POLYMER_LENGTH
+
+    def is_valid_next_token(self, current_smiles_tokens, next_token_id):
+        """Check if adding next_token keeps SMILES valid"""
+        # Convert token ID to actual token string
+        next_token_str = self.inv_vocab.get(next_token_id, '')
+        
+        # Skip validation for special tokens
+        if next_token_str in ['_SOS', '_EOS', '_PAD', '_UNK']:
+            return True
+        
+        test_tokens = current_smiles_tokens + [next_token_str]
+        
+        # Check all validation rules
+        if not self.validate_parentheses(test_tokens):
+            return False
+        if not self.validate_rings(test_tokens):
+            return False
+        if not self.validate_length(len(test_tokens)):
+            return False
+        
+        return True
+
+    def get_current_tokens_from_predictions(self, predictions):
+        """Extract current SMILES tokens from beam search predictions"""
+        tokens = []
+        for token_id in predictions:
+            if isinstance(token_id, torch.Tensor):
+                token_id = token_id.item()
+            
+            if token_id == self.vocab.get("_EOS", -1):
+                break
+            
+            token = self.inv_vocab.get(token_id, '')
+            if token not in ['_SOS', '_PAD', '_UNK']:
+                tokens.append(token)
+        
+        return tokens
+
+    def filter_invalid_tokens(self, decode_strategy, log_probs):
+        """Filter out tokens that would create invalid SMILES"""
+        batch_size, vocab_size = log_probs.shape
+        filtered_log_probs = log_probs.clone()
+        
+        # Process each sequence in the batch
+        for batch_idx in range(batch_size):
+            # Get current tokens for this sequence
+            try:
+                if hasattr(decode_strategy, 'alive_seq') and len(decode_strategy.alive_seq) > batch_idx:
+                    current_tokens = self.get_current_tokens_from_predictions(decode_strategy.alive_seq[batch_idx])
+                elif hasattr(decode_strategy, 'current_predictions'):
+                    current_tokens = self.get_current_tokens_from_predictions(decode_strategy.current_predictions[batch_idx])
+                else:
+                    current_tokens = []  # First token case
+            except:
+                current_tokens = []  # Fallback for first token or errors
+            
+            # Check each possible next token
+            for token_id in range(vocab_size):
+                if not self.is_valid_next_token(current_tokens, token_id):
+                    # Set probability to very low value (effectively removing this option)
+                    filtered_log_probs[batch_idx, token_id] = float('-inf')
+        
+        return filtered_log_probs
+    # 🔥 END NEW VALIDATION METHODS
+
     def forward(self, graph_batch, z, loss_weights=None):
         """Forward pass of decoder
 
@@ -405,7 +502,7 @@ class SequenceDecoder(nn.Module):
         if fn_map_state is not None:
             self.Decoder.map_state(fn_map_state)
 
-        # (3) Begin decoding step by step:
+        # (3) Begin decoding step by step with validation:
         for step in range(decode_strategy.max_length):
             #decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
             decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)
@@ -417,6 +514,16 @@ class SequenceDecoder(nn.Module):
 
             scores = self.output_layer(dec_outs.squeeze(1))
             log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
+
+            # 🔥 NEW: Add validation-based filtering
+            if step > 0:  # Skip validation for first token (usually SOS)
+                try:
+                    log_probs = self.filter_invalid_tokens(decode_strategy, log_probs)
+                except Exception as e:
+                    # If validation fails, continue without filtering
+                    print(f"Warning: Validation filtering failed at step {step}: {e}")
+                    pass
+            # 🔥 END NEW VALIDATION
 
             decode_strategy.advance(log_probs, attn)
             

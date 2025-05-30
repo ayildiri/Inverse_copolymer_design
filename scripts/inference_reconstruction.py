@@ -10,6 +10,7 @@ import torch
 import pickle
 import argparse
 import numpy as np
+import time
 
 
 # Necessary lists
@@ -70,6 +71,12 @@ parser.add_argument("--save_properties", action="store_true",
 parser.add_argument("--enforce_homopolymer", action="store_true", default=False,
                     help="Enforce homopolymer format in predicted structures")
 
+# 🔥 NEW: Add debugging and performance arguments
+parser.add_argument("--test_batches", type=int, default=None,
+                    help="Limit number of batches for quick testing (e.g., 10 for fast test)")
+parser.add_argument("--verbose", action="store_true", default=False,
+                    help="Enable verbose progress reporting")
+
 args = parser.parse_args()
 
 # Handle property configuration
@@ -88,6 +95,10 @@ if args.save_properties:
     print("Property predictions will be saved alongside reconstruction results")
 if args.enforce_homopolymer:
     print("Homopolymer format will be enforced on all predictions")
+if args.test_batches:
+    print(f"🔍 TESTING MODE: Only processing first {args.test_batches} batches")
+if args.verbose:
+    print("🔍 VERBOSE MODE: Detailed progress reporting enabled")
 
 seed = args.seed
 augment = args.augment #augmented or original
@@ -307,6 +318,15 @@ if os.path.isfile(filepath):
 
     # Run over all batches
     batches = list(range(len(dict_test_loader)))
+    
+    # 🔥 NEW: Limit batches for testing if specified
+    if args.test_batches:
+        original_batch_count = len(batches)
+        batches = batches[:args.test_batches]
+        print(f"🔍 LIMITED TESTING: Processing {len(batches)}/{original_batch_count} batches for quick testing")
+    
+    print(f"📊 Total batches to process: {len(batches)}")
+    
     vocab = load_vocab(vocab_file=vocab_file_path)
 
     # Initialize property storage if saving properties
@@ -314,10 +334,34 @@ if os.path.isfile(filepath):
         all_property_predictions = [[] for _ in range(property_count)]
         all_real_properties = [[] for _ in range(property_count)]
 
+    # 🔥 NEW: Progress tracking variables
+    start_time = time.time()
+    batch_times = []
+    
     ### INFERENCE ###
+    print("\n🚀 Starting inference...")
+    print("=" * 80)
+    
     with torch.no_grad():
         model.eval()
-        for batch in batches:
+        for batch_idx, batch in enumerate(batches):
+            batch_start_time = time.time()
+            
+            # 🔥 NEW: Progress reporting
+            if batch_idx % 10 == 0 or args.verbose:
+                elapsed_time = time.time() - start_time
+                if batch_idx > 0:
+                    avg_batch_time = elapsed_time / batch_idx
+                    estimated_total_time = avg_batch_time * len(batches)
+                    remaining_time = estimated_total_time - elapsed_time
+                    print(f"📍 Batch [{batch_idx:4d}/{len(batches):4d}] ({100*batch_idx/len(batches):5.1f}%) | "
+                          f"Elapsed: {elapsed_time/60:.1f}min | ETA: {remaining_time/60:.1f}min")
+                else:
+                    print(f"📍 Batch [{batch_idx:4d}/{len(batches):4d}] - Starting...")
+            
+            if args.verbose:
+                print(f"  🔍 Loading batch data...")
+            
             data = dict_test_loader[str(batch)][0]
             data.to(device)
             dest_is_origin_matrix = dict_test_loader[str(batch)][1]
@@ -326,7 +370,13 @@ if os.path.isfile(filepath):
             inc_edges_to_atom_matrix.to(device)
             model.beta = 1.0
             
+            if args.verbose:
+                print(f"  🔍 Running model inference...")
+            
             predictions, _, _, z, y_pred = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
+            
+            if args.verbose:
+                print(f"  🔍 Processing predictions...")
             
             # Convert predictions to strings
             prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
@@ -351,6 +401,35 @@ if os.path.isfile(filepath):
                 real_props = extract_properties_from_data(data)
                 for i, prop_vals in enumerate(real_props):
                     all_real_properties[i].append(prop_vals)
+            
+            # 🔥 NEW: Track batch timing
+            batch_time = time.time() - batch_start_time
+            batch_times.append(batch_time)
+            
+            if args.verbose:
+                print(f"  ✅ Batch {batch_idx} completed in {batch_time:.2f}s")
+            
+            # 🔥 NEW: Memory management for large datasets
+            if batch_idx % 50 == 0 and batch_idx > 0:
+                torch.cuda.empty_cache()  # Clear GPU cache periodically
+                if args.verbose:
+                    print(f"  🧹 GPU cache cleared")
+
+    # 🔥 NEW: Final timing report
+    total_time = time.time() - start_time
+    avg_batch_time = np.mean(batch_times) if batch_times else 0
+    
+    print("=" * 80)
+    print(f"✅ INFERENCE COMPLETED!")
+    print(f"⏱️  Total time: {total_time/60:.1f} minutes")
+    print(f"📊 Average batch time: {avg_batch_time:.2f} seconds")
+    print(f"🎯 Processed {len(batches)} batches, {len(all_predictions)} total samples")
+    
+    if args.test_batches:
+        full_time_estimate = (total_time / len(batches)) * len(dict_test_loader)
+        print(f"📈 Estimated full dataset time: {full_time_estimate/60:.1f} minutes")
+    
+    print("=" * 80)
 
     print(f'Saving inference results')
     print(f'Total predictions: {len(all_predictions)}')
@@ -438,6 +517,10 @@ if os.path.isfile(filepath):
     print(f'Model properties: {property_names}')
     if args.save_properties:
         print(f'Property predictions saved for: {property_names}')
+    if args.test_batches:
+        print(f'🔍 THIS WAS A LIMITED TEST - only {args.test_batches} batches processed')
+        print(f'To run full inference, remove --test_batches argument')
+    print(f'⏱️  Total processing time: {total_time/60:.1f} minutes')
     print(f'=========================')
 
 else: 

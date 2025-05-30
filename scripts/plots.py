@@ -82,10 +82,10 @@ augment = args.augment #augmented or original
 tokenization = args.tokenization #oldtok or RT_tokenized
 data_augment = "old"  # Fixed value for consistency
 
-if args.add_latent ==1:
-    add_latent=True
-elif args.add_latent ==0:
-    add_latent=False
+if args.add_latent == 1:
+    add_latent = True
+elif args.add_latent == 0:
+    add_latent = False
 
 # Handle vocabulary path flexibility
 if args.dataset_path:
@@ -93,14 +93,14 @@ if args.dataset_path:
     vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
 else:
     # Use default path
-    vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    vocab_file_path = main_dir_path + '/data/poly_smiles_vocab_' + augment + '_' + tokenization + '.txt'
 
 print(f"Loading vocabulary from: {vocab_file_path}")
 vocab = load_vocab(vocab_file=vocab_file_path)
 
 # Include property info in model name for consistency
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
-model_name = 'Model_'+f'{data_augment}data_DecL={args.dec_layers}_beta={args.beta}_alpha={args.alpha}_maxbeta={args.max_beta}_maxalpha={args.max_alpha}eps={args.epsilon}_loss={args.loss}_augment={args.augment}_tokenization={args.tokenization}_AE_warmup={args.AE_Warmup}_init={args.initialization}_seed={args.seed}_add_latent={add_latent}_pp-guided={args.ppguided}_props={property_str}/'
+model_name = 'Model_' + f'{data_augment}data_DecL={args.dec_layers}_beta={args.beta}_alpha={args.alpha}_maxbeta={args.max_beta}_maxalpha={args.max_alpha}eps={args.epsilon}_loss={args.loss}_augment={args.augment}_tokenization={args.tokenization}_AE_warmup={args.AE_Warmup}_init={args.initialization}_seed={args.seed}_add_latent={add_latent}_pp-guided={args.ppguided}_props={property_str}/'
 
 # Determine save directory
 dir_name = os.path.join(args.save_dir, model_name)
@@ -119,38 +119,56 @@ if not os.path.exists(dir_name):
                 print(f"  {item}")
     exit(1)
 
+def safe_file_load(file_path, file_type="pickle", description="file"):
+    """Safely load a file with proper error handling."""
+    if not os.path.exists(file_path):
+        print(f"⚠️ Warning: {description} not found: {file_path}")
+        return None
+    
+    try:
+        if file_type == "pickle":
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+        elif file_type == "numpy":
+            data = np.load(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+        
+        print(f"✅ Loaded {description}: {file_path}")
+        return data
+    except Exception as e:
+        print(f"❌ Error loading {description}: {e}")
+        return None
+
 def load_property_data(dataset_type, dir_name, property_count):
     """Load property data dynamically based on property count."""
     print(f"\n📊 Loading {dataset_type} dataset...")
     
     # Load latent space
     latent_file = os.path.join(dir_name, f'latent_space_{dataset_type}.npy')
-    if not os.path.exists(latent_file):
-        print(f"❌ Error: Latent space file not found: {latent_file}")
+    latent_space = safe_file_load(latent_file, "numpy", f"latent space for {dataset_type}")
+    if latent_space is None:
         return None, None, None, None, None, None
-        
-    with open(latent_file, 'rb') as f:
-        latent_space = np.load(f)
-        print(f"✅ Loaded latent space: {latent_space.shape}")
+    
+    print(f"✅ Loaded latent space: {latent_space.shape}")
 
     # Load real property values (y1_all, y2_all, ...)
     properties_real = []
     for i in range(property_count):
         y_file = os.path.join(dir_name, f'y{i+1}_all_{dataset_type}.npy')
-        if os.path.exists(y_file):
-            with open(y_file, 'rb') as f:
-                prop_data = np.load(f)
-                properties_real.append(prop_data)
+        prop_data = safe_file_load(y_file, "numpy", f"{property_names[i]} real values for {dataset_type}")
+        
+        if prop_data is not None:
+            properties_real.append(prop_data)
             print(f"✅ Loaded {property_names[i]} real values: {prop_data.shape}")
         else:
-            print(f"⚠️ Warning: Real property file not found: {y_file}")
             properties_real.append(np.array([]))
 
     # Load predicted property values (yp_all)
     yp_file = os.path.join(dir_name, f'yp_all_{dataset_type}.npy')
-    if os.path.exists(yp_file):
-        with open(yp_file, 'rb') as f:
-            yp_all = np.load(f)
+    yp_all = safe_file_load(yp_file, "numpy", f"predicted values for {dataset_type}")
+    
+    if yp_all is not None:
         print(f"✅ Loaded predicted values: {yp_all.shape}")
         
         # Extract individual property predictions
@@ -162,88 +180,100 @@ def load_property_data(dataset_type, dir_name, property_count):
                 print(f"⚠️ Warning: Not enough properties in predicted data for {property_names[i]}")
                 properties_pred.append(np.array([]))
     else:
-        print(f"⚠️ Warning: Predicted property file not found: {yp_file}")
         properties_pred = [np.array([]) for _ in range(property_count)]
 
-    # Load other data with error handling
-    try:
-        with open(os.path.join(dir_name, f'monomers_{dataset_type}'), "rb") as f:
-            monomers = pickle.load(f)
-        print(f"✅ Loaded monomers data")
-    except FileNotFoundError:
-        print(f"⚠️ Warning: Monomers file not found")
+    # Load other data with proper extensions and error handling
+    monomers_file = os.path.join(dir_name, f'monomers_{dataset_type}.pkl')
+    monomers = safe_file_load(monomers_file, "pickle", f"monomers for {dataset_type}")
+    if monomers is None:
         monomers = []
         
-    try:
-        with open(os.path.join(dir_name, f'stoichiometry_{dataset_type}'), "rb") as f:
-            stoichiometry = pickle.load(f)
-        print(f"✅ Loaded stoichiometry data")
-    except FileNotFoundError:
-        print(f"⚠️ Warning: Stoichiometry file not found")
+    stoichiometry_file = os.path.join(dir_name, f'stoichiometry_{dataset_type}.pkl')
+    stoichiometry = safe_file_load(stoichiometry_file, "pickle", f"stoichiometry for {dataset_type}")
+    if stoichiometry is None:
         stoichiometry = []
         
-    try:
-        with open(os.path.join(dir_name, f'connectivity_{dataset_type}'), "rb") as f:
-            connectivity_pattern = pickle.load(f)
-        print(f"✅ Loaded connectivity data")
-    except FileNotFoundError:
-        print(f"⚠️ Warning: Connectivity file not found")
+    connectivity_file = os.path.join(dir_name, f'connectivity_{dataset_type}.pkl')
+    connectivity_pattern = safe_file_load(connectivity_file, "pickle", f"connectivity for {dataset_type}")
+    if connectivity_pattern is None:
         connectivity_pattern = []
 
     return latent_space, properties_real, properties_pred, monomers, stoichiometry, connectivity_pattern
 
 def perform_dimensionality_reduction(latent_space, dim_red_type, dataset_type, dir_name):
-    """Perform dimensionality reduction and save/load reducer."""
+    """Perform dimensionality reduction and save/load reducer with proper file extensions."""
     print(f"🔍 Performing {dim_red_type.upper()} dimensionality reduction...")
     
     if dim_red_type == "pca":
         if dataset_type == "train":
+            # Fit PCA on training data and save reducer
             reducer = PCA(n_components=2).fit(latent_space)
-            reducer_file = os.path.join(dir_name, f'{dim_red_type}_fitted_{dataset_type}')
-            with open(reducer_file, 'wb') as f:
-                pickle.dump(reducer, f)
-            z_embedded = reducer.transform(latent_space)
-            print(f"✅ Fitted PCA and saved to {reducer_file}")
-        else:
-            reducer_file = os.path.join(dir_name, f'{dim_red_type}_fitted_train')
+            reducer_file = os.path.join(dir_name, f'pca_fitted_train.pkl')
             try:
-                with open(reducer_file, 'rb') as f:
-                    reducer = pickle.load(f)
+                with open(reducer_file, 'wb') as f:
+                    pickle.dump(reducer, f)
+                print(f"✅ Fitted PCA and saved to {reducer_file}")
+            except Exception as e:
+                print(f"❌ Error saving PCA reducer: {e}")
+                return None
+                
+            z_embedded = reducer.transform(latent_space)
+        else:
+            # Load pre-fitted PCA for test data
+            reducer_file = os.path.join(dir_name, f'pca_fitted_train.pkl')
+            reducer = safe_file_load(reducer_file, "pickle", "PCA reducer")
+            if reducer is None:
+                print("❌ Error: You need to run with train dataset first to fit PCA!")
+                return None
+                
+            try:
                 z_embedded = reducer.transform(latent_space)
-                print(f"✅ Loaded PCA from {reducer_file}")
-            except FileNotFoundError:
-                print(f"❌ Error: PCA reducer not found at {reducer_file}")
-                print("You need to run with train dataset first!")
+                print(f"✅ Applied pre-fitted PCA from {reducer_file}")
+            except Exception as e:
+                print(f"❌ Error applying PCA transformation: {e}")
                 return None
     
     elif dim_red_type == "umap":
         if dataset_type == "train":
+            # Fit UMAP on training data and save reducer
             reducer = umap.UMAP(n_components=2, min_dist=0.5).fit(latent_space)
-            reducer_file = os.path.join(dir_name, f'umap_fitted_train_{dataset_type}')
-            with open(reducer_file, 'wb') as f:
-                pickle.dump(reducer, f)
-            z_embedded = reducer.embedding_
-            print(f"✅ Fitted UMAP and saved to {reducer_file}")
-        else:
-            reducer_file = os.path.join(dir_name, f'umap_fitted_train_train')
+            reducer_file = os.path.join(dir_name, f'umap_fitted_train.pkl')
             try:
-                with open(reducer_file, 'rb') as f:
-                    reducer = pickle.load(f)
+                with open(reducer_file, 'wb') as f:
+                    pickle.dump(reducer, f)
+                print(f"✅ Fitted UMAP and saved to {reducer_file}")
+            except Exception as e:
+                print(f"❌ Error saving UMAP reducer: {e}")
+                return None
+                
+            z_embedded = reducer.embedding_
+        else:
+            # Load pre-fitted UMAP for test data
+            reducer_file = os.path.join(dir_name, f'umap_fitted_train.pkl')
+            reducer = safe_file_load(reducer_file, "pickle", "UMAP reducer")
+            if reducer is None:
+                print("❌ Error: You need to run with train dataset first to fit UMAP!")
+                return None
+                
+            try:
                 z_embedded = reducer.transform(latent_space)
-                print(f"✅ Loaded UMAP from {reducer_file}")
-            except FileNotFoundError:
-                print(f"❌ Error: UMAP reducer not found at {reducer_file}")
-                print("You need to run with train dataset first!")
+                print(f"✅ Applied pre-fitted UMAP from {reducer_file}")
+            except Exception as e:
+                print(f"❌ Error applying UMAP transformation: {e}")
                 return None
     
     elif dim_red_type == "tsne":
         if dataset_type == "train":
+            # Compute t-SNE and save embedding
             reducer = TSNE(n_components=2, random_state=42)
             z_embedded = reducer.fit_transform(latent_space)
-            # Note: t-SNE doesn't have a transform method, so we save the embedding directly
-            embedding_file = os.path.join(dir_name, f'{dim_red_type}_embedding_{dataset_type}.npy')
-            np.save(embedding_file, z_embedded)
-            print(f"✅ Computed t-SNE and saved embedding to {embedding_file}")
+            embedding_file = os.path.join(dir_name, f'tsne_embedding_train.npy')
+            try:
+                np.save(embedding_file, z_embedded)
+                print(f"✅ Computed t-SNE and saved embedding to {embedding_file}")
+            except Exception as e:
+                print(f"❌ Error saving t-SNE embedding: {e}")
+                return None
         else:
             # For test set, we need to recompute t-SNE (it's not transformable)
             print("⚠️ Warning: t-SNE doesn't support transform - computing fresh embedding for test set")
@@ -274,9 +304,13 @@ def create_property_plots(z_embedded, properties_real, properties_pred, dataset_
         plt.title(f'{dataset_type.capitalize()} - {prop_name} Real Values')
         plt.subplots_adjust(left=0.15, right=0.85, top=0.85, bottom=0.15)
         save_path = os.path.join(dir_name, f'{dataset_type}_latent_{prop_name}_real_{dim_red_type}.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"✅ Saved: {save_path}")
+        try:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"✅ Saved: {save_path}")
+        except Exception as e:
+            print(f"❌ Error saving plot: {e}")
+            plt.close()
     
     # Create plots for predicted property values
     for i, (prop_name, prop_values) in enumerate(zip(property_names, properties_pred)):
@@ -294,9 +328,13 @@ def create_property_plots(z_embedded, properties_real, properties_pred, dataset_
         plt.title(f'{dataset_type.capitalize()} - {prop_name} Predicted Values')
         plt.subplots_adjust(left=0.15, right=0.85, top=0.85, bottom=0.15)
         save_path = os.path.join(dir_name, f'{dataset_type}_latent_{prop_name}_pred_{dim_red_type}.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"✅ Saved: {save_path}")
+        try:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"✅ Saved: {save_path}")
+        except Exception as e:
+            print(f"❌ Error saving plot: {e}")
+            plt.close()
 
 def create_monomer_plots(z_embedded, monomers, dataset_type, dim_red_type, dir_name, figure_offset):
     """Create monomer type plots."""
@@ -357,9 +395,13 @@ def create_monomer_plots(z_embedded, monomers, dataset_type, dim_red_type, dir_n
     plt.ylabel(f"{dim_red_type.upper()} 2")
     plt.title(f'{dataset_type.capitalize()} - Monomer A Types')
     save_path = os.path.join(dir_name, f'{dataset_type}_latent_Amonomers_{dim_red_type}.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✅ Saved: {save_path}")
+    try:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✅ Saved: {save_path}")
+    except Exception as e:
+        print(f"❌ Error saving monomer plot: {e}")
+        plt.close()
 
 def create_stoichiometry_plots(z_embedded, stoichiometry, dataset_type, dim_red_type, dir_name, figure_offset):
     """Create stoichiometry plots."""
@@ -453,9 +495,13 @@ def create_stoichiometry_plots(z_embedded, stoichiometry, dataset_type, dim_red_
     plt.ylabel(f"{dim_red_type.upper()} 2")
     plt.title(f'{dataset_type.capitalize()} - Stoichiometry')
     save_path = os.path.join(dir_name, f'{dataset_type}_latent_stoichiometry_{dim_red_type}.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✅ Saved: {save_path}")
+    try:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✅ Saved: {save_path}")
+    except Exception as e:
+        print(f"❌ Error saving stoichiometry plot: {e}")
+        plt.close()
 
 def create_connectivity_plots(z_embedded, connectivity_pattern, dataset_type, dim_red_type, dir_name, figure_offset):
     """Create connectivity plots."""
@@ -549,9 +595,13 @@ def create_connectivity_plots(z_embedded, connectivity_pattern, dataset_type, di
     plt.ylabel(f"{dim_red_type.upper()} 2")
     plt.title(f'{dataset_type.capitalize()} - Connectivity')
     save_path = os.path.join(dir_name, f'{dataset_type}_latent_connectivity_{dim_red_type}.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"✅ Saved: {save_path}")
+    try:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✅ Saved: {save_path}")
+    except Exception as e:
+        print(f"❌ Error saving connectivity plot: {e}")
+        plt.close()
 
 def process_dataset(dataset_type, dir_name, dim_red_type, figure_offset=0):
     """Process one dataset (train or test)."""

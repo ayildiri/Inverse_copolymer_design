@@ -101,6 +101,10 @@ parser.add_argument("--save_dir", type=str, required=True, help="Path to load mo
 parser.add_argument("--dataset_path", type=str, default=None,
                     help="Path to custom dataset files (will use default naming pattern if not specified)")
 
+# NEW: Add flexible CSV path argument
+parser.add_argument("--csv_path", type=str, default=None,
+                    help="Direct path to the CSV file to use for novelty metrics. Overrides dataset_path CSV discovery.")
+
 # Add flexible property arguments for consistency with other scripts
 parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
                     help="Names of the properties (used for model identification)")
@@ -218,9 +222,13 @@ for i in range(min(args.sample_analysis, len(cleaned_predictions))):
     
     print("-" * 80)
 
-# Handle dataset CSV files with flexible paths
-if args.dataset_path:
-    # Look for CSV files in the dataset path first, then fall back to main data directory
+# UPDATED: Handle CSV file path with flexible options
+if args.csv_path:
+    # Option 1: Direct CSV path specified
+    csv_path = args.csv_path
+    print(f"Using directly specified CSV path: {csv_path}")
+elif args.dataset_path:
+    # Option 2: Dataset path specified - look for CSV files there first, then fall back
     csv_files = {
         "original": "dataset-poly_chemprop.csv",
         "augmented": "dataset-combined-poly_chemprop.csv"
@@ -237,7 +245,7 @@ if args.dataset_path:
     else:
         print(f"Loading CSV from dataset path: {csv_path}")
 else:
-    # Use default paths
+    # Option 3: Use default paths
     if augment == "original":
         csv_path = main_dir_path+'/data/dataset-poly_chemprop.csv'
     elif augment == "augmented":
@@ -246,7 +254,7 @@ else:
         raise ValueError(f"Unknown augment type: {augment}")
     print(f"Loading CSV from default path: {csv_path}")
 
-# Load appropriate dataset based on augmentation type
+# Load appropriate dataset based on discovered CSV path
 if not os.path.exists(csv_path):
     print(f"Warning: CSV file not found at {csv_path}")
     print("Creating empty dataframe - novelty metrics will be affected")
@@ -480,12 +488,13 @@ metrics_filename = f'generated_polymers_metrics_{properties_suffix}.txt'
 examples_filename = f'generated_polymers_examples_{properties_suffix}.txt'
 errors_filename = f'generated_polymers_errors_{properties_suffix}.txt'
 
-# Save metrics with property context
+# Save metrics with property context and CSV path info
 with open(os.path.join(dir_name, metrics_filename), 'w') as f:
     f.write(f"Generated Polymer Metrics\n")
     f.write(f"Model Properties: {', '.join(property_names)}\n")
     f.write(f"Property Count: {property_count}\n")
-    f.write(f"Total Generated Polymers: {len(all_predictions)}\n\n")
+    f.write(f"Total Generated Polymers: {len(all_predictions)}\n")
+    f.write(f"CSV used for novelty comparison: {csv_path}\n\n")
     f.write("="*50 + "\n")
     f.write("VALIDITY METRICS:\n")
     f.write("-"*20 + "\n")
@@ -587,6 +596,7 @@ print(f"Total generated: {len(all_predictions)}")
 print(f"Overall validity: {100*validity:.2f}%")
 print(f"Monomer A validity: {100*validityA:.2f}%")
 print(f"Monomer B validity: {100*validityB:.2f}%")
+print(f"CSV used for novelty: {csv_path}")
 
 print("\nCommon error categories:")
 for category, count in error_categories.items():

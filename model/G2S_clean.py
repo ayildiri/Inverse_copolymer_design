@@ -275,7 +275,7 @@ class SequenceDecoder(nn.Module):
                 reduction="none"
             )
 
-    # 🔥 NEW VALIDATION METHODS
+    # 🔥 OPTIMIZED VALIDATION METHODS
     def validate_parentheses(self, smiles_tokens):
         """Check if parentheses are balanced in current SMILES"""
         paren_count = 0
@@ -345,10 +345,16 @@ class SequenceDecoder(nn.Module):
         
         return tokens
 
-    def filter_invalid_tokens(self, decode_strategy, log_probs):
-        """Filter out tokens that would create invalid SMILES"""
+    def filter_invalid_tokens_optimized(self, decode_strategy, log_probs):
+        """OPTIMIZED: Filter out tokens that would create invalid SMILES"""
         batch_size, vocab_size = log_probs.shape
         filtered_log_probs = log_probs.clone()
+        
+        # 🔥 OPTIMIZATION 1: Only check top-K most likely tokens
+        TOP_K_TOKENS = 100  # Reduced from full vocab (~1000+ tokens)
+        
+        # Get top-k tokens for each batch to reduce computation
+        top_k_probs, top_k_indices = torch.topk(log_probs, min(TOP_K_TOKENS, vocab_size), dim=1)
         
         # Process each sequence in the batch
         for batch_idx in range(batch_size):
@@ -363,14 +369,16 @@ class SequenceDecoder(nn.Module):
             except:
                 current_tokens = []  # Fallback for first token or errors
             
-            # Check each possible next token
-            for token_id in range(vocab_size):
-                if not self.is_valid_next_token(current_tokens, token_id):
-                    # Set probability to very low value (effectively removing this option)
+            # 🔥 OPTIMIZATION 2: Only validate top-k tokens instead of all vocab
+            top_k_batch_indices = top_k_indices[batch_idx]
+            
+            for i, token_id in enumerate(top_k_batch_indices):
+                if not self.is_valid_next_token(current_tokens, token_id.item()):
+                    # Set probability to very low value for invalid tokens
                     filtered_log_probs[batch_idx, token_id] = float('-inf')
         
         return filtered_log_probs
-    # 🔥 END NEW VALIDATION METHODS
+    # 🔥 END OPTIMIZED VALIDATION METHODS
 
     def forward(self, graph_batch, z, loss_weights=None):
         """Forward pass of decoder
@@ -502,7 +510,7 @@ class SequenceDecoder(nn.Module):
         if fn_map_state is not None:
             self.Decoder.map_state(fn_map_state)
 
-        # (3) Begin decoding step by step with validation:
+        # (3) Begin decoding step by step with OPTIMIZED validation:
         for step in range(decode_strategy.max_length):
             #decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
             decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)
@@ -515,15 +523,15 @@ class SequenceDecoder(nn.Module):
             scores = self.output_layer(dec_outs.squeeze(1))
             log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
 
-            # 🔥 NEW: Add validation-based filtering
-            if step > 0:  # Skip validation for first token (usually SOS)
+            # 🔥 OPTIMIZED: Add validation every 3rd step to balance speed vs quality
+            if step > 0 and step % 3 == 0:  # Validate every 3rd step instead of every step
                 try:
-                    log_probs = self.filter_invalid_tokens(decode_strategy, log_probs)
+                    log_probs = self.filter_invalid_tokens_optimized(decode_strategy, log_probs)
                 except Exception as e:
                     # If validation fails, continue without filtering
                     print(f"Warning: Validation filtering failed at step {step}: {e}")
                     pass
-            # 🔥 END NEW VALIDATION
+            # 🔥 END OPTIMIZED VALIDATION
 
             decode_strategy.advance(log_probs, attn)
             

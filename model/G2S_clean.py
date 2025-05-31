@@ -524,7 +524,7 @@ class SequenceDecoder(nn.Module):
             log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
 
             # 🔥 OPTIMIZED: Add validation every 3rd step to balance speed vs quality
-            if step > 0 and step % 3 == 0:  # Validate every 3rd step instead of every step
+            if step > 0:  # To validate every 3rd step instead of every step insert "and step % 3 == 0" 
                 try:
                     log_probs = self.filter_invalid_tokens_optimized(decode_strategy, log_probs)
                 except Exception as e:

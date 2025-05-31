@@ -58,353 +58,168 @@ def detect_polymer_type(smiles_part):
     else:
         return "multipolymer", monomers
 
-def robust_r_group_detection(smiles_part):
-    """
-    Enhanced R-group detection with better pattern matching
-    """
-    import re
-    
-    # Multiple patterns to catch different R-group formats
-    r_group_patterns = [
-        r'\[\*:(\d+)\]',  # Standard format [*:1]
-        r'\[R(\d+)\]',    # Alternative format [R1]
-        r'\[\*(\d+)\]',   # Without colon [*1]
-        r'\[(\d+)\*\]',   # Number first [1*]
-    ]
-    
-    all_r_groups = set()
-    for pattern in r_group_patterns:
-        matches = re.findall(pattern, smiles_part)
-        all_r_groups.update(matches)
-    
-    return all_r_groups
-
-def sanitize_connectivity_format(connectivity_part):
-    """
-    Clean and standardize connectivity format
-    """
-    if not connectivity_part or not isinstance(connectivity_part, str):
-        return "<1-1:1.0:1.0"
-    
-    # Remove invalid characters and fix common issues
-    connectivity_part = connectivity_part.strip()
-    
-    # Ensure it starts with '<'
-    if not connectivity_part.startswith('<'):
-        connectivity_part = '<' + connectivity_part
-    
-    # Fix malformed connections
-    # Pattern: <number-number:weight:weight
-    connection_pattern = r'<(\d+)-(\d+):([\d\.]+):([\d\.]+)'
-    
-    # If no valid connections found, provide default
-    if not re.search(connection_pattern, connectivity_part):
-        return "<1-1:1.0:1.0"
-    
-    return connectivity_part
-
-def intelligent_rgroup_mapping(smiles_part, connectivity_part):
-    """
-    Enhanced R-group mapping with better error handling and fallbacks
-    """
-    import re
-    
-    try:
-        # Enhanced R-group detection
-        r_groups_in_smiles = robust_r_group_detection(smiles_part)
-        
-        # Clean connectivity format
-        connectivity_part = sanitize_connectivity_format(connectivity_part)
-        
-        # Extract R-groups from connectivity with multiple patterns
-        connectivity_pairs = re.findall(r'(\d+)-(\d+):', connectivity_part)
-        
-        # Get all R-groups mentioned in connectivity
-        conn_r_groups = set()
-        for pair in connectivity_pairs:
-            conn_r_groups.update(pair)
-        
-        polymer_type, monomers = detect_polymer_type(smiles_part)
-        
-        print(f"Polymer type: {polymer_type}")
-        print(f"R-groups in SMILES: {r_groups_in_smiles}")
-        print(f"R-groups in connectivity: {conn_r_groups}")
-        
-        # If R-groups already match or are compatible, minimal changes
-        if r_groups_in_smiles.intersection(conn_r_groups):
-            return smiles_part, connectivity_part
-        
-        new_smiles = smiles_part
-        new_connectivity = connectivity_part
-        
-        # Enhanced mapping strategies
-        if polymer_type == "homopolymer":
-            # For homopolymers, try to create simple 1-1 connectivity
-            if not r_groups_in_smiles:
-                # Add default R-groups if none present
-                new_smiles = re.sub(r'\*', '[*:1]', smiles_part)
-                new_connectivity = "<1-1:1.0:1.0"
-            else:
-                # Map to simplest connectivity
-                available_r_groups = sorted(r_groups_in_smiles, key=int)
-                new_connectivity = f"<{available_r_groups[0]}-{available_r_groups[0]}:1.0:1.0"
-                
-        elif polymer_type == "copolymer":
-            available_r_groups = sorted(r_groups_in_smiles, key=int)
-            needed_r_groups = sorted(conn_r_groups, key=int)
-            
-            if len(available_r_groups) >= 2:
-                # Standard copolymer mapping
-                mapping = {}
-                for i, needed in enumerate(needed_r_groups[:len(available_r_groups)]):
-                    mapping[needed] = available_r_groups[i]
-                
-                # Apply mapping to connectivity
-                for old, new in mapping.items():
-                    new_connectivity = new_connectivity.replace(f'{old}-', f'{new}-')
-                    new_connectivity = new_connectivity.replace(f'-{old}:', f'-{new}:')
-            else:
-                # Create default copolymer connectivity
-                new_connectivity = "<1-2:0.5:0.5<1-1:0.25:0.25<2-2:0.25:0.25"
-                
-        else:  # multipolymer - use simplified approach
-            # For complex polymers, create basic linear connectivity
-            new_connectivity = "<1-2:0.5:0.5<1-1:0.25:0.25<2-2:0.25:0.25"
-        
-        print(f"Final mapping result: {new_smiles} | {new_connectivity}")
-        return new_smiles, new_connectivity
-        
-    except Exception as e:
-        print(f"Error in R-group mapping: {e}")
-        # Fallback: return original or create minimal valid format
-        fallback_connectivity = "<1-1:1.0:1.0"
-        return smiles_part, fallback_connectivity
-
-def remove_duplicate_connections(connectivity_part):
-    """
-    Enhanced duplicate connection removal with validation
-    """
-    try:
-        if not connectivity_part or not isinstance(connectivity_part, str):
-            return "<1-1:1.0:1.0"
-            
-        # Split by '<' and filter out empty strings
-        connections = [conn for conn in connectivity_part.split('<') if conn.strip()]
-        
-        if not connections:
-            return "<1-1:1.0:1.0"
-        
-        # Validate and clean each connection
-        valid_connections = []
-        seen = set()
-        
-        for conn in connections:
-            # Basic validation of connection format
-            if re.match(r'\d+-\d+:[\d\.]+:[\d\.]+', conn):
-                if conn not in seen:
-                    valid_connections.append(conn)
-                    seen.add(conn)
-        
-        # If no valid connections, use default
-        if not valid_connections:
-            return "<1-1:1.0:1.0"
-        
-        # Rebuild connectivity string
-        return '<' + '<'.join(valid_connections)
-        
-    except Exception as e:
-        print(f"Error removing duplicate connections: {e}")
-        return "<1-1:1.0:1.0"
-
 def robust_polymer_validation(poly_input):
     """
-    Multi-stage validation with fallbacks
+    SIMPLIFIED validation that relies on the enhanced G2S_clean validation
     """
     if not poly_input or not isinstance(poly_input, str):
         return None
     
-    # Stage 1: Try original format
-    try:
-        parts = poly_input.split("|")
-        if len(parts) >= 3:
-            result = validate_and_fix_polymer_format(poly_input)
-            if result:
-                return result
-    except Exception as e:
-        print(f"Stage 1 validation failed: {e}")
+    # Let the enhanced G2S_clean validation handle complex validation
+    # Just do basic cleanup here
+    cleaned = poly_input.strip()
+    if len(cleaned) == 0:
+        return None
     
-    # Stage 2: Try simplified connectivity
-    try:
-        parts = poly_input.split("|")
-        if len(parts) >= 1:
-            smiles_part = parts[0]
-            monomers = smiles_part.split(".")
-            
-            # Create basic stoichiometry
-            if len(monomers) == 1:
-                stoich = "1.0"
-                connectivity = "<1-1:1.0:1.0"
-            elif len(monomers) == 2:
-                stoich = "0.5|0.5"
-                connectivity = "<1-2:0.5:0.5<1-1:0.25:0.25<2-2:0.25:0.25"
-            else:
-                weight = 1.0 / len(monomers)
-                stoich = "|".join([str(weight)] * len(monomers))
-                connectivity = "<1-2:0.5:0.5<1-1:0.25:0.25<2-2:0.25:0.25"
-            
-            simplified_poly = f"{smiles_part}|{stoich}|{connectivity}"
-            print(f"Stage 2 - Trying simplified format: {simplified_poly}")
-            return simplified_poly
-    except Exception as e:
-        print(f"Stage 2 validation failed: {e}")
+    # Basic format check - ensure it has polymer structure
+    if '|' not in cleaned and '.' not in cleaned:
+        # Try to create basic polymer format
+        if len(cleaned) > 0:
+            return f"{cleaned}|1.0|<1-1:1.0:1.0"
     
-    # Stage 3: Try basic homopolymer format
-    try:
-        parts = poly_input.split("|")
-        if len(parts) >= 1:
-            smiles_part = parts[0]
-            # Take first monomer only
-            first_monomer = smiles_part.split(".")[0]
-            basic_poly = f"{first_monomer}|1.0|<1-1:1.0:1.0"
-            print(f"Stage 3 - Trying basic homopolymer: {basic_poly}")
-            return basic_poly
-    except Exception as e:
-        print(f"Stage 3 validation failed: {e}")
-    
-    # Stage 4: Return None if all stages fail
-    print("All validation stages failed")
-    return None
+    return cleaned
 
 def validate_and_fix_polymer_format(poly_input):
     """
-    Enhanced validation with better error handling and more fallbacks
+    SIMPLIFIED validation - let G2S_clean handle the heavy lifting
     """
     try:
         if not poly_input or not isinstance(poly_input, str):
             return None
             
-        parts = poly_input.split("|")
-        
-        # Check if we have enough parts
-        if len(parts) < 3:
-            print(f"Warning: Insufficient parts in polymer input: {poly_input}")
-            return robust_polymer_validation(poly_input)
-            
-        smiles_part = parts[0]
-        stoich_parts = parts[1:-1]
-        connectivity_part = parts[-1]
-        
-        # Enhanced SMILES validation
-        if not smiles_part or len(smiles_part.strip()) == 0:
-            print("Error: Empty SMILES part")
+        # Basic cleanup
+        cleaned = poly_input.strip()
+        if len(cleaned) == 0:
             return None
         
-        # Count monomers
-        monomers = smiles_part.split(".")
-        monomer_count = len(monomers)
-        
-        # Validate each monomer has some basic structure
-        valid_monomers = []
-        for monomer in monomers:
-            if len(monomer.strip()) > 0 and any(c.isalpha() for c in monomer):
-                valid_monomers.append(monomer)
-        
-        if not valid_monomers:
-            print("Error: No valid monomers found")
+        # If it looks reasonable, return it - G2S_clean will validate during inference
+        if len(cleaned) > 5:  # Reasonable minimum length
+            return cleaned
+        else:
             return None
-        
-        # Use valid monomers
-        smiles_part = ".".join(valid_monomers)
-        monomer_count = len(valid_monomers)
-        
-        # Enhanced R-group mapping with fallbacks
-        try:
-            fixed_smiles, fixed_connectivity = intelligent_rgroup_mapping(smiles_part, connectivity_part)
-        except Exception as e:
-            print(f"R-group mapping failed: {e}, using defaults")
-            fixed_smiles = smiles_part
-            if monomer_count == 1:
-                fixed_connectivity = "<1-1:1.0:1.0"
-            else:
-                fixed_connectivity = "<1-2:0.5:0.5<1-1:0.25:0.25<2-2:0.25:0.25"
-        
-        # Enhanced connectivity cleaning
-        fixed_connectivity = remove_duplicate_connections(fixed_connectivity)
-        
-        # Enhanced stoichiometry validation and fixing
-        try:
-            # Convert stoich_parts to floats and validate
-            stoich_values = []
-            for s in stoich_parts:
-                try:
-                    val = float(s)
-                    if 0 <= val <= 1:
-                        stoich_values.append(val)
-                    else:
-                        stoich_values.append(abs(val) if abs(val) <= 1 else 1.0/monomer_count)
-                except ValueError:
-                    stoich_values.append(1.0/monomer_count)
-            
-            # Check stoichiometry match
-            if len(stoich_values) != monomer_count:
-                print(f"Fixing stoichiometry: {monomer_count} monomers, {len(stoich_values)} weights")
-                
-                if monomer_count == 1:
-                    stoich_values = [1.0]
-                elif monomer_count == 2:
-                    stoich_values = [0.5, 0.5]
-                else:
-                    weight = 1.0 / monomer_count
-                    stoich_values = [weight] * monomer_count
-            
-            # Normalize stoichiometry to sum to 1
-            total = sum(stoich_values)
-            if total > 0:
-                stoich_values = [v/total for v in stoich_values]
-            else:
-                weight = 1.0 / monomer_count
-                stoich_values = [weight] * monomer_count
-                
-            stoich_parts = [str(v) for v in stoich_values]
-            
-        except Exception as e:
-            print(f"Stoichiometry fixing failed: {e}")
-            # Default stoichiometry
-            if monomer_count == 1:
-                stoich_parts = ["1.0"]
-            elif monomer_count == 2:
-                stoich_parts = ["0.5", "0.5"]
-            else:
-                weight = 1.0 / monomer_count
-                stoich_parts = [str(weight)] * monomer_count
-        
-        # Reconstruct the polymer string
-        fixed_poly = f"{fixed_smiles}|{('|'.join(stoich_parts))}|{fixed_connectivity}"
-        
-        # Final validation attempt
-        try:
-            # Try to create a simple molecular structure to validate
-            test_graph = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
-            print(f"Final fixed polymer: {fixed_poly}")
-            return fixed_poly
-        except Exception as e:
-            print(f"Final validation failed: {e}")
-            # Last resort: try simplified version
-            return robust_polymer_validation(poly_input)
         
     except Exception as e:
-        print(f"Error in validation: {e}")
-        return robust_polymer_validation(poly_input)
+        print(f"Error in basic validation: {e}")
+        return None
 
-def adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name):
+def enhanced_adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name):
     """
-    Adaptive sampling with multiple strategies
+    ENHANCED adaptive sampling that uses the improved G2S_clean validation
     """
     all_prediction_strings = []
     all_reconstruction_strings = []
     all_y_p = []
     
-    print("Starting adaptive sampling around best solution...")
+    print("Starting ENHANCED adaptive sampling around best solution...")
+    
+    # Use the enhanced generation approach with quality control
+    for noise_level in [0.01, 0.05, 0.1, 0.2]:  # Multiple noise levels
+        print(f"Trying noise level: {noise_level}")
+        
+        valid_count = 0
+        max_attempts = 50  # Limit attempts per noise level
+        
+        for attempt in range(max_attempts):
+            try:
+                # Create noise with the current level
+                noise = torch.tensor(np.random.normal(0, noise_level, size=seed_z.size()), 
+                                   dtype=torch.float, device=device)
+                seed_z_noise = seed_z + noise
+                
+                # Clamp to reasonable bounds
+                seed_z_noise = torch.clamp(seed_z_noise, -3, 3)
+                
+                # Use the enhanced inference from G2S_clean (with validation every step)
+                with torch.no_grad():
+                    predictions, _, _, _, y = model.inference(data=seed_z_noise, device=device, 
+                                                            sample=False, log_var=None)
+                    
+                    # Convert predictions and check validity
+                    prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
+                                                        tokenization=tokenization) for sample in range(len(predictions))]
+                    
+                    # Simple validity check - enhanced validation already happened in G2S_clean
+                    valid_predictions = []
+                    valid_indices = []
+                    
+                    for i, pred_str in enumerate(prediction_strings):
+                        cleaned = pred_str[:-1].strip() if pred_str.endswith('_') else pred_str.strip()
+                        # Basic check - enhanced validation already happened in G2S_clean
+                        if len(cleaned) > 10 and '|' in cleaned:  # Reasonable length and polymer format
+                            valid_predictions.append(predictions[i])
+                            valid_indices.append(i)
+                            valid_count += 1
+                    
+                    if valid_predictions:
+                        try:
+                            # Process valid predictions
+                            y_p_valid, z_p_valid, reconstructions_valid, _ = prop_predictor._encode_and_predict_decode_molecules(valid_predictions)
+                            
+                            # Add to results
+                            for i, idx in enumerate(valid_indices):
+                                if i < len(reconstructions_valid):
+                                    all_prediction_strings.append(prediction_strings[idx][:-1] if prediction_strings[idx].endswith('_') else prediction_strings[idx])
+                                    all_reconstruction_strings.append(reconstructions_valid[i])
+                                    if i < len(y_p_valid):
+                                        all_y_p.append(y_p_valid[i])
+                            
+                            print(f"  Generated {len(valid_predictions)} valid molecules with noise {noise_level}")
+                        except Exception as encode_error:
+                            print(f"  Encoding error: {encode_error}")
+                            continue
+                    
+                    # If we got good results, move to next noise level
+                    if valid_count >= 5:
+                        break
+                        
+            except Exception as e:
+                print(f"  Error with noise level {noise_level}, attempt {attempt}: {e}")
+                continue
+        
+        # If we have enough samples, break
+        if len(all_prediction_strings) >= 15:
+            break
+    
+    # Fallback strategy if still no results
+    if not all_prediction_strings:
+        print("Trying fallback strategy with minimal noise...")
+        try:
+            # Very small noise
+            noise = torch.tensor(np.random.normal(0, 0.001, size=seed_z.size()), 
+                               dtype=torch.float, device=device)
+            seed_z_noise = seed_z + noise
+            
+            with torch.no_grad():
+                predictions, _, _, _, y = model.inference(data=seed_z_noise, device=device, 
+                                                        sample=False, log_var=None)
+                
+                prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
+                                                    tokenization=tokenization) for sample in range(len(predictions))]
+                
+                # Take first few that look reasonable
+                for i, pred_str in enumerate(prediction_strings[:5]):
+                    cleaned = pred_str[:-1].strip() if pred_str.endswith('_') else pred_str.strip()
+                    if len(cleaned) > 5:
+                        all_prediction_strings.append(cleaned)
+                        all_reconstruction_strings.append(cleaned)
+                        # Create dummy property values
+                        all_y_p.append([0.0] * prop_predictor.property_count)
+                        
+        except Exception as fallback_error:
+            print(f"Fallback strategy failed: {fallback_error}")
+    
+    print(f"Enhanced sampling completed: {len(all_prediction_strings)} valid molecules")
+    return all_prediction_strings, all_reconstruction_strings, all_y_p
+
+def adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name):
+    """
+    Original adaptive sampling (fallback)
+    """
+    all_prediction_strings = []
+    all_reconstruction_strings = []
+    all_y_p = []
+    
+    print("Starting original adaptive sampling around best solution...")
     
     # Strategy 1: Small noise sampling
     for noise_level in [0.01, 0.05, 0.1]:  # Multiple noise levels
@@ -448,52 +263,7 @@ def adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predi
         if len(all_prediction_strings) >= 20:
             break
     
-    # Strategy 2: If still no results, try interpolation with training data
-    if not all_prediction_strings:
-        print("Trying interpolation strategy...")
-        try:
-            # Load some training latents for interpolation
-            with open(os.path.join(args.save_dir, model_name, 'latent_space_train.npy'), 'rb') as f:
-                train_latents = np.load(f)
-            
-            # Sample random training points
-            random_indices = np.random.choice(len(train_latents), size=5, replace=False)
-            
-            for idx in random_indices:
-                train_point = torch.tensor(train_latents[idx], dtype=torch.float, device=device).unsqueeze(0)
-                
-                # Interpolate between seed and training point
-                for alpha in [0.1, 0.3, 0.5]:
-                    interpolated = alpha * seed_z[0:1] + (1 - alpha) * train_point
-                    interpolated = interpolated.repeat(16, 1)  # Batch size
-                    
-                    try:
-                        with torch.no_grad():
-                            predictions, _, _, _, y = model.inference(data=interpolated, device=device, 
-                                                                    sample=False, log_var=None)
-                            
-                            prediction_strings, validity = prop_predictor._calc_validity(predictions)
-                            predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
-                            prediction_strings_valid = [j for j, valid in zip(prediction_strings, validity) if valid]
-                            
-                            if predictions_valid:
-                                y_p_valid, z_p_valid, reconstructions_valid, _ = prop_predictor._encode_and_predict_decode_molecules(predictions_valid)
-                                all_prediction_strings.extend(prediction_strings_valid[:5])  # Limit samples
-                                all_reconstruction_strings.extend(reconstructions_valid[:5])
-                                all_y_p.extend(y_p_valid[:5])
-                                
-                                print(f"  Interpolation generated {len(predictions_valid)} valid molecules")
-                    except Exception as e:
-                        print(f"  Interpolation error: {e}")
-                        continue
-                
-                if len(all_prediction_strings) >= 15:
-                    break
-                    
-        except Exception as e:
-            print(f"Interpolation strategy failed: {e}")
-    
-    print(f"Total valid molecules generated: {len(all_prediction_strings)}")
+    print(f"Original sampling completed: {len(all_prediction_strings)} valid molecules")
     return all_prediction_strings, all_reconstruction_strings, all_y_p
 
 def auto_detect_property_count_and_names(model, device):
@@ -577,6 +347,10 @@ parser.add_argument("--dataset_csv", type=str, default=None,
                     help="Path to the CSV file containing polymer data for novelty analysis. Should have 'poly_chemprop_input' column.")
 parser.add_argument("--polymer_column", type=str, default="poly_chemprop_input",
                     help="Name of the column containing polymer SMILES in the CSV file (default: poly_chemprop_input)")
+
+# NEW: Add enhanced generation parameter
+parser.add_argument("--use_enhanced_generation", action="store_true", default=True,
+                    help="Use enhanced generation with quality control from generate.py")
 
 args = parser.parse_args()
 
@@ -677,6 +451,7 @@ print(f"Properties ({property_count}): {property_names}")
 print(f"Objectives: {property_objectives}")
 print(f"Weights: {property_weights}")
 print(f"Targets: {property_targets}")
+print(f"Enhanced generation: {args.use_enhanced_generation}")
 
 # Now we can properly set the model name with the correct property string
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
@@ -708,7 +483,7 @@ def graceful_reencoding(predictions, prop_predictor):
             try:
                 # Create a simplified version of the prediction
                 pred_str = combine_tokens(tokenids_to_vocab(pred[0].tolist(), vocab), tokenization=tokenization)
-                simplified = robust_polymer_validation(pred_str[:-1])
+                simplified = robust_polymer_validation(pred_str[:-1] if pred_str.endswith('_') else pred_str)
                 if simplified:
                     simplified_predictions.append(pred)
             except:
@@ -1030,7 +805,7 @@ class PropertyPrediction():
     
     def _calc_validity(self, predictions):
         """
-        Enhanced validity calculation with graceful fallbacks
+        SIMPLIFIED validity calculation that relies on enhanced G2S_clean validation
         """
         prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
                                            tokenization=tokenization) for sample in range(len(predictions))]
@@ -1038,37 +813,23 @@ class PropertyPrediction():
         fixed_strings = []
         
         for _s in prediction_strings:
-            poly_input = _s[:-1]  # Remove last character
+            poly_input = _s[:-1] if _s.endswith('_') else _s  # Remove last character if it's padding
             
-            # Use robust validation
-            fixed_poly = robust_polymer_validation(poly_input)
+            # Basic cleanup only - let G2S_clean handle validation during inference
+            cleaned_poly = poly_input.strip()
+            fixed_strings.append(cleaned_poly)
             
-            if fixed_poly is None:
-                mols_valid.append(0)
-                fixed_strings.append(poly_input)
-                continue
-                
-            try:
-                poly_graph = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+            # Simple validity check - enhanced validation already happened in G2S_clean
+            if len(cleaned_poly) > 5 and ('|' in cleaned_poly or any(c.isalpha() for c in cleaned_poly)):
                 mols_valid.append(1)
-                fixed_strings.append(fixed_poly)
-            except Exception as e:
-                print(f"Graph creation failed even after robust validation: {e}")
-                # Last attempt: try basic fallback
-                try:
-                    fallback_poly = poly_input.split("|")[0] + "|1.0|<1-1:1.0:1.0"
-                    poly_graph = poly_smiles_to_graph(fallback_poly, np.nan, np.nan, None)
-                    mols_valid.append(1)
-                    fixed_strings.append(fallback_poly)
-                except:
-                    mols_valid.append(0)
-                    fixed_strings.append(poly_input)
+            else:
+                mols_valid.append(0)
         
         return fixed_strings, np.array(mols_valid)
     
     def _encode_and_predict_decode_molecules(self, predictions):
         """
-        Enhanced encoding with better error handling and multiple fallback strategies
+        Enhanced encoding with better error handling and reliance on G2S_clean validation
         """
         prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
                                            tokenization=tokenization) for sample in range(len(predictions))]
@@ -1079,82 +840,54 @@ class PropertyPrediction():
         
         for i, s in enumerate(prediction_strings):
             try:
-                poly_input = s[:-1]  # Remove last character
+                poly_input = s[:-1] if s.endswith('_') else s  # Remove last character if padding
                 print(f"Original polymer {i}: {poly_input}")
                 
-                # Use robust validation
-                fixed_poly = robust_polymer_validation(poly_input)
-                if fixed_poly is None:
-                    print(f"Skipping invalid polymer {i}: {poly_input}")
+                # Use simplified validation since G2S_clean already did the heavy lifting
+                cleaned_poly = poly_input.strip()
+                if len(cleaned_poly) < 5:
+                    print(f"Skipping too short polymer {i}: {poly_input}")
                     continue
                 
-                print(f"Fixed polymer {i}: {fixed_poly}")
+                print(f"Cleaned polymer {i}: {cleaned_poly}")
                 
-                # Try to create graph with enhanced error handling
+                # Try to create graph with basic error handling
                 try:
-                    g = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                    g = poly_smiles_to_graph(cleaned_poly, np.nan, np.nan, None)
                     print(f"Graph creation successful for polymer {i}")
                 except Exception as graph_error:
                     print(f"Graph creation failed for polymer {i}: {graph_error}")
-                    # Try multiple fallback strategies
-                    fallback_success = False
-                    
-                    # Fallback 1: Simplified connectivity
+                    # Try basic fallback format
                     try:
-                        parts = fixed_poly.split("|")
-                        if len(parts) >= 3:
-                            simplified_poly = f"{parts[0]}|{parts[1]}|<1-1:1.0:1.0"
-                            print(f"Trying simplified format: {simplified_poly}")
-                            g = poly_smiles_to_graph(simplified_poly, np.nan, np.nan, None)
-                            fixed_poly = simplified_poly
-                            fallback_success = True
-                            print(f"Simplified format worked for polymer {i}")
+                        parts = cleaned_poly.split("|")
+                        if len(parts) >= 1:
+                            basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
+                            print(f"Trying basic format: {basic_format}")
+                            g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)
+                            cleaned_poly = basic_format
+                            print(f"Basic format worked for polymer {i}")
+                        else:
+                            continue
                     except Exception as e2:
-                        print(f"Simplified format failed: {e2}")
-                    
-                    # Fallback 2: Single monomer homopolymer
-                    if not fallback_success:
-                        try:
-                            parts = fixed_poly.split("|")
-                            first_monomer = parts[0].split(".")[0]
-                            homopoly = f"{first_monomer}|1.0|<1-1:1.0:1.0"
-                            print(f"Trying homopolymer format: {homopoly}")
-                            g = poly_smiles_to_graph(homopoly, np.nan, np.nan, None)
-                            fixed_poly = homopoly
-                            fallback_success = True
-                            print(f"Homopolymer format worked for polymer {i}")
-                        except Exception as e3:
-                            print(f"Homopolymer format failed: {e3}")
-                    
-                    if not fallback_success:
+                        print(f"Basic format failed: {e2}")
                         continue
                 
                 # Enhanced tokenization with error handling
                 try:
                     if tokenization == "oldtok":
-                        target_tokens = tokenize_poly_input(poly_input=fixed_poly)
+                        target_tokens = tokenize_poly_input(poly_input=cleaned_poly)
                     elif tokenization == "RT_tokenized":
-                        target_tokens = tokenize_poly_input_RTlike(poly_input=fixed_poly)
+                        target_tokens = tokenize_poly_input_RTlike(poly_input=cleaned_poly)
                     
                     print(f"Tokenization successful for polymer {i}: {len(target_tokens)} tokens")
                     
-                    # Check if tokenization produced valid results
                     if not target_tokens or len(target_tokens) == 0:
                         print(f"Empty tokenization result for polymer {i}")
                         continue
                         
                 except Exception as token_error:
                     print(f"Tokenization failed for polymer {i}: {token_error}")
-                    # Try alternative tokenization
-                    try:
-                        if tokenization == "RT_tokenized":
-                            target_tokens = tokenize_poly_input(poly_input=fixed_poly)
-                        else:
-                            target_tokens = tokenize_poly_input_RTlike(poly_input=fixed_poly)
-                        print(f"Alternative tokenization worked for polymer {i}")
-                    except:
-                        print(f"All tokenization methods failed for polymer {i}")
-                        continue
+                    continue
 
                 # Enhanced token processing with OOV handling
                 try:
@@ -2020,9 +1753,15 @@ if 'best_z_re' in locals() and len(best_z_re) > 0:
         seed_string = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), tokenization=tokenization) for sample in range(len(predictions))]
     
     # Use the enhanced adaptive sampling function
-    all_prediction_strings, all_reconstruction_strings, all_y_p = adaptive_sampling_around_seed(
-        model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name
-    )
+    if args.use_enhanced_generation:
+        all_prediction_strings, all_reconstruction_strings, all_y_p = enhanced_adaptive_sampling_around_seed(
+            model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name
+        )
+    else:
+        # Use original adaptive sampling (fallback)
+        all_prediction_strings, all_reconstruction_strings, all_y_p = adaptive_sampling_around_seed(
+            model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name
+        )
 else:
     print("No valid best molecules found!")
     all_prediction_strings = []

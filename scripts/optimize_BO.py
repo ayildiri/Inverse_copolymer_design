@@ -102,6 +102,73 @@ def validate_and_fix_polymer_format(poly_input):
         print(f"Error in basic validation: {e}")
         return None
 
+def fix_polymer_format(poly_input):
+    """
+    Fix polymer format issues between model output and processing expectations
+    """
+    try:
+        if not poly_input or not isinstance(poly_input, str):
+            return None
+        
+        print(f"Debug - Original polymer input: {poly_input}")
+        
+        # Split by '|' to get components
+        parts = poly_input.split('|')
+        
+        if len(parts) < 2:
+            print(f"Warning: Polymer input doesn't have enough parts: {poly_input}")
+            print("Expected format: MonA.MonB|stoichiometry|connectivity")
+            # Try to create basic format
+            return f"{poly_input}|1.0|<1-1:1.0:1.0"
+        
+        monomers_part = parts[0]
+        second_part = parts[1]
+        
+        print(f"Debug - Monomers part: {monomers_part}")
+        print(f"Debug - Second part: {second_part}")
+        
+        # Count monomers
+        monomers = monomers_part.split('.')
+        monomer_count = len(monomers)
+        
+        print(f"Debug - Monomer count: {monomer_count}")
+        print(f"Debug - Monomers: {monomers}")
+        
+        # Check if second part contains connectivity info (starts with '<')
+        if second_part.startswith('<'):
+            print("Debug - Second part contains connectivity info, need to add stoichiometry")
+            # Need to add proper stoichiometry
+            if monomer_count == 1:
+                # Homopolymer
+                fixed_format = f"{monomers_part}|1.0|{second_part}"
+            elif monomer_count == 2:
+                # Copolymer - create equal weights
+                fixed_format = f"{monomers_part}|0.5.0.5|{second_part}"
+            else:
+                # Multi-polymer - create equal weights
+                weights = '.'.join(['0.333'] * monomer_count)
+                fixed_format = f"{monomers_part}|{weights}|{second_part}"
+        else:
+            # Second part might be stoichiometry, check if we have connectivity
+            if len(parts) >= 3:
+                # Format: MonA.MonB|stoich|connectivity
+                fixed_format = poly_input
+            else:
+                # Format: MonA.MonB|stoich, need to add connectivity
+                if monomer_count == 1:
+                    fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
+                elif monomer_count == 2:
+                    fixed_format = f"{monomers_part}|{second_part}|<1-2:1.0:1.0"
+                else:
+                    fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
+        
+        print(f"Debug - Fixed polymer input: {fixed_format}")
+        return fixed_format
+        
+    except Exception as e:
+        print(f"Error in fix_polymer_format: {e}")
+        return poly_input
+
 def enhanced_adaptive_sampling_around_seed(model, seed_z, vocab, tokenization, prop_predictor, args, device, model_name):
     """
     ENHANCED adaptive sampling that uses the improved G2S_clean validation
@@ -868,19 +935,31 @@ class PropertyPrediction():
                     print(f"Graph creation successful for polymer {i}")
                 except Exception as graph_error:
                     print(f"Graph creation failed for polymer {i}: {graph_error}")
-                    # Try basic fallback format
+                    # Try comprehensive format fixing
                     try:
-                        parts = cleaned_poly.split("|")
-                        if len(parts) >= 1:
-                            basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
-                            print(f"Trying basic format: {basic_format}")
-                            g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)
-                            cleaned_poly = basic_format
-                            print(f"Basic format worked for polymer {i}")
+                        fixed_format = fix_polymer_format(cleaned_poly)
+                        if fixed_format and fixed_format != cleaned_poly:
+                            print(f"Trying fixed format: {fixed_format}")
+                            g = poly_smiles_to_graph(fixed_format, np.nan, np.nan, None)
+                            cleaned_poly = fixed_format
+                            print(f"Fixed format worked for polymer {i}")
                         else:
-                            continue
+                            # Fallback to basic format
+                            parts = cleaned_poly.split("|")
+                            if len(parts) >= 1:
+                                monomer_count = len(parts[0].split('.'))
+                                if monomer_count == 2:
+                                    basic_format = f"{parts[0]}|0.5.0.5|<1-2:1.0:1.0"
+                                else:
+                                    basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
+                                print(f"Trying basic format: {basic_format}")
+                                g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)
+                                cleaned_poly = basic_format
+                                print(f"Basic format worked for polymer {i}")
+                            else:
+                                continue
                     except Exception as e2:
-                        print(f"Basic format failed: {e2}")
+                        print(f"Format fixing failed: {e2}")
                         continue
                 
                 # Enhanced tokenization with error handling

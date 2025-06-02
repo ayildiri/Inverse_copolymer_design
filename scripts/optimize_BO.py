@@ -348,6 +348,10 @@ parser.add_argument("--dataset_csv", type=str, default=None,
 parser.add_argument("--polymer_column", type=str, default="poly_chemprop_input",
                     help="Name of the column containing polymer SMILES in the CSV file (default: poly_chemprop_input)")
 
+# Add dataset path argument
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to the dataset directory containing the data files (default: uses main_dir_path/data)")
+
 # NEW: Add enhanced generation parameter
 parser.add_argument("--use_enhanced_generation", action="store_true", default=True,
                     help="Use enhanced generation with quality control from generate.py")
@@ -364,7 +368,14 @@ elif args.add_latent ==0:
 
 dataset_type = "train" 
 data_augment = "old" # new or old
-dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+
+# Set dataset path from argument or use default
+if args.dataset_path:
+    dataset_path = args.dataset_path
+else:
+    dataset_path = os.path.join(main_dir_path, 'data')
+
+dict_train_loader = torch.load(os.path.join(dataset_path, f'dict_train_loader_{augment}_{tokenization}.pt'))
 
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
@@ -398,7 +409,7 @@ if os.path.isfile(filepath):
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
     model_config["max_alpha"]=args.max_alpha
-    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    vocab_file = os.path.join(dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
     vocab = load_vocab(vocab_file=vocab_file)
     if model_config['loss']=="wce":
         class_weights = token_weights(vocab_file)
@@ -1851,9 +1862,9 @@ def valid_scores(smiles):
     except:
         return np.array([0.0] * len(smiles), dtype=np.float32)
 
-dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+dict_train_loader = torch.load(os.path.join(dataset_path, f'dict_train_loader_{augment}_{tokenization}.pt'))
 data_augment ="old"
-vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+vocab_file = os.path.join(dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
 vocab = load_vocab(vocab_file=vocab_file)
 
 # Enhanced prediction handling
@@ -1878,7 +1889,7 @@ else:
 
 prediction_validityA= []
 prediction_validityB =[]
-data_dir = os.path.join(main_dir_path,'data/')
+data_dir = dataset_path
 
 # Load dataset CSV file for novelty analysis
 all_polymers_data = []
@@ -1989,12 +2000,12 @@ if all_predictions_can and (all_polymers_data or all_train_polymers):
 
         # Save canonicalized data for future use
         try:
-            with open(data_dir+'all_train_pols_can'+'.pkl', 'wb') as f:
+            with open(os.path.join(data_dir, 'all_train_pols_can.pkl'), 'wb') as f:
                 pickle.dump(all_train_can, f)
             if all_pols_data_can:
-                with open(data_dir+'all_pols_data_can'+'.pkl', 'wb') as f:
+                with open(os.path.join(data_dir, 'all_pols_data_can.pkl'), 'wb') as f:
                     pickle.dump(all_pols_data_can, f)
-            with open(data_dir+'all_mons_train_can'+'.pkl', 'wb') as f:
+            with open(os.path.join(data_dir, 'all_mons_train_can.pkl'), 'wb') as f:
                 pickle.dump(all_mons_can, f)
         except Exception as e:
             print(f"Error saving canonical data: {e}")

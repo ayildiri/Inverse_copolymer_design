@@ -69,6 +69,73 @@ def robust_polymer_validation(poly_input):
     
     return cleaned
 
+def fix_polymer_format(poly_input):
+    """
+    Fix polymer format issues between model output and processing expectations
+    """
+    try:
+        if not poly_input or not isinstance(poly_input, str):
+            return None
+        
+        print(f"Debug - Original polymer input: {poly_input}")
+        
+        # Split by '|' to get components
+        parts = poly_input.split('|')
+        
+        if len(parts) < 2:
+            print(f"Warning: Polymer input doesn't have enough parts: {poly_input}")
+            print("Expected format: MonA.MonB|stoichiometry|connectivity")
+            # Try to create basic format
+            return f"{poly_input}|1.0|<1-1:1.0:1.0"
+        
+        monomers_part = parts[0]
+        second_part = parts[1]
+        
+        print(f"Debug - Monomers part: {monomers_part}")
+        print(f"Debug - Second part: {second_part}")
+        
+        # Count monomers
+        monomers = monomers_part.split('.')
+        monomer_count = len(monomers)
+        
+        print(f"Debug - Monomer count: {monomer_count}")
+        print(f"Debug - Monomers: {monomers}")
+        
+        # Check if second part contains connectivity info (starts with '<')
+        if second_part.startswith('<'):
+            print("Debug - Second part contains connectivity info, need to add stoichiometry")
+            # Need to add proper stoichiometry
+            if monomer_count == 1:
+                # Homopolymer
+                fixed_format = f"{monomers_part}|1.0|{second_part}"
+            elif monomer_count == 2:
+                # Copolymer - create equal weights
+                fixed_format = f"{monomers_part}|0.5.0.5|{second_part}"
+            else:
+                # Multi-polymer - create equal weights
+                weights = '.'.join(['0.333'] * monomer_count)
+                fixed_format = f"{monomers_part}|{weights}|{second_part}"
+        else:
+            # Second part might be stoichiometry, check if we have connectivity
+            if len(parts) >= 3:
+                # Format: MonA.MonB|stoich|connectivity
+                fixed_format = poly_input
+            else:
+                # Format: MonA.MonB|stoich, need to add connectivity
+                if monomer_count == 1:
+                    fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
+                elif monomer_count == 2:
+                    fixed_format = f"{monomers_part}|{second_part}|<1-2:1.0:1.0"
+                else:
+                    fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
+        
+        print(f"Debug - Fixed polymer input: {fixed_format}")
+        return fixed_format
+        
+    except Exception as e:
+        print(f"Error in fix_polymer_format: {e}")
+        return poly_input
+
 def auto_detect_property_count_and_names(model, device):
     """
     Automatically detect the number of properties the model predicts
@@ -1152,15 +1219,25 @@ class correctSamplesRepair(Repair):
                 try:
                     g = poly_smiles_to_graph(cleaned_poly, np.nan, np.nan, None)
                 except Exception as graph_error:
-                    # Try basic fallback format
+                    # Try comprehensive format fixing (add the fix_polymer_format function to GA script too)
                     try:
-                        parts = cleaned_poly.split("|")
-                        if len(parts) >= 1:
-                            basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
-                            g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)
-                            cleaned_poly = basic_format
+                        fixed_format = fix_polymer_format(cleaned_poly)
+                        if fixed_format and fixed_format != cleaned_poly:
+                            g = poly_smiles_to_graph(fixed_format, np.nan, np.nan, None)
+                            cleaned_poly = fixed_format
                         else:
-                            continue
+                            # Fallback to basic format
+                            parts = cleaned_poly.split("|")
+                            if len(parts) >= 1:
+                                monomer_count = len(parts[0].split('.'))
+                                if monomer_count == 2:
+                                    basic_format = f"{parts[0]}|0.5.0.5|<1-2:1.0:1.0"
+                                else:
+                                    basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
+                                g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)
+                                cleaned_poly = basic_format
+                            else:
+                                continue
                     except Exception as e2:
                         continue
                 

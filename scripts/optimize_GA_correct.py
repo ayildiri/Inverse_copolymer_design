@@ -145,6 +145,20 @@ parser.add_argument("--custom_equation", type=str, default=None,
 parser.add_argument("--maximize_equation", action="store_true", 
                     help="Maximize the custom equation instead of minimizing it")
 
+# Add dataset path argument
+parser.add_argument("--dataset_path", type=str, default=None,
+                    help="Path to the dataset directory containing the data files (default: uses main_dir_path/data)")
+
+# Add CSV dataset argument (missing from GA script)
+parser.add_argument("--dataset_csv", type=str, default=None,
+                    help="Path to the CSV file containing polymer data for novelty analysis. Should have 'poly_chemprop_input' column.")
+parser.add_argument("--polymer_column", type=str, default="poly_chemprop_input",
+                    help="Name of the column containing polymer SMILES in the CSV file (default: poly_chemprop_input)")
+
+# Add enhanced generation parameter (though less relevant for GA, kept for consistency)
+parser.add_argument("--use_enhanced_generation", action="store_true", default=False,
+                    help="Use enhanced generation with quality control (for consistency with optimize_BO)")
+
 args = parser.parse_args()
 
 seed = args.seed
@@ -157,7 +171,14 @@ elif args.add_latent ==0:
 
 dataset_type = "train" 
 data_augment = "old" # new or old
-dict_train_loader = torch.load(main_dir_path+'/data/dict_train_loader_'+augment+'_'+tokenization+'.pt')
+
+# Set dataset path from argument or use default
+if args.dataset_path:
+    dataset_path = args.dataset_path
+else:
+    dataset_path = os.path.join(main_dir_path, 'data')
+
+dict_train_loader = torch.load(os.path.join(dataset_path, f'dict_train_loader_{augment}_{tokenization}.pt'))
 
 num_node_features = dict_train_loader['0'][0].num_node_features
 num_edge_features = dict_train_loader['0'][0].num_edge_features
@@ -191,7 +212,7 @@ if os.path.isfile(filepath):
     hidden_dimension = model_config['hidden_dimension']
     embedding_dimension = model_config['embedding_dim']
     model_config["max_alpha"]=args.max_alpha
-    vocab_file=main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
+    vocab_file = os.path.join(dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
     vocab = load_vocab(vocab_file=vocab_file)
     if model_config['loss']=="wce":
         class_weights = token_weights(vocab_file)
@@ -244,6 +265,8 @@ print(f"Properties ({property_count}): {property_names}")
 print(f"Objectives: {property_objectives}")
 print(f"Weights: {property_weights}")
 print(f"Targets: {property_targets}")
+print(f"Enhanced generation: {args.use_enhanced_generation}")
+print(f"Dataset CSV: {args.dataset_csv if args.dataset_csv else 'Using default augmentation-based dataset'}")
 
 # Now we can properly set the model name with the correct property string (from optimize_BO.py)
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
@@ -1766,33 +1789,65 @@ try:
         train_polymers_batch = [combine_tokens(tokenids_to_vocab(data.tgt_token_ids[sample], vocab), tokenization=tokenization).split('_')[0] for sample in range(len(data))]
         all_train_polymers.extend(train_polymers_batch)
     
-    # Load the appropriate dataset based on augmentation type
-    if augment == "augmented":
+    # Load dataset with priority: 1) provided CSV, 2) augmentation-based files, 3) fallback
+    if args.dataset_csv:
         try:
-            df = pd.read_csv(main_dir_path+'/data/dataset-combined-poly_chemprop.csv')
+            log_progress(f"Loading dataset from provided CSV: {args.dataset_csv}", log_file)
+            df = pd.read_csv(args.dataset_csv)
+            
+            # Check if the specified column exists
+            if args.polymer_column in df.columns:
+                for i in range(len(df.loc[:, args.polymer_column])):
+                    try:
+                        poly_input = df.loc[i, args.polymer_column]
+                        if isinstance(poly_input, str) and len(poly_input.strip()) > 0:
+                            all_polymers_data.append(poly_input)
+                    except Exception as e:
+                        print(f"Error processing row {i}: {e}")
+                        continue
+                log_progress(f"Loaded {len(all_polymers_data)} polymers from {args.polymer_column} column", log_file)
+            else:
+                log_progress(f"Warning: Column '{args.polymer_column}' not found in CSV file", log_file)
+                log_progress(f"Available columns: {list(df.columns)}", log_file)
+                log_progress("Using fallback dataset", log_file)
+                df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
         except FileNotFoundError:
-            log_progress("Warning: dataset-combined-poly_chemprop.csv not found, creating dummy data", log_file)
-            df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})  # Use subset as fallback
-    elif augment == "augmented_canonical":
-        try:
-            df = pd.read_csv(main_dir_path+'/data/dataset-combined-canonical-poly_chemprop.csv')
-        except FileNotFoundError:
-            log_progress("Warning: dataset-combined-canonical-poly_chemprop.csv not found, creating dummy data", log_file)
+            log_progress(f"Error: Dataset CSV file not found: {args.dataset_csv}", log_file)
+            log_progress("Using fallback dataset", log_file)
             df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
-    elif augment == "augmented_enum":
-        try:
-            df = pd.read_csv(main_dir_path+'/data/dataset-combined-enumerated2_poly_chemprop.csv')
-        except FileNotFoundError:
-            log_progress("Warning: dataset-combined-enumerated2_poly_chemprop.csv not found, creating dummy data", log_file)
+        except Exception as e:
+            log_progress(f"Error loading dataset CSV: {e}", log_file)
+            log_progress("Using fallback dataset", log_file)
             df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
     else:
-        # Default fallback
-        df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
+        # Load the appropriate dataset based on augmentation type (original logic)
+        if augment == "augmented":
+            try:
+                df = pd.read_csv(os.path.join(dataset_path, 'dataset-combined-poly_chemprop.csv'))
+            except FileNotFoundError:
+                log_progress("Warning: dataset-combined-poly_chemprop.csv not found, creating dummy data", log_file)
+                df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
+        elif augment == "augmented_canonical":
+            try:
+                df = pd.read_csv(os.path.join(dataset_path, 'dataset-combined-canonical-poly_chemprop.csv'))
+            except FileNotFoundError:
+                log_progress("Warning: dataset-combined-canonical-poly_chemprop.csv not found, creating dummy data", log_file)
+                df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
+        elif augment == "augmented_enum":
+            try:
+                df = pd.read_csv(os.path.join(dataset_path, 'dataset-combined-enumerated2_poly_chemprop.csv'))
+            except FileNotFoundError:
+                log_progress("Warning: dataset-combined-enumerated2_poly_chemprop.csv not found, creating dummy data", log_file)
+                df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
+        else:
+            # Default fallback
+            df = pd.DataFrame({'poly_chemprop_input': all_train_polymers[:100]})
     
-    # Extract all polymer data
-    for i in range(len(df.loc[:, 'poly_chemprop_input'])):
-        poly_input = df.loc[i, 'poly_chemprop_input']
-        all_polymers_data.append(poly_input)
+    # Extract all polymer data (only if we haven't already done it above for provided CSV)
+    if not args.dataset_csv:
+        for i in range(len(df.loc[:, 'poly_chemprop_input'])):
+            poly_input = df.loc[i, 'poly_chemprop_input']
+            all_polymers_data.append(poly_input)
     
     # Enhanced canonicalization with error handling
     def safe_canonicalize(polymer_string, sm_can, monomer_only=False):
@@ -2000,8 +2055,12 @@ try:
         f.write(f"=== Enhanced GA Optimization Results ===\n")
         f.write(f"Property Configuration: {property_count} properties ({property_names})\n")
         f.write(f"Objective Type: {objective_type}\n")
+        f.write(f"Dataset Path: {dataset_path}\n")
+        f.write(f"Dataset CSV: {args.dataset_csv if args.dataset_csv else 'Default augmentation-based'}\n")
+        f.write(f"Polymer Column: {args.polymer_column}\n")
         f.write(f"Total Generated Molecules: {len(decoded_mols)}\n")
         f.write(f"Valid Molecules: {len(all_predictions_can)}\n")
+        f.write(f"Reference Dataset Size: {len(all_polymers_data)}\n")
         f.write(f"\n=== Validity Metrics ===\n")
         f.write(f"Gen Mon A validity: {100*validityA:.4f}%\n")
         f.write(f"Gen Mon B validity: {100*validityB:.4f}%\n")
@@ -2040,6 +2099,8 @@ log_progress(f"GA OPTIMIZATION COMPLETED SUCCESSFULLY", log_file)
 log_progress(f"Properties optimized: {property_names}", log_file)
 log_progress(f"Objective type: {objective_type}", log_file)
 log_progress(f"Total evaluations: {problem.eval_calls}", log_file)
+log_progress(f"Dataset path: {dataset_path}", log_file)
+log_progress(f"Dataset CSV: {args.dataset_csv if args.dataset_csv else 'Default augmentation-based'}", log_file)
 log_progress(f"Results saved to: {dir_name}", log_file)
 log_progress("="*50, log_file)
 

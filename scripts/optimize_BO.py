@@ -1547,49 +1547,59 @@ with open(dir_name+'y1_all_'+dataset_type+'.npy', 'rb') as f:
     y1_all_train = np.load(f)
 #2. load fitted pca
 dim_red_type="pca"
-with open(dir_name+dim_red_type+'_fitted_train', 'rb') as f:
-    reducer = pickle.load(f)
+try:
+    with open(dir_name+dim_red_type+'_fitted_train.pkl', 'rb') as f:
+        reducer = pickle.load(f)
+except FileNotFoundError:
+    print(f"Warning: PCA file not found: {dir_name+dim_red_type+'_fitted_train.pkl'}")
+    print("Skipping PCA visualization plots")
+    # Create dummy reducer or skip PCA plotting
+    reducer = None
 
-# 3. Transform train LS   
-z_embedded_train = reducer.transform(latent_space_train)
-# 4. Transform points of Optimization
-latents_BO_np = np.stack(Latents_BO)
-z_embedded_BO = reducer.transform(latents_BO_np)
+# 3. Transform train LS and create PCA plots (only if reducer is available)
+if reducer is not None:
+    z_embedded_train = reducer.transform(latent_space_train)
+    # 4. Transform points of Optimization
+    latents_BO_np = np.stack(Latents_BO)
+    z_embedded_BO = reducer.transform(latents_BO_np)
 
-latents_RE_np = np.stack(Latents_RE)
-z_embedded_RE = reducer.transform(latents_RE_np)
-plt.figure(1)
+    latents_RE_np = np.stack(Latents_RE)
+    z_embedded_RE = reducer.transform(latents_RE_np)
+    plt.figure(1)
 
-# PCA projection colored by first property
-plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis')
-clb = plt.colorbar()
-clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
-plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
-plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
-plt.xlabel('PC1')
-plt.ylabel('PC2')
-plt.title(f'PCA Projection Colored by {property_names[0]}')
-plt.savefig(dir_name+'BO_projected_to_pca_'+str(cutoff)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
-plt.close()
+    # PCA projection colored by first property
+    plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis')
+    clb = plt.colorbar()
+    clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
+    plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
+    plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.title(f'PCA Projection Colored by {property_names[0]}')
+    plt.savefig(dir_name+'BO_projected_to_pca_'+str(cutoff)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
+    plt.close()
+else:
+    print("Skipping PCA plots - reducer not available")
 
 # PCA projection colored by other properties (if they exist)
-for prop_idx in range(1, min(property_count, 3)):  # Limit to first 3 properties for visualization
-    try:
-        with open(dir_name+f'y{prop_idx+1}_all_'+dataset_type+'.npy', 'rb') as f:
-            y_prop_all_train = np.load(f)
-        plt.figure(1)
-        plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y_prop_all_train, cmap='plasma')
-        clb = plt.colorbar()
-        clb.ax.set_title(f'{property_names[prop_idx]}')
-        plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
-        plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
-        plt.xlabel('PC1')
-        plt.ylabel('PC2')
-        plt.title(f'PCA Projection Colored by {property_names[prop_idx]}')
-        plt.savefig(dir_name + 'BO_projected_to_pca_' + property_names[prop_idx] + '_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
-        plt.close()
-    except FileNotFoundError:
-        print(f"Warning: y{prop_idx+1}_all_{dataset_type}.npy not found, skipping PCA plot for {property_names[prop_idx]}")
+if reducer is not None:
+    for prop_idx in range(1, min(property_count, 3)):  # Limit to first 3 properties for visualization
+        try:
+            with open(dir_name+f'y{prop_idx+1}_all_'+dataset_type+'.npy', 'rb') as f:
+                y_prop_all_train = np.load(f)
+            plt.figure(1)
+            plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y_prop_all_train, cmap='plasma')
+            clb = plt.colorbar()
+            clb.ax.set_title(f'{property_names[prop_idx]}')
+            plt.scatter(z_embedded_BO[:, 0], z_embedded_BO[:, 1], s=2, c='black')
+            plt.scatter(z_embedded_RE[:, 0], z_embedded_RE[:, 1], s=2, c='red')
+            plt.xlabel('PC1')
+            plt.ylabel('PC2')
+            plt.title(f'PCA Projection Colored by {property_names[prop_idx]}')
+            plt.savefig(dir_name + 'BO_projected_to_pca_' + property_names[prop_idx] + '_' + str(cutoff) + '_' + str(stopping_criterion) + '_run' + str(opt_run) + '.png', dpi=300)
+            plt.close()
+        except FileNotFoundError:
+            print(f"Warning: y{prop_idx+1}_all_{dataset_type}.npy not found, skipping PCA plot for {property_names[prop_idx]}")
 
 ### Do the same but only for improved points with flexible property support
 def indices_of_improvement(values):
@@ -1728,75 +1738,82 @@ with open(dir_name+'top20_mols_'+str(cutoff)+'_'+str(objective_type)+'_'+str(sto
 
 print(objective_values)
 print(indices_of_increases)
-latents_BO_np_imp = np.stack([Latents_BO[i] for i in indices_of_increases])
-z_embedded_BO_imp = reducer.transform(latents_BO_np_imp)
 
-latents_RE_np_imp = np.stack([Latents_RE[i] for i in indices_of_increases])
-z_embedded_RE_imp = reducer.transform(latents_RE_np_imp)
+if reducer is not None:
+    latents_BO_np_imp = np.stack([Latents_BO[i] for i in indices_of_increases])
+    z_embedded_BO_imp = reducer.transform(latents_BO_np_imp)
 
-plt.figure(2, figsize=(10, 8))
+    latents_RE_np_imp = np.stack([Latents_RE[i] for i in indices_of_increases])
+    z_embedded_RE_imp = reducer.transform(latents_RE_np_imp)
 
-plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
-clb = plt.colorbar()
-clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
+    plt.figure(2, figsize=(10, 8))
 
-# Real latent space (reencoded)
-for i, (x, y) in enumerate(z_embedded_RE_imp):
-    it=indices_of_increases[i]
-    plt.scatter(x, y, color='red', s=3,  marker="2")  # Plot points
-    plt.text(x, y+0.2, f'{i+1}({it+1})', fontsize=6, color="red", ha='center', va='center')  # Annotate with labels
+    plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
+    clb = plt.colorbar()
+    clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
 
-# Connect points with arrows
-for i in range(len(z_embedded_RE_imp) - 1):
-    x_start, y_start = z_embedded_RE_imp[i]
-    x_end, y_end = z_embedded_RE_imp[i + 1]
-    plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
-              shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='red')
+    # Real latent space (reencoded)
+    for i, (x, y) in enumerate(z_embedded_RE_imp):
+        it=indices_of_increases[i]
+        plt.scatter(x, y, color='red', s=3,  marker="2")  # Plot points
+        plt.text(x, y+0.2, f'{i+1}({it+1})', fontsize=6, color="red", ha='center', va='center')  # Annotate with labels
 
-for i, (x, y) in enumerate(z_embedded_BO_imp):
-    it=indices_of_increases[i]
-    plt.scatter(x, y, color='black', s=2,  marker="1")  # Plot points
-    plt.text(x, y+0.2, f'{i+1}', fontsize=6, color="black", ha='center', va='center')  # Annotate with labels
+    # Connect points with arrows
+    for i in range(len(z_embedded_RE_imp) - 1):
+        x_start, y_start = z_embedded_RE_imp[i]
+        x_end, y_end = z_embedded_RE_imp[i + 1]
+        plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
+                  shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='red')
 
-# Connect points with arrows
-for i in range(len(z_embedded_BO_imp) - 1):
-    x_start, y_start = z_embedded_BO_imp[i]
-    x_end, y_end = z_embedded_BO_imp[i + 1]
-    plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
-              shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='black')
+    for i, (x, y) in enumerate(z_embedded_BO_imp):
+        it=indices_of_increases[i]
+        plt.scatter(x, y, color='black', s=2,  marker="1")  # Plot points
+        plt.text(x, y+0.2, f'{i+1}', fontsize=6, color="black", ha='center', va='center')  # Annotate with labels
 
-# Set plot labels and title
-plt.xlabel('pc1')
-plt.ylabel('pc2')
-plt.title('Optimization in latent space')
+    # Connect points with arrows
+    for i in range(len(z_embedded_BO_imp) - 1):
+        x_start, y_start = z_embedded_BO_imp[i]
+        x_end, y_end = z_embedded_BO_imp[i + 1]
+        plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
+                  shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='black')
 
-plt.savefig(dir_name+'BO_imp_projected_to_pca_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
+    # Set plot labels and title
+    plt.xlabel('pc1')
+    plt.ylabel('pc2')
+    plt.title('Optimization in latent space')
 
-plt.figure(3, figsize=(10, 8))
+    plt.savefig(dir_name+'BO_imp_projected_to_pca_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
+else:
+    print("Skipping improved points PCA plot - reducer not available")
 
-plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
-clb = plt.colorbar()
-clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
+if reducer is not None:
+    plt.figure(3, figsize=(10, 8))
 
-# Real latent space (reencoded)
-for i, (x, y) in enumerate(z_embedded_RE_imp):
-    it=indices_of_increases[i]
-    plt.scatter(x, y, color='red', s=3,  marker="2")  # Plot points
-    plt.text(x, y+0.2, f'{i+1}({it+1})', fontsize=6, color="red", ha='center', va='center')  # Annotate with labels
+    plt.scatter(z_embedded_train[:, 0], z_embedded_train[:, 1], s=1, c=y1_all_train, cmap='viridis', alpha=0.2)
+    clb = plt.colorbar()
+    clb.ax.set_title(f'{property_names[0]}' if property_count >= 1 else 'Property 1')
 
-# Connect points with arrows
-for i in range(len(z_embedded_RE_imp) - 1):
-    x_start, y_start = z_embedded_RE_imp[i]
-    x_end, y_end = z_embedded_RE_imp[i + 1]
-    plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
-              shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='red')
+    # Real latent space (reencoded)
+    for i, (x, y) in enumerate(z_embedded_RE_imp):
+        it=indices_of_increases[i]
+        plt.scatter(x, y, color='red', s=3,  marker="2")  # Plot points
+        plt.text(x, y+0.2, f'{i+1}({it+1})', fontsize=6, color="red", ha='center', va='center')  # Annotate with labels
 
-# Set plot labels and title
-plt.xlabel('pc1')
-plt.ylabel('pc2')
-plt.title('Optimization in latent space')
+    # Connect points with arrows
+    for i in range(len(z_embedded_RE_imp) - 1):
+        x_start, y_start = z_embedded_RE_imp[i]
+        x_end, y_end = z_embedded_RE_imp[i + 1]
+        plt.arrow(x_start, y_start, x_end - x_start, y_end - y_start, 
+                  shape='full', lw=0.05, length_includes_head=True, head_width=0.1, color='red')
 
-plt.savefig(dir_name+'BO_imp_projected_to_pca_onlyred_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
+    # Set plot labels and title
+    plt.xlabel('pc1')
+    plt.ylabel('pc2')
+    plt.title('Optimization in latent space')
+
+    plt.savefig(dir_name+'BO_imp_projected_to_pca_onlyred_'+str(cutoff)+'_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
+else:
+    print("Skipping red-only PCA plot - reducer not available")
 
 # === DEBUG CHECK: BEFORE SAMPLING ===
 print(f"Length of decoded_mols: {len(decoded_mols)}")

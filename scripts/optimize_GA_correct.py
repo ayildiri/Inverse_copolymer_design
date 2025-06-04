@@ -110,7 +110,7 @@ def fix_polymer_format(poly_input):
                 fixed_format = f"{monomers_part}|1.0|{second_part}"
             elif monomer_count == 2:
                 # Copolymer - create equal weights
-                fixed_format = f"{monomers_part}|0.5.0.5|{second_part}"
+                fixed_format = f"{monomers_part}|0.5|0.5|{second_part}"
             else:
                 # Multi-polymer - create equal weights
                 weights = '.'.join(['0.333'] * monomer_count)
@@ -1266,7 +1266,7 @@ class correctSamplesRepair(Repair):
                             if len(parts) >= 1:
                                 monomer_count = len(parts[0].split('.'))
                                 if monomer_count == 2:
-                                    basic_format = f"{parts[0]}|0.5.0.5|<1-2:1.0:1.0"
+                                    basic_format = f"{parts[0]}|0.5|0.5|<1-2:1.0:1.0"
                                 else:
                                     basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
                                 g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)

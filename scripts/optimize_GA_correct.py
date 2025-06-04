@@ -1043,7 +1043,7 @@ class ConvergenceTermination(Termination):
         return algorithm.n_gen / self.n_max_gen
 
 # Determine the boundaries for the latent dimensions from training dataset
-with open(dir_name+'latent_space_'+dataset_type+'.npy', 'rb') as f:
+with open(os.path.join(dir_name, 'latent_space_'+dataset_type+'.npy'), 'rb') as f:
     latent_space = np.load(f)
 min_values = np.amin(latent_space, axis=0).tolist()
 max_values = np.amax(latent_space, axis=0).tolist()
@@ -1477,20 +1477,20 @@ best_solution = res.X
 best_fitness = res.F
 results_custom = problem.results_custom
 
-with open(dir_name+'res_optimization_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'wb') as f:
+with open(os.path.join(dir_name, f'res_optimization_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.pkl'), 'wb') as f:
     pickle.dump(res, f)
-with open(dir_name+'optimization_results_custom_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'wb') as f:
+with open(os.path.join(dir_name, f'optimization_results_custom_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.pkl'), 'wb') as f:
     pickle.dump(results_custom, f)
-with open(dir_name+'optimization_results_custom_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
+with open(os.path.join(dir_name, f'optimization_results_custom_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt'), 'w') as fl:
      print(results_custom, file=fl)
 
 log_progress(f"Saved optimization results to {dir_name}", log_file)
 
 #convergence = res.algorithm.termination
-with open(dir_name+'res_optimization_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'rb') as f:
+with open(os.path.join(dir_name, f'res_optimization_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.pkl'), 'rb') as f:
     res = pickle.load(f)
 
-with open(dir_name+'optimization_results_custom_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.pkl', 'rb') as f:
+with open(os.path.join(dir_name, f'optimization_results_custom_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.pkl'), 'rb') as f:
     results_custom = pickle.load(f)
 
 # Save checkpoint summary
@@ -1575,7 +1575,7 @@ plt.ylabel('Value')
 plt.title(f'GA Property Optimization Progress ({property_count} properties)')
 plt.legend()
 plt.grid(True, alpha=0.3)
-plt.savefig(dir_name+'GA_objectives_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png',  dpi=300)
+plt.savefig(os.path.join(dir_name, f'GA_objectives_correct_{stopping_criterion}_run{opt_run}.png'), dpi=300)
 plt.close()
 
 """ Plot the kde of the properties of training data and sampled data """
@@ -1584,16 +1584,16 @@ try:
     training_property_data = []
     for prop_idx in range(property_count):
         try:
-            with open(dir_name+f'y{prop_idx+1}_all_'+dataset_type+'.npy', 'rb') as f:
-                y_prop_all = np.load(f)
-                training_property_data.append(list(y_prop_all))
+            with open(os.path.join(dir_name, f'y{prop_idx+1}_all_{dataset_type}.npy'), 'rb') as f:
+            y_prop_all = np.load(f)
+            training_property_data.append(list(y_prop_all))
         except FileNotFoundError:
             print(f"Warning: y{prop_idx+1}_all_{dataset_type}.npy not found, creating dummy data")
             # Create dummy data if file doesn't exist
             training_property_data.append([0.0] * 100)  # Dummy data
 
     try:
-        with open(dir_name+'yp_all_'+dataset_type+'.npy', 'rb') as f:
+        with open(os.path.join(dir_name, f'yp_all_{dataset_type}.npy'), 'rb') as f:
             yp_all = np.load(f)
         yp_all_list = [yp for yp in yp_all]
     except FileNotFoundError:
@@ -1702,7 +1702,7 @@ try:
                     transform=plt.gca().transAxes, verticalalignment='top', fontsize=8)
 
             # Save plot
-            kde_file = dir_name+f'KDE{prop_name}_GA_correct_'+str(stopping_criterion)+'_run'+str(opt_run)+'.png'
+            kde_file = os.path.join(dir_name, f'KDE{prop_name}_GA_correct_{stopping_criterion}_run{opt_run}.png')
             plt.savefig(kde_file, dpi=150, bbox_inches='tight')
             plt.close()
             kde_plots_created += 1
@@ -1806,7 +1806,7 @@ for i, idx in enumerate(indices_of_increases):
             prop_values.append(float('nan'))
     best_props[i+1] = prop_values
 
-with open(dir_name+'best_mols_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
+with open(os.path.join(dir_name, f'best_mols_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt'), 'w') as fl:
     print(best_mols, file=fl)
     print(best_props, file=fl)
 
@@ -1840,7 +1840,7 @@ for i, idx in enumerate(top_20_indices):
 best_objs_t20 = {i+1: objective_values[i] for i in top_20_indices}
 best_objs_t20_c = {i+1: objective_values_c[i] for i in top_20_indices}
 
-with open(dir_name+'top20_mols_GA_correct_'+str(objective_type)+'_'+str(stopping_criterion)+'_run'+str(opt_run)+'.txt', 'w') as fl:
+with open(os.path.join(dir_name, f'top20_mols_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt'), 'w') as fl:
     print(best_mols_t20, file=fl)
     print(best_props_t20, file=fl)
     print(best_props_t20_c, file=fl)
@@ -2127,7 +2127,7 @@ try:
     diversity_novel = len(set(novel_pols))/len(novel_pols) if novel_pols else 0
     
     # Save the enhanced novelty and validity metrics
-    novelty_file = dir_name+f'novelty_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt'
+    novelty_file = os.path.join(dir_name, f'novelty_GA_correct_{objective_type}_{stopping_criterion}_run{opt_run}.txt')
     with open(novelty_file, 'w') as f:
         f.write(f"=== Enhanced GA Optimization Results ===\n")
         f.write(f"Property Configuration: {property_count} properties ({property_names})\n")

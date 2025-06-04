@@ -588,7 +588,18 @@ class Property_optimization_problem(Problem):
         
         expanded_y_p = np.array(expanded_y_p)
         expanded_z_p = np.array(expanded_z_p)
-        all_reconstructions = [all_reconstructions_valid.pop(0) if val == 1 else "" for val in list(validity)]
+        all_reconstructions = []
+        reconstruction_idx = 0
+        for val in validity:
+            if val == 1:
+                if reconstruction_idx < len(all_reconstructions_valid):
+                    all_reconstructions.append(all_reconstructions_valid[reconstruction_idx])
+                    reconstruction_idx += 1
+                else:
+                    # Fallback when we run out of valid reconstructions
+                    all_reconstructions.append("")
+            else:
+                all_reconstructions.append("")
         print("Evaluation should not change")
         print(expanded_z_p)
 

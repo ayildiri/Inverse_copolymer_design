@@ -1111,6 +1111,17 @@ elif stopping_type == "iter":
     termination = get_termination("n_eval", max_iter)
     pop_size = int(max_iter / 20) # 20 generations, pop size 100
 
+elif stopping_type == "convergence":  # ✅ ADD THIS CASE
+    stopping_criterion = stopping_type+"_convergence"
+    termination = ConvergenceTermination(conv_threshold=0.0025, conv_generations=20, n_max_gen=500)
+    pop_size = 100  # Or use a reasonable default
+
+else:
+    # Default fallback
+    stopping_criterion = "iter_" + str(max_iter)
+    termination = get_termination("n_eval", max_iter)
+    pop_size = 50
+
 # Define NSGA2 algorithm parameters
 #pop_size = max_iter / 10
 sampling = LatinHypercubeSampling()

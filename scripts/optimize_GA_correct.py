@@ -1156,7 +1156,20 @@ class correctSamplesRepair(Repair):
             z_p_after_encoding_valid = [[0.0] * 32 for _ in predictions_valid]
             all_reconstructions_valid = ["fallback_molecule"] * len(predictions_valid)
         
-        expanded_z_p = np.array([z_p_after_encoding_valid.pop(0) if val == 1 else [0] * 32 for val in list(validity)])
+        expanded_z_p = []
+        valid_idx = 0
+        for val in validity:
+            if val == 1:
+                if valid_idx < len(z_p_after_encoding_valid):
+                    expanded_z_p.append(z_p_after_encoding_valid[valid_idx])
+                    valid_idx += 1
+                else:
+                    # Fallback when we run out of valid encodings
+                    expanded_z_p.append([0] * 32)
+            else:
+                expanded_z_p.append([0] * 32)
+        
+        expanded_z_p = np.array(expanded_z_p)
 
         print("repaired population")
         print(expanded_z_p)

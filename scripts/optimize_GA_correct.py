@@ -485,12 +485,12 @@ class Property_optimization_problem(Problem):
                     try:
                         # Evaluate the custom equation with the property values
                         equation_result = eval(self.custom_equation, {"__builtins__": {}}, eval_locals)
-                        
-                        # Apply maximization if requested
-                        if self.maximize_equation:
-                            equation_result = -equation_result
                             
-                        out["F"][i, 0] = equation_result
+                        # AFTER (to match BO behavior):
+                        if self.maximize_equation:
+                            out["F"][i, 0] = -equation_result  # GA minimizes, so negate for maximization
+                        else:
+                            out["F"][i, 0] = equation_result   # GA minimizes by default
                     except Exception as e:
                         print(f"Error evaluating custom equation for solution {i}: {e}")
                         out["F"][i, 0] = self.penalty_value
@@ -1585,8 +1585,8 @@ try:
     for prop_idx in range(property_count):
         try:
             with open(os.path.join(dir_name, f'y{prop_idx+1}_all_{dataset_type}.npy'), 'rb') as f:
-            y_prop_all = np.load(f)
-            training_property_data.append(list(y_prop_all))
+                y_prop_all = np.load(f)
+                training_property_data.append(list(y_prop_all))
         except FileNotFoundError:
             print(f"Warning: y{prop_idx+1}_all_{dataset_type}.npy not found, creating dummy data")
             # Create dummy data if file doesn't exist

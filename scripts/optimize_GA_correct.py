@@ -1215,7 +1215,7 @@ class StableConvergenceTermination(Termination):
     def _do_continue(self, algorithm):
         return self.perc < 1.0
 
-stopping_type = args.stopping_type # time or iter
+stopping_type = args.stopping_type 
 max_time = args.max_time  
 max_iter = args.max_iter 
 
@@ -1225,26 +1225,30 @@ if stopping_type == "time":
     minutes, seconds = divmod(remainder, 60)
     time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
     termination = get_termination("time", time_str)
-    pop_size = 15  # Small population
+    pop_size = 100  # ✅ Fixed large population
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
     termination = get_termination("n_eval", max_iter)
-    pop_size = min(15, max(8, int(max_iter / 30)))  # Small population
+    pop_size = 100  # ✅ Fixed large population (not formula-based)
 elif stopping_type == "convergence":
     stopping_criterion = stopping_type+"_convergence"
-    termination = StableConvergenceTermination(max_gen=50, stability_threshold=0.001, stability_generations=5)
-    pop_size = 15  # Small population
+    termination = StableConvergenceTermination(
+        max_gen=1000,              # ✅ Scaled up
+        stability_threshold=0.005, # ✅ More stringent  
+        stability_generations=20   # ✅ More stability needed
+    )
+    pop_size = 100  # ✅ Fixed large population
 else:
     # Default fallback
     stopping_criterion = "iter_" + str(max_iter)
     termination = get_termination("n_eval", max_iter)
-    pop_size = 15
+    pop_size = 100  # ✅ Fixed large population
 
 # Define NSGA2 algorithm parameters
-#pop_size = max_iter / 10
+
 sampling = LatinHypercubeSampling()
-crossover = SimulatedBinaryCrossover(prob=0.8, eta=5)  # Much lower eta
-mutation = PolynomialMutation(prob=1.0 / problem.n_var, eta=10)   # Lower eta for stability
+crossover = SimulatedBinaryCrossover(prob=0.8, eta=5)  
+mutation = PolynomialMutation(prob=1.5 / problem.n_var, eta=15)   
 
 # Enhanced repair class with robust validation (from optimize_BO.py)
 from pymoo.core.repair import Repair
@@ -1254,7 +1258,7 @@ class correctSamplesRepair(Repair):
         super().__init__(**kwargs)
         self.model_predictor = model
         self.repair_attempts = 0
-        self.max_repair_attempts = 30  # Limit repair calls per generation
+        self.max_repair_attempts = 100  # Limit repair calls per generation
 
     def _do(self, problem, X, **kwargs):
         self.repair_attempts += 1

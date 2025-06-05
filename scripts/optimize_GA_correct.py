@@ -1243,7 +1243,7 @@ else:
 # Define NSGA2 algorithm parameters
 #pop_size = max_iter / 10
 sampling = LatinHypercubeSampling()
-crossover = SimulatedBinaryCrossover(prob=0.8, eta=5, eps=1e-14)  # Much lower eta + epsilon
+crossover = SimulatedBinaryCrossover(prob=0.8, eta=5)  # Much lower eta
 mutation = PolynomialMutation(prob=1.0 / problem.n_var, eta=10)   # Lower eta for stability
 
 # Enhanced repair class with robust validation (from optimize_BO.py)

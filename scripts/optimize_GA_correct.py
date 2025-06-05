@@ -113,21 +113,43 @@ def fix_polymer_format(poly_input):
                 fixed_format = f"{monomers_part}|0.5|0.5|{second_part}"
             else:
                 # Multi-polymer - create equal weights
-                weights = '.'.join(['0.333'] * monomer_count)
+                weight_per_monomer = round(1.0 / monomer_count, 3)
+                weights = '|'.join([str(weight_per_monomer)] * monomer_count)
                 fixed_format = f"{monomers_part}|{weights}|{second_part}"
         else:
             # Second part might be stoichiometry, check if we have connectivity
             if len(parts) >= 3:
-                # Format: MonA.MonB|stoich|connectivity
+                # Format: MonA.MonB|stoich1|stoich2|connectivity (already correct)
                 fixed_format = poly_input
             else:
                 # Format: MonA.MonB|stoich, need to add connectivity
+                # CRITICAL FIX: Handle stoichiometry correctly for multiple monomers
                 if monomer_count == 1:
+                    # Homopolymer: single weight is fine
                     fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
                 elif monomer_count == 2:
-                    fixed_format = f"{monomers_part}|{second_part}|<1-2:1.0:1.0"
+                    # FIXED: Copolymer needs TWO weights
+                    try:
+                        weight_val = float(second_part)
+                        # If single weight provided, create two equal weights that sum to weight_val
+                        weight1 = weight_val / 2
+                        weight2 = weight_val / 2
+                        fixed_format = f"{monomers_part}|{weight1}|{weight2}|<1-2:1.0:1.0"
+                    except ValueError:
+                        # If can't parse as float, use equal weights
+                        fixed_format = f"{monomers_part}|0.5|0.5|<1-2:1.0:1.0"
                 else:
-                    fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
+                    # Multi-polymer: distribute weight among all monomers
+                    try:
+                        weight_val = float(second_part)
+                        weight_per_monomer = weight_val / monomer_count
+                        weights = '|'.join([str(weight_per_monomer)] * monomer_count)
+                        fixed_format = f"{monomers_part}|{weights}|<1-1:1.0:1.0"
+                    except ValueError:
+                        # Equal weights fallback
+                        weight_per_monomer = round(1.0 / monomer_count, 3)
+                        weights = '|'.join([str(weight_per_monomer)] * monomer_count)
+                        fixed_format = f"{monomers_part}|{weights}|<1-1:1.0:1.0"
         
         print(f"Debug - Fixed polymer input: {fixed_format}")
         return fixed_format
@@ -1142,6 +1164,66 @@ mutation = PolynomialMutation(prob=1.0 / problem.n_var, eta=30)
 
 # Enhanced repair class with robust validation (from optimize_BO.py)
 from pymoo.core.repair import Repair
+
+def add_emergency_recovery(repair_class):
+    """Add emergency recovery to repair operator"""
+    
+    original_do = repair_class._do
+    
+    def enhanced_do(self, problem, Z, **kwargs):
+        print(f"🔧 REPAIR: Starting repair of {len(Z)} individuals")
+        
+        # Try normal repair
+        result = original_do(problem, Z, **kwargs)
+        
+        # Check if all individuals are zeros (complete failure)
+        if isinstance(result, np.ndarray) and np.all(result == 0):
+            print("🚨 EMERGENCY: All repairs failed, using fallback strategy")
+            
+            # Strategy 1: Use training data examples
+            try:
+                # Try to load training latents
+                import os
+                latent_files = [
+                    'latent_space_train.npy',
+                    '../data/latent_space_train.npy',
+                    os.path.join(problem.save_dir, 'latent_space_train.npy')
+                ]
+                
+                training_latents = None
+                for file_path in latent_files:
+                    try:
+                        training_latents = np.load(file_path)
+                        print(f"🚨 Loaded emergency latents from {file_path}")
+                        break
+                    except:
+                        continue
+                
+                if training_latents is not None:
+                    # Sample random training examples
+                    n_samples = min(len(Z), len(training_latents))
+                    random_indices = np.random.choice(len(training_latents), n_samples, replace=False)
+                    emergency_latents = training_latents[random_indices]
+                    print(f"🚨 Using {len(emergency_latents)} emergency training examples")
+                    return emergency_latents
+                    
+            except Exception as e:
+                print(f"🚨 Emergency training data strategy failed: {e}")
+            
+            # Strategy 2: Use smaller random vectors in training range
+            try:
+                print("🚨 Using random vectors in conservative range")
+                emergency_population = np.random.normal(0, 0.5, size=Z.shape)  # Smaller std
+                return emergency_population
+                
+            except Exception as e:
+                print(f"🚨 Emergency random strategy failed: {e}")
+        
+        return result
+    
+    repair_class._do = enhanced_do
+    return repair_class
+
 class correctSamplesRepair(Repair):
     def __init__(self, model, **kwargs):
         super().__init__(**kwargs)
@@ -1396,10 +1478,13 @@ class correctSamplesRepair(Repair):
         except Exception as e:
             return [], [], [], None
 
+repair_operator = correctSamplesRepair(model)
+repair_operator = add_emergency_recovery(repair_operator)
+
 algorithm = NSGA2(pop_size=pop_size,
                   sampling=sampling,
                   crossover=crossover,
-                  repair=correctSamplesRepair(model),
+                  repair=repair_operator,
                   mutation=mutation,
                   eliminate_duplicates=True)
 

@@ -1170,11 +1170,11 @@ def add_emergency_recovery(repair_class):
     
     original_do = repair_class._do
     
-    def enhanced_do(self, problem, Z, **kwargs):
-        print(f"🔧 REPAIR: Starting repair of {len(Z)} individuals")
+    def enhanced_do(self, problem, X, **kwargs):  # ← FIXED: X not Z
+        print(f"🔧 REPAIR: Starting repair of {len(X)} individuals")
         
         # Try normal repair
-        result = original_do(problem, Z, **kwargs)
+        result = original_do(self, problem, X, **kwargs)  # ← FIXED: Added self
         
         # Check if all individuals are zeros (complete failure)
         if isinstance(result, np.ndarray) and np.all(result == 0):
@@ -1185,9 +1185,9 @@ def add_emergency_recovery(repair_class):
                 # Try to load training latents
                 import os
                 latent_files = [
+                    os.path.join(dir_name, 'latent_space_train.npy'),
                     'latent_space_train.npy',
-                    '../data/latent_space_train.npy',
-                    os.path.join(problem.save_dir, 'latent_space_train.npy')
+                    '../data/latent_space_train.npy'
                 ]
                 
                 training_latents = None
@@ -1201,7 +1201,7 @@ def add_emergency_recovery(repair_class):
                 
                 if training_latents is not None:
                     # Sample random training examples
-                    n_samples = min(len(Z), len(training_latents))
+                    n_samples = min(len(X), len(training_latents))
                     random_indices = np.random.choice(len(training_latents), n_samples, replace=False)
                     emergency_latents = training_latents[random_indices]
                     print(f"🚨 Using {len(emergency_latents)} emergency training examples")
@@ -1213,7 +1213,7 @@ def add_emergency_recovery(repair_class):
             # Strategy 2: Use smaller random vectors in training range
             try:
                 print("🚨 Using random vectors in conservative range")
-                emergency_population = np.random.normal(0, 0.5, size=Z.shape)  # Smaller std
+                emergency_population = np.random.normal(0, 0.5, size=X.shape)  # ← FIXED: X not Z
                 return emergency_population
                 
             except Exception as e:

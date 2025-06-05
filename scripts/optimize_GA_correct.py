@@ -1115,7 +1115,7 @@ if stopping_type == "time":
     time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
 
     termination = get_termination("time", time_str)
-    pop_size = 100
+    pop_size = 30
 
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
@@ -1125,13 +1125,13 @@ elif stopping_type == "iter":
 elif stopping_type == "convergence":  # ✅ ADD THIS CASE
     stopping_criterion = stopping_type+"_convergence"
     termination = ConvergenceTermination(conv_threshold=0.0025, conv_generations=20, n_max_gen=500)
-    pop_size = 100  # Or use a reasonable default
+    pop_size = 25  # Or use a reasonable default
 
 else:
     # Default fallback
     stopping_criterion = "iter_" + str(max_iter)
     termination = get_termination("n_eval", max_iter)
-    pop_size = 50
+    pop_size = 25
 
 # Define NSGA2 algorithm parameters
 #pop_size = max_iter / 10

@@ -1165,19 +1165,52 @@ mutation = PolynomialMutation(prob=1.0 / problem.n_var, eta=30)
 # Enhanced repair class with robust validation (from optimize_BO.py)
 from pymoo.core.repair import Repair
 
-def add_emergency_recovery(repair_class):
-    """Add emergency recovery to repair operator"""
-    
-    original_do = repair_class._do
-    
-    def enhanced_do(self, problem, X, **kwargs):  # ← FIXED: X not Z
+class correctSamplesRepair(Repair):
+    def __init__(self, model, **kwargs):
+        super().__init__(**kwargs)
+        self.model_predictor = model
+
+    def _do(self, problem, X, **kwargs):
         print(f"🔧 REPAIR: Starting repair of {len(X)} individuals")
         
-        # Try normal repair
-        result = original_do(self, problem, X, **kwargs)  # ← FIXED: Added self
+        # repair sampled points whole batch 
+        pop_X_torch = torch.from_numpy(X).to(device).to(torch.float32)
+        with torch.no_grad():
+            predictions, _, _, _, y = self.model_predictor.inference(data=pop_X_torch, device=device, sample=False, log_var=None)
         
-        # Check if all individuals are zeros (complete failure)
-        if isinstance(result, np.ndarray) and np.all(result == 0):
+        # Enhanced validity check with robust validation
+        prediction_strings, validity = self._calc_validity(predictions)
+        invalid_mask = (validity == 0)
+        
+        # Encode and predict the valid molecules
+        predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
+        
+        try:
+            y_p_after_encoding_valid, z_p_after_encoding_valid, all_reconstructions_valid, _ = self._encode_and_predict_molecules(predictions_valid)
+        except Exception as e:
+            print(f"Error in repair encoding: {e}")
+            # Graceful fallback
+            y_p_after_encoding_valid = [[0.0] * property_count for _ in predictions_valid]
+            z_p_after_encoding_valid = [[0.0] * 32 for _ in predictions_valid]
+            all_reconstructions_valid = ["fallback_molecule"] * len(predictions_valid)
+        
+        expanded_z_p = []
+        valid_idx = 0
+        for val in validity:
+            if val == 1:
+                if valid_idx < len(z_p_after_encoding_valid):
+                    expanded_z_p.append(z_p_after_encoding_valid[valid_idx])
+                    valid_idx += 1
+                else:
+                    # Fallback when we run out of valid encodings
+                    expanded_z_p.append([0] * 32)
+            else:
+                expanded_z_p.append([0] * 32)
+        
+        expanded_z_p = np.array(expanded_z_p)
+
+        # 🚨 EMERGENCY RECOVERY: Check if all repairs failed
+        if np.all(expanded_z_p == 0):
             print("🚨 EMERGENCY: All repairs failed, using fallback strategy")
             
             # Strategy 1: Use training data examples
@@ -1213,61 +1246,14 @@ def add_emergency_recovery(repair_class):
             # Strategy 2: Use smaller random vectors in training range
             try:
                 print("🚨 Using random vectors in conservative range")
-                emergency_population = np.random.normal(0, 0.5, size=X.shape)  # ← FIXED: X not Z
+                emergency_population = np.random.normal(0, 0.5, size=X.shape)
                 return emergency_population
                 
             except Exception as e:
                 print(f"🚨 Emergency random strategy failed: {e}")
-        
-        return result
-    
-    repair_class._do = enhanced_do
-    return repair_class
 
-class correctSamplesRepair(Repair):
-    def __init__(self, model, **kwargs):
-        super().__init__(**kwargs)
-        self.model_predictor = model
-
-    def _do(self, problem, Z, **kwargs):
-        # repair sampled points whole batch 
-        pop_Z_torch = torch.from_numpy(Z).to(device).to(torch.float32)
-        with torch.no_grad():
-            predictions, _, _, _, y = self.model_predictor.inference(data=pop_Z_torch, device=device, sample=False, log_var=None)
-        # Enhanced validity check with robust validation
-        prediction_strings, validity = self._calc_validity(predictions)
-        invalid_mask = (validity == 0)
-        # Encode and predict the valid molecules
-        predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
-        
-        try:
-            y_p_after_encoding_valid, z_p_after_encoding_valid, all_reconstructions_valid, _ = self._encode_and_predict_molecules(predictions_valid)
-        except Exception as e:
-            print(f"Error in repair encoding: {e}")
-            # Graceful fallback
-            y_p_after_encoding_valid = [[0.0] * property_count for _ in predictions_valid]
-            z_p_after_encoding_valid = [[0.0] * 32 for _ in predictions_valid]
-            all_reconstructions_valid = ["fallback_molecule"] * len(predictions_valid)
-        
-        expanded_z_p = []
-        valid_idx = 0
-        for val in validity:
-            if val == 1:
-                if valid_idx < len(z_p_after_encoding_valid):
-                    expanded_z_p.append(z_p_after_encoding_valid[valid_idx])
-                    valid_idx += 1
-                else:
-                    # Fallback when we run out of valid encodings
-                    expanded_z_p.append([0] * 32)
-            else:
-                expanded_z_p.append([0] * 32)
-        
-        expanded_z_p = np.array(expanded_z_p)
-
-        print("repaired population")
-        print(expanded_z_p)
-        Z = Population().create(*expanded_z_p)
-        return Z
+        print("🔧 REPAIR: Completed repair process")
+        return expanded_z_p
 
     def _calc_validity(self, predictions):
         """

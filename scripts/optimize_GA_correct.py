@@ -464,26 +464,67 @@ class Property_optimization_problem(Problem):
         return predictions
 
     def _evaluate(self, x, out, *args, **kwargs):
-        # Assuming x is a 1D array containing the 32 numerical parameters
-
-        # Inference: forward pass NN prediciton of properties and beam search decoding from latent
         self.eval_calls += 1
-        x_torch = torch.from_numpy(x).to(device).to(torch.float32) 
-        print("Evaluation should be repaired")
-        print(x)
-        with torch.no_grad():
-            predictions, _, _, _, y = self.model_predictor.inference(data=x_torch, device=device, sample=False, log_var=None)
         
-        # Normalize property predictions (from optimize_BO.py)
+        # Ensure x is properly shaped and valid
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        
+        # Add bounds checking
+        x = np.clip(x, 
+                    np.array([-5]*x.shape[1]),  # Conservative bounds if not available
+                    np.array([5]*x.shape[1]))
+        
+        x_torch = torch.from_numpy(x.astype(np.float32)).to(device)
+        
+        try:
+            with torch.no_grad():
+                predictions, _, _, _, y = self.model_predictor.inference(
+                    data=x_torch, device=device, sample=False, log_var=None
+                )
+            
+            # DEBUG: Print shapes to understand the issue
+            print(f"DEBUG - x shape: {x.shape}")
+            print(f"DEBUG - y shape: {y.shape if hasattr(y, 'shape') else type(y)}")
+            
+        except Exception as e:
+            print(f"Model inference failed: {e}")
+            out["F"] = np.full((x.shape[0], self.n_obj), self.penalty_value)
+            return
+        
+        # Normalize property predictions with proper error handling
         y_normalized = self._normalize_property_predictions(y)
-        print(f"Model output shape: {y_normalized.shape}, Properties expected: {self.property_count}")
+        print(f"DEBUG - y_normalized shape: {y_normalized.shape}")
         
-        # Enhanced validity check with graceful fallbacks (from optimize_BO.py)
+        #  Enhanced validity check with graceful fallbacks
         prediction_strings, validity = self._calc_validity(predictions)
         
+        # CRITICAL FIX: Ensure all arrays have consistent first dimension
+        batch_size = x.shape[0]
+        
+        print(f"DEBUG - batch_size: {batch_size}, validity length: {len(validity)}")
+        
+        # Ensure validity array matches batch size
+        if len(validity) != batch_size:
+            print(f"WARNING: Validity length {len(validity)} != batch size {batch_size}")
+            if len(validity) > batch_size:
+                validity = validity[:batch_size]
+            else:
+                # Pad with invalid
+                validity = np.pad(validity, (0, batch_size - len(validity)), constant_values=0)
+        
+        # Ensure y_normalized matches batch size
+        if y_normalized.shape[0] != batch_size:
+            print(f"WARNING: y_normalized batch {y_normalized.shape[0]} != batch size {batch_size}")
+            if y_normalized.shape[0] > batch_size:
+                y_normalized = y_normalized[:batch_size]
+            else:
+                # Pad with NaN
+                padding = np.full((batch_size - y_normalized.shape[0], y_normalized.shape[1]), np.nan)
+                y_normalized = np.vstack([y_normalized, padding])
+        
         invalid_mask = (validity == 0)
-        zero_vector = np.zeros(self.n_var)
-        validity_mask = np.all(x != zero_vector, axis=1)
+        validity_mask = (validity == 1)
         print(len(invalid_mask))
         print(validity_mask.shape[0])
         print(x.shape[0])
@@ -491,7 +532,7 @@ class Property_optimization_problem(Problem):
         print(out["F"])
 
         # Initialize output array with appropriate dimensions
-        out["F"] = np.zeros((x.shape[0], self.n_obj))
+        out["F"] = np.full((batch_size, self.n_obj), self.penalty_value)  # Use penalty as default
         
         # Handle custom equation case
         if self.custom_equation:
@@ -1078,8 +1119,20 @@ class ConvergenceTermination(Termination):
 # Determine the boundaries for the latent dimensions from training dataset
 with open(os.path.join(dir_name, 'latent_space_'+dataset_type+'.npy'), 'rb') as f:
     latent_space = np.load(f)
-min_values = np.amin(latent_space, axis=0).tolist()
-max_values = np.amax(latent_space, axis=0).tolist()
+
+raw_min_values = np.amin(latent_space, axis=0)
+raw_max_values = np.amax(latent_space, axis=0)
+
+# Add safety margins to prevent edge cases
+safety_margin = 0.05  # 5% safety margin
+bounds_range = raw_max_values - raw_min_values
+safety_buffer = bounds_range * safety_margin
+
+min_values = (raw_min_values + safety_buffer).tolist()
+max_values = (raw_max_values - safety_buffer).tolist()
+
+print(f"Original bounds: [{np.min(raw_min_values):.3f}, {np.max(raw_max_values):.3f}]")
+print(f"Safe bounds: [{min(min_values):.3f}, {max(max_values):.3f}]")
 
 cutoff=0.0
 
@@ -1124,43 +1177,74 @@ problem = Property_optimization_problem(
 )
 
 # Termination criterium
-termination = ConvergenceTermination(conv_threshold=0.0025, conv_generations=20, n_max_gen=500)
+class StableConvergenceTermination(Termination):
+    def __init__(self, max_gen=100, stability_threshold=0.001, stability_generations=5):
+        super().__init__()
+        self.max_gen = max_gen
+        self.stability_threshold = stability_threshold
+        self.stability_generations = stability_generations
+        self.best_values = []
+        self.stable_count = 0
+
+    def _update(self, algorithm):
+        # Get current best objective
+        if hasattr(algorithm.pop, "get") and len(algorithm.pop) > 0:
+            current_best = np.min(algorithm.pop.get("F"))
+            self.best_values.append(current_best)
+            
+            # Check for stability
+            if len(self.best_values) >= self.stability_generations:
+                recent_values = self.best_values[-self.stability_generations:]
+                improvement = abs(recent_values[0] - recent_values[-1])
+                
+                if improvement < self.stability_threshold:
+                    self.stable_count += 1
+                    if self.stable_count >= 2:  # Stable for 2 consecutive checks
+                        print(f"🎯 CONVERGED: Stable for {self.stable_count} checks")
+                        return 1.0  # Converged
+                else:
+                    self.stable_count = 0
+        
+        # Check max generations
+        if algorithm.n_gen >= self.max_gen:
+            print(f"🛑 MAX GENERATIONS: Reached {self.max_gen}")
+            return 1.0
+            
+        return algorithm.n_gen / self.max_gen
+
+    def _do_continue(self, algorithm):
+        return self.perc < 1.0
 
 stopping_type = args.stopping_type # time or iter
-max_time = args.max_time  # Set to 600 seconds, for example
-max_iter = args.max_iter # Set to a maximum number of iterations 
+max_time = args.max_time  
+max_iter = args.max_iter 
 
 if stopping_type == "time":
     stopping_criterion = stopping_type+"_"+str(max_time)
     hours, remainder = divmod(max_time, 3600)
     minutes, seconds = divmod(remainder, 60)
     time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-
     termination = get_termination("time", time_str)
-    pop_size = 30
-
+    pop_size = 15  # Small population
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
     termination = get_termination("n_eval", max_iter)
-    pop_size = int(max_iter / 20) # 20 generations, pop size 100
-
-elif stopping_type == "convergence":  # ✅ ADD THIS CASE
+    pop_size = min(15, max(8, int(max_iter / 30)))  # Small population
+elif stopping_type == "convergence":
     stopping_criterion = stopping_type+"_convergence"
-    termination = ConvergenceTermination(conv_threshold=0.0025, conv_generations=20, n_max_gen=500)
-    pop_size = 25  # Or use a reasonable default
-
+    termination = StableConvergenceTermination(max_gen=50, stability_threshold=0.001, stability_generations=5)
+    pop_size = 15  # Small population
 else:
     # Default fallback
     stopping_criterion = "iter_" + str(max_iter)
     termination = get_termination("n_eval", max_iter)
-    pop_size = 25
+    pop_size = 15
 
 # Define NSGA2 algorithm parameters
 #pop_size = max_iter / 10
 sampling = LatinHypercubeSampling()
-crossover = SimulatedBinaryCrossover(prob=0.90, eta=20)
-#crossover = SimulatedBinaryCrossover()
-mutation = PolynomialMutation(prob=1.0 / problem.n_var, eta=30)
+crossover = SimulatedBinaryCrossover(prob=0.8, eta=5, eps=1e-14)  # Much lower eta + epsilon
+mutation = PolynomialMutation(prob=1.0 / problem.n_var, eta=10)   # Lower eta for stability
 
 # Enhanced repair class with robust validation (from optimize_BO.py)
 from pymoo.core.repair import Repair
@@ -1169,92 +1253,40 @@ class correctSamplesRepair(Repair):
     def __init__(self, model, **kwargs):
         super().__init__(**kwargs)
         self.model_predictor = model
+        self.repair_attempts = 0
+        self.max_repair_attempts = 30  # Limit repair calls per generation
 
     def _do(self, problem, X, **kwargs):
-        print(f"🔧 REPAIR: Starting repair of {len(X)} individuals")
+        self.repair_attempts += 1
         
-        # repair sampled points whole batch 
-        pop_X_torch = torch.from_numpy(X).to(device).to(torch.float32)
-        with torch.no_grad():
-            predictions, _, _, _, y = self.model_predictor.inference(data=pop_X_torch, device=device, sample=False, log_var=None)
+        if self.repair_attempts > self.max_repair_attempts:
+            print(f"⚠️  REPAIR LIMIT: Reached max repair attempts, using conservative fallback")
+            return self._conservative_sampling(X, problem)
         
-        # Enhanced validity check with robust validation
-        prediction_strings, validity = self._calc_validity(predictions)
-        invalid_mask = (validity == 0)
+        print(f"🔧 REPAIR #{self.repair_attempts}: Starting repair of {len(X)} individuals")
         
-        # Encode and predict the valid molecules
-        predictions_valid = [j for j, valid in zip(predictions, validity) if valid]
+        # Strict bounds enforcement
+        X = np.clip(X, problem.xl, problem.xu)
         
+        # Check for any problematic values
+        if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+            print("⚠️  Found NaN/Inf in repair input, fixing...")
+            X = np.nan_to_num(X, nan=0.0, posinf=0.5, neginf=-0.5)
+            X = np.clip(X, problem.xl, problem.xu)
+        
+        # Try normal repair first
         try:
-            y_p_after_encoding_valid, z_p_after_encoding_valid, all_reconstructions_valid, _ = self._encode_and_predict_molecules(predictions_valid)
+            result = self._normal_repair(X, problem)
+            if result is not None and not np.any(np.isnan(result)):
+                print(f"🔧 REPAIR: Success with normal strategy")
+                return result
         except Exception as e:
-            print(f"Error in repair encoding: {e}")
-            # Graceful fallback
-            y_p_after_encoding_valid = [[0.0] * property_count for _ in predictions_valid]
-            z_p_after_encoding_valid = [[0.0] * 32 for _ in predictions_valid]
-            all_reconstructions_valid = ["fallback_molecule"] * len(predictions_valid)
+            print(f"⚠️  Normal repair failed: {e}")
         
-        expanded_z_p = []
-        valid_idx = 0
-        for val in validity:
-            if val == 1:
-                if valid_idx < len(z_p_after_encoding_valid):
-                    expanded_z_p.append(z_p_after_encoding_valid[valid_idx])
-                    valid_idx += 1
-                else:
-                    # Fallback when we run out of valid encodings
-                    expanded_z_p.append([0] * 32)
-            else:
-                expanded_z_p.append([0] * 32)
+        # Fallback to conservative sampling
+        print("🚨 Using conservative sampling fallback")
+        return self._conservative_sampling(X, problem)     
         
-        expanded_z_p = np.array(expanded_z_p)
-
-        # 🚨 EMERGENCY RECOVERY: Check if all repairs failed
-        if np.all(expanded_z_p == 0):
-            print("🚨 EMERGENCY: All repairs failed, using fallback strategy")
-            
-            # Strategy 1: Use training data examples
-            try:
-                # Try to load training latents
-                import os
-                latent_files = [
-                    os.path.join(dir_name, 'latent_space_train.npy'),
-                    'latent_space_train.npy',
-                    '../data/latent_space_train.npy'
-                ]
-                
-                training_latents = None
-                for file_path in latent_files:
-                    try:
-                        training_latents = np.load(file_path)
-                        print(f"🚨 Loaded emergency latents from {file_path}")
-                        break
-                    except:
-                        continue
-                
-                if training_latents is not None:
-                    # Sample random training examples
-                    n_samples = min(len(X), len(training_latents))
-                    random_indices = np.random.choice(len(training_latents), n_samples, replace=False)
-                    emergency_latents = training_latents[random_indices]
-                    print(f"🚨 Using {len(emergency_latents)} emergency training examples")
-                    return emergency_latents
-                    
-            except Exception as e:
-                print(f"🚨 Emergency training data strategy failed: {e}")
-            
-            # Strategy 2: Use smaller random vectors in training range
-            try:
-                print("🚨 Using random vectors in conservative range")
-                emergency_population = np.random.normal(0, 0.5, size=X.shape)
-                return emergency_population
-                
-            except Exception as e:
-                print(f"🚨 Emergency random strategy failed: {e}")
-
-        print("🔧 REPAIR: Completed repair process")
-        return expanded_z_p
-
     def _calc_validity(self, predictions):
         """
         Enhanced validity calculation with robust polymer validation (from optimize_BO.py)
@@ -1292,7 +1324,48 @@ class correctSamplesRepair(Repair):
                     fixed_strings.append(poly_input)
         
         return fixed_strings, np.array(mols_valid)
-
+        
+    def _normal_repair(self, X, problem):
+        """Normal repair using model inference"""
+        pop_X_torch = torch.from_numpy(X.astype(np.float32)).to(device)
+        
+        with torch.no_grad():
+            predictions, _, _, _, y = self.model_predictor.inference(
+                data=pop_X_torch, device=device, sample=False, log_var=None
+            )
+        
+        prediction_strings, validity = self._calc_validity(predictions)
+        valid_indices = np.where(validity == 1)[0]
+        
+        if len(valid_indices) < len(X) * 0.2:  # Less than 20% valid
+            raise ValueError(f"Too few valid predictions: {len(valid_indices)}/{len(X)}")
+        
+        # Process only valid predictions
+        predictions_valid = [predictions[i] for i in valid_indices]
+        
+        y_p_valid, z_p_valid, _, _ = self._encode_and_predict_molecules(predictions_valid)
+        
+        if len(z_p_valid) == 0:
+            raise ValueError("No valid encodings produced")
+        
+        # Reconstruct full population
+        repaired_X = np.copy(X)
+        for i, idx in enumerate(valid_indices):
+            if i < len(z_p_valid):
+                repaired_latent = np.array(z_p_valid[i])
+                repaired_latent = np.clip(repaired_latent, problem.xl, problem.xu)
+                repaired_X[idx] = repaired_latent
+        
+        return repaired_X
+    
+    def _conservative_sampling(self, X, problem):
+        """Conservative random sampling within bounds"""
+        center = (np.array(problem.xu) + np.array(problem.xl)) / 2
+        scale = (np.array(problem.xu) - np.array(problem.xl)) * 0.1  # 10% of range
+        
+        new_X = np.random.normal(center, scale, X.shape)
+        return np.clip(new_X, problem.xl, problem.xu)
+        
     def _make_polymer_mol(self,poly_input):
         # If making the mol works, the string is considered valid
         try: 

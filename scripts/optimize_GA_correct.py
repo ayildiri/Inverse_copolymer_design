@@ -1464,13 +1464,11 @@ class correctSamplesRepair(Repair):
         except Exception as e:
             return [], [], [], None
 
-repair_operator = correctSamplesRepair(model)
-repair_operator = add_emergency_recovery(repair_operator)
 
 algorithm = NSGA2(pop_size=pop_size,
                   sampling=sampling,
                   crossover=crossover,
-                  repair=repair_operator,
+                  repair=correctSamplesRepair(model),
                   mutation=mutation,
                   eliminate_duplicates=True)
 

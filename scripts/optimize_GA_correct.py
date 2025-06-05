@@ -48,6 +48,7 @@ if device.type == 'cuda':
     print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3, 1), 'GB')
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
 
+DEBUG_MODE = False  # Set to True only when debugging
 
 def fix_polymer_format(poly_input):
     """
@@ -56,8 +57,9 @@ def fix_polymer_format(poly_input):
     try:
         if not poly_input or not isinstance(poly_input, str):
             return None
-        
-        print(f"Debug - Original polymer input: {poly_input}")
+
+        if DEBUG_MODE:
+            print(f"Debug - Original polymer input: {poly_input}")
         
         # Clean up the input first
         cleaned_input = poly_input.strip()
@@ -86,8 +88,9 @@ def fix_polymer_format(poly_input):
         monomers = monomers_part.split('.')
         monomer_count = len(monomers)
         
-        print(f"Debug - Monomers part: {monomers_part}")
-        print(f"Debug - Monomer count: {monomer_count}")
+        if DEBUG_MODE:
+            print(f"Debug - Monomers part: {monomers_part}")
+            print(f"Debug - Monomer count: {monomer_count}")
         
         # Validate each monomer contains attachment points
         for i, monomer in enumerate(monomers):
@@ -129,13 +132,15 @@ def fix_polymer_format(poly_input):
                     stoichiometry_parts.append(part)
                 except ValueError:
                     print(f"Warning: Invalid stoichiometry value: {part}")
-        
-        print(f"Debug - Stoichiometry parts: {stoichiometry_parts}")
-        print(f"Debug - Connectivity part: {connectivity_part}")
+
+        if DEBUG_MODE:
+            print(f"Debug - Stoichiometry parts: {stoichiometry_parts}")
+            print(f"Debug - Connectivity part: {connectivity_part}")
         
         # Generate correct stoichiometry if missing or incorrect count
         if len(stoichiometry_parts) != monomer_count:
-            print(f"Debug - Stoichiometry count mismatch: found {len(stoichiometry_parts)}, need {monomer_count}")
+            if DEBUG_MODE:
+                print(f"Debug - Stoichiometry count mismatch: found {len(stoichiometry_parts)}, need {monomer_count}")
             
             if monomer_count == 1:
                 stoichiometry_parts = ["1.0"]
@@ -158,7 +163,8 @@ def fix_polymer_format(poly_input):
         # Reconstruct the polymer string
         fixed_format = f"{monomers_part}|{'|'.join(stoichiometry_parts)}|{connectivity_part}"
         
-        print(f"Debug - Fixed polymer input: {fixed_format}")
+        if DEBUG_MODE:
+            print(f"Debug - Fixed polymer input: {fixed_format}")
         
         # Final validation - check the format makes sense
         final_parts = fixed_format.split('|')
@@ -593,9 +599,10 @@ class Property_optimization_problem(Problem):
                 )
             
             # DEBUG: Print shapes to understand the issue
-            print(f"DEBUG - x shape: {x.shape}")
-            print(f"DEBUG - y shape: {y.shape if hasattr(y, 'shape') else type(y)}")
-            
+            if DEBUG_MODE:
+                print(f"DEBUG - x shape: {x.shape}")
+                print(f"DEBUG - y shape: {y.shape if hasattr(y, 'shape') else type(y)}")
+                
         except Exception as e:
             print(f"Model inference failed: {e}")
             out["F"] = np.full((x.shape[0], self.n_obj), self.penalty_value)
@@ -603,15 +610,16 @@ class Property_optimization_problem(Problem):
         
         # Normalize property predictions with proper error handling
         y_normalized = self._normalize_property_predictions(y)
-        print(f"DEBUG - y_normalized shape: {y_normalized.shape}")
+        if DEBUG_MODE:
+            print(f"DEBUG - y_normalized shape: {y_normalized.shape}")
         
         #  Enhanced validity check with graceful fallbacks
         prediction_strings, validity = self._calc_validity(predictions)
         
         # CRITICAL FIX: Ensure all arrays have consistent first dimension
         batch_size = x.shape[0]
-        
-        print(f"DEBUG - batch_size: {batch_size}, validity length: {len(validity)}")
+        if DEBUG_MODE:
+            print(f"DEBUG - batch_size: {batch_size}, validity length: {len(validity)}")
         
         # Ensure validity array matches batch size
         if len(validity) != batch_size:
@@ -624,7 +632,8 @@ class Property_optimization_problem(Problem):
         
         # Ensure y_normalized matches batch size
         if y_normalized.shape[0] != batch_size:
-            print(f"WARNING: y_normalized batch {y_normalized.shape[0]} != batch size {batch_size}")
+            if DEBUG_MODE:
+                print(f"WARNING: y_normalized batch {y_normalized.shape[0]} != batch size {batch_size}")
             if y_normalized.shape[0] > batch_size:
                 y_normalized = y_normalized[:batch_size]
             else:
@@ -908,14 +917,17 @@ class Property_optimization_problem(Problem):
                         parts = cleaned_poly.split("|")
                         if len(parts) >= 1:
                             basic_format = f"{parts[0]}|1.0|<1-1:1.0:1.0"
-                            print(f"Trying basic format: {basic_format}")
+                            if DEBUG_MODE:
+                                print(f"Trying basic format: {basic_format}")
                             g = poly_smiles_to_graph(basic_format, np.nan, np.nan, None)
                             cleaned_poly = basic_format
-                            print(f"Basic format worked for polymer {i}")
+                            if DEBUG_MODE:
+                                print(f"Basic format worked for polymer {i}")
                         else:
                             continue
                     except Exception as e2:
-                        print(f"Basic format failed: {e2}")
+                        if DEBUG_MODE:
+                            print(f"Basic format failed: {e2}")
                         continue
                 
                 # Enhanced tokenization with error handling
@@ -925,19 +937,23 @@ class Property_optimization_problem(Problem):
                     elif tokenization == "RT_tokenized":
                         target_tokens = tokenize_poly_input_RTlike(poly_input=cleaned_poly)
                     
-                    print(f"Tokenization successful for polymer {i}: {len(target_tokens)} tokens")
+                    if DEBUG_MODE:
+                        print(f"Tokenization successful for polymer {i}: {len(target_tokens)} tokens")
                     
                     if not target_tokens or len(target_tokens) == 0:
-                        print(f"Empty tokenization result for polymer {i}")
+                        if DEBUG_MODE:
+                            print(f"Empty tokenization result for polymer {i}")
                         continue
                         
                 except Exception as token_error:
-                    print(f"Tokenization failed for polymer {i}: {token_error}")
+                    if DEBUG_MODE:
+                        print(f"Tokenization failed for polymer {i}: {token_error}")
                     continue
 
                 # Enhanced token processing with OOV handling
                 try:
-                    print(f"Processing tokens for polymer {i}: {len(target_tokens)} tokens")
+                    if DEBUG_MODE:
+                        print(f"Processing tokens for polymer {i}: {len(target_tokens)} tokens")
                     
                     # Handle out-of-vocabulary tokens
                     unk_token = '_UNK'  # Based on your vocab format
@@ -951,7 +967,8 @@ class Property_optimization_problem(Problem):
                             # If no UNK token found, use the first vocab token
                             unk_token = list(vocab.keys())[0]
                     
-                    print(f"Using UNK token: '{unk_token}' (ID: {vocab[unk_token]})")
+                    if DEBUG_MODE:
+                        print(f"Using UNK token: '{unk_token}' (ID: {vocab[unk_token]})")
                     
                     # Check and replace OOV tokens
                     original_length = len(target_tokens)
@@ -966,20 +983,24 @@ class Property_optimization_problem(Problem):
                             oov_count += 1
                     
                     if oov_count > 0:
-                        print(f"Replaced {oov_count}/{original_length} OOV tokens with '{unk_token}'")
+                        if DEBUG_MODE:
+                            print(f"Replaced {oov_count}/{original_length} OOV tokens with '{unk_token}'")
                     
                     # Use cleaned tokens for feature conversion
                     tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=cleaned_tokens, vocab=vocab)
                     
-                    print(f"Feature conversion successful: {len(tgt_token_ids) if hasattr(tgt_token_ids, '__len__') else 'scalar'} token IDs")
+                    if DEBUG_MODE:
+                        print(f"Feature conversion successful: {len(tgt_token_ids) if hasattr(tgt_token_ids, '__len__') else 'scalar'} token IDs")
                     
                     # Validate token IDs
                     if tgt_token_ids is None:
-                        print(f"Token IDs are None for polymer {i}")
+                        if DEBUG_MODE:
+                            print(f"Token IDs are None for polymer {i}")
                         continue
                         
                     if torch.is_tensor(tgt_token_ids) and len(tgt_token_ids) == 0:
-                        print(f"Empty token IDs tensor for polymer {i}")
+                        if DEBUG_MODE:
+                            print(f"Empty token IDs tensor for polymer {i}")
                         continue
                         
                     g.tgt_token_ids = tgt_token_ids
@@ -988,16 +1009,19 @@ class Property_optimization_problem(Problem):
                     
                     data_list.append(g)
                     valid_indices.append(i)
-                    print(f"Successfully processed polymer {i} (replaced {oov_count} OOV tokens)")
+                    if DEBUG_MODE:
+                        print(f"Successfully processed polymer {i} (replaced {oov_count} OOV tokens)")
                     
                 except Exception as feature_error:
-                    print(f"Feature conversion failed for polymer {i}: {feature_error}")
-                    print(f"Error type: {type(feature_error)}")
+                    if DEBUG_MODE:
+                        print(f"Feature conversion failed for polymer {i}: {feature_error}")
+                        print(f"Error type: {type(feature_error)}")
                     continue
                     
             except Exception as e:
-                print(f"Unexpected error processing polymer {i}: {e}")
-                print(f"Polymer string: {s}")
+                if DEBUG_MODE:
+                    print(f"Unexpected error processing polymer {i}: {e}")
+                    print(f"Polymer string: {s}")
                 continue
         
         print(f"Successfully processed {len(data_list)} out of {len(prediction_strings)} polymers")
@@ -1049,7 +1073,8 @@ class Property_optimization_problem(Problem):
                                                                tokenization=tokenization) for sample in range(len(reconstruction))]
                         all_reconstructions.extend(reconstruction_strings)
                         
-                        print(f"Batch {i} processed successfully: {len(reconstruction_strings)} reconstructions")
+                        if DEBUG_MODE:
+                            print(f"Batch {i} processed successfully: {len(reconstruction_strings)} reconstructions")
                         
                     except Exception as e:
                         print(f"Error in batch {i}: {e}")

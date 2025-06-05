@@ -48,30 +48,10 @@ if device.type == 'cuda':
     print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3, 1), 'GB')
     print('Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3, 1), 'GB')
 
-def robust_polymer_validation(poly_input):
-    """
-    SIMPLIFIED validation that relies on the enhanced G2S_clean validation
-    """
-    if not poly_input or not isinstance(poly_input, str):
-        return None
-    
-    # Let the enhanced G2S_clean validation handle complex validation
-    # Just do basic cleanup here
-    cleaned = poly_input.strip()
-    if len(cleaned) == 0:
-        return None
-    
-    # Basic format check - ensure it has polymer structure
-    if '|' not in cleaned and '.' not in cleaned:
-        # Try to create basic polymer format
-        if len(cleaned) > 0:
-            return f"{cleaned}|1.0|<1-1:1.0:1.0"
-    
-    return cleaned
 
 def fix_polymer_format(poly_input):
     """
-    Fix polymer format issues between model output and processing expectations
+    Enhanced polymer format fixing with better error handling
     """
     try:
         if not poly_input or not isinstance(poly_input, str):
@@ -79,84 +59,144 @@ def fix_polymer_format(poly_input):
         
         print(f"Debug - Original polymer input: {poly_input}")
         
+        # Clean up the input first
+        cleaned_input = poly_input.strip()
+        
+        # Handle truncated/corrupted strings
+        if len(cleaned_input) > 1000:  # Suspiciously long, likely corrupted
+            print(f"Warning: Polymer string too long ({len(cleaned_input)} chars), likely corrupted")
+            return None
+        
         # Split by '|' to get components
-        parts = poly_input.split('|')
+        parts = cleaned_input.split('|')
         
         if len(parts) < 2:
             print(f"Warning: Polymer input doesn't have enough parts: {poly_input}")
-            print("Expected format: MonA.MonB|stoichiometry|connectivity")
             # Try to create basic format
-            return f"{poly_input}|1.0|<1-1:1.0:1.0"
+            return f"{cleaned_input}|1.0|<1-1:1.0:1.0"
         
         monomers_part = parts[0]
-        second_part = parts[1]
         
-        print(f"Debug - Monomers part: {monomers_part}")
-        print(f"Debug - Second part: {second_part}")
+        # Validate monomers part - should contain valid SMILES
+        if not monomers_part or len(monomers_part) < 5:
+            print(f"Warning: Monomers part too short: {monomers_part}")
+            return None
         
-        # Count monomers
+        # Count monomers by splitting on '.'
         monomers = monomers_part.split('.')
         monomer_count = len(monomers)
         
+        print(f"Debug - Monomers part: {monomers_part}")
         print(f"Debug - Monomer count: {monomer_count}")
-        print(f"Debug - Monomers: {monomers}")
         
-        # Check if second part contains connectivity info (starts with '<')
-        if second_part.startswith('<'):
-            print("Debug - Second part contains connectivity info, need to add stoichiometry")
-            # Need to add proper stoichiometry
+        # Validate each monomer contains attachment points
+        for i, monomer in enumerate(monomers):
+            if '*' not in monomer:
+                print(f"Warning: Monomer {i+1} has no attachment points: {monomer}")
+                return None
+        
+        # Parse remaining parts carefully
+        remaining_parts = parts[1:]
+        
+        # Try to separate stoichiometry from connectivity
+        stoichiometry_parts = []
+        connectivity_part = None
+        
+        for part in remaining_parts:
+            if part.startswith('<'):
+                # This is connectivity
+                connectivity_part = part
+                break
+            elif '<' in part:
+                # Mixed stoichiometry and connectivity - need to split
+                split_idx = part.find('<')
+                stoich_part = part[:split_idx]
+                conn_part = part[split_idx:]
+                
+                if stoich_part:  # Only add if not empty
+                    try:
+                        float(stoich_part)  # Validate it's a number
+                        stoichiometry_parts.append(stoich_part)
+                    except ValueError:
+                        print(f"Warning: Invalid stoichiometry value: {stoich_part}")
+                
+                connectivity_part = conn_part
+                break
+            else:
+                # This should be stoichiometry
+                try:
+                    float(part)  # Validate it's a number
+                    stoichiometry_parts.append(part)
+                except ValueError:
+                    print(f"Warning: Invalid stoichiometry value: {part}")
+        
+        print(f"Debug - Stoichiometry parts: {stoichiometry_parts}")
+        print(f"Debug - Connectivity part: {connectivity_part}")
+        
+        # Generate correct stoichiometry if missing or incorrect count
+        if len(stoichiometry_parts) != monomer_count:
+            print(f"Debug - Stoichiometry count mismatch: found {len(stoichiometry_parts)}, need {monomer_count}")
+            
             if monomer_count == 1:
-                # Homopolymer
-                fixed_format = f"{monomers_part}|1.0|{second_part}"
+                stoichiometry_parts = ["1.0"]
             elif monomer_count == 2:
-                # Copolymer - create equal weights
-                fixed_format = f"{monomers_part}|0.5|0.5|{second_part}"
+                stoichiometry_parts = ["0.5", "0.5"]
             else:
-                # Multi-polymer - create equal weights
-                weight_per_monomer = round(1.0 / monomer_count, 3)
-                weights = '|'.join([str(weight_per_monomer)] * monomer_count)
-                fixed_format = f"{monomers_part}|{weights}|{second_part}"
-        else:
-            # Second part might be stoichiometry, check if we have connectivity
-            if len(parts) >= 3:
-                # Format: MonA.MonB|stoich1|stoich2|connectivity (already correct)
-                fixed_format = poly_input
+                # Equal weights for multiple monomers
+                weight = round(1.0 / monomer_count, 3)
+                stoichiometry_parts = [str(weight)] * monomer_count
+        
+        # Generate default connectivity if missing or malformed
+        if not connectivity_part or not connectivity_part.startswith('<'):
+            if monomer_count == 1:
+                connectivity_part = "<1-1:1.0:1.0"
+            elif monomer_count == 2:
+                connectivity_part = "<1-2:1.0:1.0"
             else:
-                # Format: MonA.MonB|stoich, need to add connectivity
-                # CRITICAL FIX: Handle stoichiometry correctly for multiple monomers
-                if monomer_count == 1:
-                    # Homopolymer: single weight is fine
-                    fixed_format = f"{monomers_part}|{second_part}|<1-1:1.0:1.0"
-                elif monomer_count == 2:
-                    # FIXED: Copolymer needs TWO weights
-                    try:
-                        weight_val = float(second_part)
-                        # If single weight provided, create two equal weights that sum to weight_val
-                        weight1 = weight_val / 2
-                        weight2 = weight_val / 2
-                        fixed_format = f"{monomers_part}|{weight1}|{weight2}|<1-2:1.0:1.0"
-                    except ValueError:
-                        # If can't parse as float, use equal weights
-                        fixed_format = f"{monomers_part}|0.5|0.5|<1-2:1.0:1.0"
-                else:
-                    # Multi-polymer: distribute weight among all monomers
-                    try:
-                        weight_val = float(second_part)
-                        weight_per_monomer = weight_val / monomer_count
-                        weights = '|'.join([str(weight_per_monomer)] * monomer_count)
-                        fixed_format = f"{monomers_part}|{weights}|<1-1:1.0:1.0"
-                    except ValueError:
-                        # Equal weights fallback
-                        weight_per_monomer = round(1.0 / monomer_count, 3)
-                        weights = '|'.join([str(weight_per_monomer)] * monomer_count)
-                        fixed_format = f"{monomers_part}|{weights}|<1-1:1.0:1.0"
+                connectivity_part = "<1-1:1.0:1.0"  # Default fallback
+        
+        # Reconstruct the polymer string
+        fixed_format = f"{monomers_part}|{'|'.join(stoichiometry_parts)}|{connectivity_part}"
         
         print(f"Debug - Fixed polymer input: {fixed_format}")
+        
+        # Final validation - check the format makes sense
+        final_parts = fixed_format.split('|')
+        expected_parts = 2 + monomer_count  # monomers + stoichiometry + connectivity
+        
+        if len(final_parts) != expected_parts:
+            print(f"Warning: Fixed format has wrong number of parts: {len(final_parts)} vs expected {expected_parts}")
+        
         return fixed_format
         
     except Exception as e:
         print(f"Error in fix_polymer_format: {e}")
-        return poly_input
+        return poly_input  # Return original if fixing fails
+
+def robust_polymer_validation(poly_input):
+    """
+    Enhanced validation with the improved format fixer
+    """
+    if not poly_input or not isinstance(poly_input, str):
+        return None
+    
+    # First try the format fixer
+    fixed_poly = fix_polymer_format(poly_input)
+    
+    if fixed_poly is None:
+        return None
+    
+    # Basic sanity checks
+    if len(fixed_poly) < 10:  # Minimum reasonable length
+        return None
+    
+    if fixed_poly.count('|') < 2:  # Need at least 2 separators
+        return None
+    
+    if '*' not in fixed_poly:  # Need attachment points
+        return None
+    
+    return fixed_poly
 
 def auto_detect_property_count_and_names(model, device):
     """
@@ -463,6 +503,75 @@ class Property_optimization_problem(Problem):
             
         return predictions
 
+    def _calc_validity(self, predictions):
+        """
+        Enhanced validity calculation with detailed logging and robust polymer validation
+        """
+        prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
+                                           tokenization=tokenization) for sample in range(len(predictions))]
+        
+        # Log statistics for debugging
+        debug_verbose = False  # Set to True only when debugging
+        
+        if debug_verbose:
+            print(f"🔍 Generated {len(prediction_strings)} strings")
+            if prediction_strings:
+                lengths = [len(s) for s in prediction_strings]
+                print(f"🔍 String lengths - Avg: {np.mean(lengths):.1f}, Max: {max(lengths)}, Min: {min(lengths)}")
+                
+                # Check for common issues
+                truncated = sum(1 for s in prediction_strings if len(s) > 500)
+                no_attachment = sum(1 for s in prediction_strings if '*' not in s)
+                no_pipe = sum(1 for s in prediction_strings if '|' not in s)
+                
+                print(f"🔍 Potential issues - Truncated: {truncated}, No attachment points: {no_attachment}, No pipe separator: {no_pipe}")
+        
+        mols_valid = []
+        fixed_strings = []
+        validation_failures = {"format": 0, "graph": 0, "fallback": 0}
+        
+        for i, _s in enumerate(prediction_strings):
+            poly_input = _s[:-1] if _s.endswith('_') else _s  # Remove last character if it's padding
+            
+            # Use robust validation
+            fixed_poly = robust_polymer_validation(poly_input)
+            
+            if fixed_poly is None:
+                validation_failures["format"] += 1
+                mols_valid.append(0)
+                fixed_strings.append(poly_input)
+                continue
+                
+            try:
+                poly_graph = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
+                mols_valid.append(1)
+                fixed_strings.append(fixed_poly)
+            except Exception as e:
+                validation_failures["graph"] += 1
+                if debug_verbose and i < 3:  # Only log first few failures to avoid spam
+                    print(f"Graph creation failed for polymer {i}: {e}")
+                
+                # Last attempt: try basic fallback
+                try:
+                    fallback_poly = poly_input.split("|")[0] + "|1.0|<1-1:1.0:1.0"
+                    poly_graph = poly_smiles_to_graph(fallback_poly, np.nan, np.nan, None)
+                    mols_valid.append(1)
+                    fixed_strings.append(fallback_poly)
+                except:
+                    validation_failures["fallback"] += 1
+                    mols_valid.append(0)
+                    fixed_strings.append(poly_input)
+        
+        # Log validation summary (always show this)
+        valid_count = sum(mols_valid)
+        print(f"🔍 Validation summary: {valid_count}/{len(prediction_strings)} valid ({100*valid_count/len(prediction_strings):.1f}%)")
+        if debug_verbose:
+            print(f"🔍 Failure breakdown - Format: {validation_failures['format']}, Graph: {validation_failures['graph']}, Fallback: {validation_failures['fallback']}")
+        
+        return fixed_strings, np.array(mols_valid)
+
+
+    
     def _evaluate(self, x, out, *args, **kwargs):
         self.eval_calls += 1
         
@@ -753,45 +862,7 @@ class Property_optimization_problem(Problem):
             "predictions_doublecorrect": expanded_y_p,
             "string_decoded": prediction_strings, 
         }
-        self.results_custom[str(self.eval_calls)] = results_dict
-    
-    def _calc_validity(self, predictions):
-        """
-        Enhanced validity calculation that uses robust polymer validation (from optimize_BO.py)
-        """
-        prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
-                                           tokenization=tokenization) for sample in range(len(predictions))]
-        mols_valid = []
-        fixed_strings = []
-        
-        for _s in prediction_strings:
-            poly_input = _s[:-1] if _s.endswith('_') else _s  # Remove last character if it's padding
-            
-            # Use robust validation from optimize_BO.py
-            fixed_poly = robust_polymer_validation(poly_input)
-            
-            if fixed_poly is None:
-                mols_valid.append(0)
-                fixed_strings.append(poly_input)
-                continue
-                
-            try:
-                poly_graph = poly_smiles_to_graph(fixed_poly, np.nan, np.nan, None)
-                mols_valid.append(1)
-                fixed_strings.append(fixed_poly)
-            except Exception as e:
-                print(f"Graph creation failed even after robust validation: {e}")
-                # Last attempt: try basic fallback
-                try:
-                    fallback_poly = poly_input.split("|")[0] + "|1.0|<1-1:1.0:1.0"
-                    poly_graph = poly_smiles_to_graph(fallback_poly, np.nan, np.nan, None)
-                    mols_valid.append(1)
-                    fixed_strings.append(fallback_poly)
-                except:
-                    mols_valid.append(0)
-                    fixed_strings.append(poly_input)
-        
-        return fixed_strings, np.array(mols_valid)
+        self.results_custom[str(self.eval_calls)] = results_dict  
     
     def _make_polymer_mol(self,poly_input):
         # If making the mol works, the string is considered valid
@@ -1254,18 +1325,23 @@ mutation = PolynomialMutation(prob=1.5 / problem.n_var, eta=15)
 from pymoo.core.repair import Repair
 
 class correctSamplesRepair(Repair):
-    def __init__(self, model, **kwargs):
+    def __init__(self, model, property_count=1, **kwargs):
         super().__init__(**kwargs)
         self.model_predictor = model
         self.repair_attempts = 0
         self.max_repair_attempts = 100  # Limit repair calls per generation
+        self.property_count = property_count  # Add property count
 
     def _do(self, problem, X, **kwargs):
         self.repair_attempts += 1
         
         if self.repair_attempts > self.max_repair_attempts:
-            print(f"⚠️  REPAIR LIMIT: Reached max repair attempts, using conservative fallback")
+            print(f"⚠️  REPAIR LIMIT: Reached max repair attempts ({self.max_repair_attempts}), using conservative fallback")
             return self._conservative_sampling(X, problem)
+        
+        # Reset counter occasionally to prevent permanent lockout
+        if self.repair_attempts % 50 == 0:
+            print(f"🔧 REPAIR CHECKPOINT: {self.repair_attempts} attempts so far")
         
         print(f"🔧 REPAIR #{self.repair_attempts}: Starting repair of {len(X)} individuals")
         
@@ -1293,20 +1369,26 @@ class correctSamplesRepair(Repair):
         
     def _calc_validity(self, predictions):
         """
-        Enhanced validity calculation with robust polymer validation (from optimize_BO.py)
+        Enhanced validity calculation with detailed logging (consistent with main class)
         """
         prediction_strings = [combine_tokens(tokenids_to_vocab(predictions[sample][0].tolist(), vocab), 
                                            tokenization=tokenization) for sample in range(len(predictions))]
+        
+        # Simplified logging for repair context
+        print(f"🔧 Repair validating {len(prediction_strings)} strings")
+        
         mols_valid = []
         fixed_strings = []
+        validation_failures = {"format": 0, "graph": 0, "fallback": 0}
         
-        for _s in prediction_strings:
+        for i, _s in enumerate(prediction_strings):
             poly_input = _s[:-1] if _s.endswith('_') else _s  # Remove last character if it's padding
             
-            # Use robust validation from optimize_BO.py
+            # Use robust validation
             fixed_poly = robust_polymer_validation(poly_input)
             
             if fixed_poly is None:
+                validation_failures["format"] += 1
                 mols_valid.append(0)
                 fixed_strings.append(poly_input)
                 continue
@@ -1316,7 +1398,8 @@ class correctSamplesRepair(Repair):
                 mols_valid.append(1)
                 fixed_strings.append(fixed_poly)
             except Exception as e:
-                print(f"Graph creation failed even after robust validation: {e}")
+                validation_failures["graph"] += 1
+                
                 # Last attempt: try basic fallback
                 try:
                     fallback_poly = poly_input.split("|")[0] + "|1.0|<1-1:1.0:1.0"
@@ -1324,13 +1407,24 @@ class correctSamplesRepair(Repair):
                     mols_valid.append(1)
                     fixed_strings.append(fallback_poly)
                 except:
+                    validation_failures["fallback"] += 1
                     mols_valid.append(0)
                     fixed_strings.append(poly_input)
+        
+        # Log repair validation summary
+        valid_count = sum(mols_valid)
+        print(f"🔧 Repair validation: {valid_count}/{len(prediction_strings)} valid ({100*valid_count/len(prediction_strings):.1f}%)")
         
         return fixed_strings, np.array(mols_valid)
         
     def _normal_repair(self, X, problem):
-        """Normal repair using model inference"""
+        """Enhanced repair using model inference with better validation"""
+        # Add early validation
+        if len(X) == 0:
+            raise ValueError("Empty population for repair")
+        
+        print(f"🔧 Starting normal repair on {len(X)} individuals")
+        
         pop_X_torch = torch.from_numpy(X.astype(np.float32)).to(device)
         
         with torch.no_grad():
@@ -1341,8 +1435,15 @@ class correctSamplesRepair(Repair):
         prediction_strings, validity = self._calc_validity(predictions)
         valid_indices = np.where(validity == 1)[0]
         
-        if len(valid_indices) < len(X) * 0.2:  # Less than 20% valid
+        validity_rate = len(valid_indices) / len(X) * 100
+        print(f"🔧 Repair validity rate: {len(valid_indices)}/{len(X)} ({validity_rate:.1f}%)")
+        
+        # More lenient threshold but with early warning
+        if len(valid_indices) < len(X) * 0.1:  # Lowered from 0.2 to 0.1
+            print(f"⚠️  Very low validity rate: {validity_rate:.1f}%")
             raise ValueError(f"Too few valid predictions: {len(valid_indices)}/{len(X)}")
+        elif len(valid_indices) < len(X) * 0.2:
+            print(f"⚠️  Low validity rate: {validity_rate:.1f}% (proceeding anyway)")
         
         # Process only valid predictions
         predictions_valid = [predictions[i] for i in valid_indices]
@@ -1351,6 +1452,8 @@ class correctSamplesRepair(Repair):
         
         if len(z_p_valid) == 0:
             raise ValueError("No valid encodings produced")
+        
+        print(f"🔧 Successfully encoded {len(z_p_valid)} valid predictions")
         
         # Reconstruct full population
         repaired_X = np.copy(X)
@@ -1517,7 +1620,7 @@ class correctSamplesRepair(Repair):
                         
                     except Exception as e:
                         # Add fallback data for failed batch
-                        fallback_y = np.array([[0.0] * property_count])
+                        fallback_y = np.array([[0.0] * self.property_count])  # Use self.property_count
                         fallback_z = np.array([[0.0] * 32])
                         y_p.append(fallback_y)
                         z_p.append(fallback_z)
@@ -1545,7 +1648,7 @@ class correctSamplesRepair(Repair):
 algorithm = NSGA2(pop_size=pop_size,
                   sampling=sampling,
                   crossover=crossover,
-                  repair=correctSamplesRepair(model),
+                  repair=correctSamplesRepair(model, property_count=property_count),
                   mutation=mutation,
                   eliminate_duplicates=True)
 

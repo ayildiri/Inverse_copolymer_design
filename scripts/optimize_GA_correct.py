@@ -581,9 +581,18 @@ class Property_optimization_problem(Problem):
     def _evaluate(self, x, out, *args, **kwargs):
         self.eval_calls += 1
         
+        # Add comprehensive logging
+        print(f"🔍 Evaluation #{self.eval_calls}: Processing {x.shape[0] if x.ndim > 1 else 1} individuals")
+        
         # Ensure x is properly shaped and valid
         if x.ndim == 1:
             x = x.reshape(1, -1)
+        
+        # Early validation of input
+        if x.shape[0] == 0:
+            print("❌ ERROR: Empty population in evaluation")
+            out["F"] = np.array([]).reshape(0, self.n_obj)
+            return
         
         # Add bounds checking
         x = np.clip(x, 
@@ -1272,6 +1281,18 @@ problem = Property_optimization_problem(
     property_count=property_count
 )
 
+# Add diagnostic test
+print("🧪 Running diagnostic test on problem...")
+try:
+    test_x = np.random.uniform(low=min_values, high=max_values, size=(2, len(min_values)))
+    test_out = {}
+    problem._evaluate(test_x, test_out)
+    print(f"✅ Diagnostic test passed: {problem.eval_calls} evaluations completed")
+    print(f"📊 Test objectives shape: {test_out['F'].shape if 'F' in test_out else 'None'}")
+except Exception as e:
+    print(f"❌ Diagnostic test FAILED: {e}")
+    raise e
+
 # Termination criterium
 class StableConvergenceTermination(Termination):
     def __init__(self, max_gen=100, stability_threshold=0.001, stability_generations=5):
@@ -1324,8 +1345,11 @@ if stopping_type == "time":
     pop_size = 100  # ✅ Fixed large population
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
-    termination = get_termination("n_eval", max_iter)
-    pop_size = 100  # ✅ Fixed large population (not formula-based)
+    # Convert max_iter to generations based on population size
+    max_generations = max(10, max_iter // pop_size)  # Ensure at least 10 generations
+    termination = get_termination("n_gen", max_generations)
+    pop_size = 100
+    print(f"Using {max_generations} generations with population size {pop_size}")
 elif stopping_type == "convergence":
     stopping_criterion = stopping_type+"_convergence"
     termination = StableConvergenceTermination(
@@ -1342,9 +1366,14 @@ else:
 
 # Define NSGA2 algorithm parameters
 
+# Define NSGA2 algorithm parameters
+print(f"🚀 Initializing GA with population size: {pop_size}")
+print(f"🎯 Target generations: {max_generations if 'max_generations' in locals() else 'undefined'}")
+print(f"📊 Problem dimensions: {problem.n_var} variables, {problem.n_obj} objectives")
+
 sampling = LatinHypercubeSampling()
 crossover = SimulatedBinaryCrossover(prob=0.8, eta=5)  
-mutation = PolynomialMutation(prob=1.5 / problem.n_var, eta=15)   
+mutation = PolynomialMutation(prob=1.5 / problem.n_var, eta=15) 
 
 # Enhanced repair class with robust validation (from optimize_BO.py)
 from pymoo.core.repair import Repair
@@ -1354,8 +1383,15 @@ class correctSamplesRepair(Repair):
         super().__init__(**kwargs)
         self.model_predictor = model
         self.repair_attempts = 0
-        self.max_repair_attempts = 100  # Limit repair calls per generation
-        self.property_count = property_count  # Add property count
+        self.max_repair_attempts = 1000  # Increased limit
+        self.property_count = property_count
+        self.generation_count = 0  # Track generations
+        
+    def reset_for_new_generation(self):
+        """Reset repair attempts for new generation"""
+        self.repair_attempts = 0
+        self.generation_count += 1
+        print(f"🔧 Repair mechanism reset for generation {self.generation_count}")
 
     def _do(self, problem, X, **kwargs):
         self.repair_attempts += 1
@@ -1670,12 +1706,17 @@ class correctSamplesRepair(Repair):
             return [], [], [], None
 
 
+print(f"🔧 Creating repair mechanism for {property_count} properties")
+repair = correctSamplesRepair(model, property_count=property_count)
+
 algorithm = NSGA2(pop_size=pop_size,
                   sampling=sampling,
                   crossover=crossover,
-                  repair=correctSamplesRepair(model, property_count=property_count),
+                  repair=repair,
                   mutation=mutation,
                   eliminate_duplicates=True)
+
+print(f"✅ NSGA2 algorithm initialized successfully")
 
 # Check if resuming from checkpoint
 start_iteration = 0
@@ -1713,9 +1754,20 @@ class CheckpointCallback:
         self.monitor_every = monitor_every
         self.log_file = log_file
         self.start_time = time.time()
+        self.last_eval_count = 0
         
     def __call__(self, algorithm):
         iteration = algorithm.n_gen
+        current_evals = self.problem.eval_calls
+        
+        # Detect if evaluations have stalled
+        if current_evals == self.last_eval_count and iteration > 0:
+            print(f"⚠️  WARNING: No new evaluations since last generation! (Evals: {current_evals})")
+        self.last_eval_count = current_evals
+        
+        # Always log first few generations
+        if iteration <= 5 or iteration % self.monitor_every == 0:
+            print(f"🏃 Generation {iteration}: {current_evals} total evaluations")
         
         # Monitor progress regularly
         if iteration % self.monitor_every == 0 and iteration > 0:
@@ -1749,6 +1801,12 @@ callback = CheckpointCallback(
 
 # Run the optimization with callback
 try:
+    print(f"🚀 Starting optimization...")
+    print(f"📋 Configuration:")
+    print(f"   - Population size: {pop_size}")
+    print(f"   - Termination: {termination}")
+    print(f"   - Problem vars: {problem.n_var}, objectives: {problem.n_obj}")
+    
     res = minimize(
         problem,
         algorithm,
@@ -1756,6 +1814,7 @@ try:
         seed=opt_run,
         callback=callback,
         verbose=True,
+        save_history=True  # Enable history saving for debugging
     )
     elapsed_time = time.time() - start_time
     log_progress(f"Optimization completed. Total time: {elapsed_time:.2f} seconds", log_file)

@@ -1345,10 +1345,10 @@ if stopping_type == "time":
     pop_size = 100  # ✅ Fixed large population
 elif stopping_type == "iter":
     stopping_criterion = stopping_type+"_"+str(max_iter)
+    pop_size = 100  # ✅ Define pop_size FIRST
     # Convert max_iter to generations based on population size
-    max_generations = max(10, max_iter // pop_size)  # Ensure at least 10 generations
+    max_generations = max(10, max_iter // pop_size)  # ✅ Now pop_size is defined
     termination = get_termination("n_gen", max_generations)
-    pop_size = 100
     print(f"Using {max_generations} generations with population size {pop_size}")
 elif stopping_type == "convergence":
     stopping_criterion = stopping_type+"_convergence"

@@ -685,7 +685,7 @@ class PolymerDatabaseManager:
                 for poly_type in ['alternating']:
                     for comp in ['4A_4B']:
                         new_row = row.copy()
-                        new_row['poly_type'] = poly_type
+                        new_row['poly_type'] = f"{poly_type} (homopolymer)"  # ✅ NEW: Add (homopolymer)
                         new_row['comp'] = comp
                         new_row['fracA'] = 0.5
                         new_row['fracB'] = 0.5

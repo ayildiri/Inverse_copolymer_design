@@ -93,6 +93,18 @@ class PolymerDatabaseManager:
         Ensures chemical validity is preserved and consistent formatting
         """
         try:
+            # ✅ NEW: Pre-filter obviously invalid patterns
+            if not smiles or smiles.strip() == '':
+                return None
+                
+            # Count parentheses
+            open_parens = smiles.count('(')
+            close_parens = smiles.count(')')
+            if abs(open_parens - close_parens) > 3:  # Too unbalanced
+                if self.verbose:
+                    logger.warning(f"Severely unbalanced parentheses in SMILES: {smiles}")
+                return None
+            
             # Handle different attachment point formats
             numbered_smiles = smiles
             
@@ -109,7 +121,7 @@ class PolymerDatabaseManager:
             mol = Chem.MolFromSmiles(numbered_smiles)
             
             if mol is None:
-                # ✅ IMPROVED: Try auto-repair if original fails
+                # ✅ ENHANCED: Try auto-repair with multiple strategies
                 repaired_smiles = self._attempt_smiles_repair(numbered_smiles)
                 if repaired_smiles != numbered_smiles:
                     mol = Chem.MolFromSmiles(repaired_smiles)
@@ -118,14 +130,23 @@ class PolymerDatabaseManager:
                         if self.verbose:
                             logger.info(f"Auto-repaired SMILES: {smiles} → {repaired_smiles}")
                     else:
-                        # ✅ IMPROVED: Try multiple repair attempts
+                        # ✅ ENHANCED: Try multiple repair strategies
                         for attempt in range(3):
-                            repaired_smiles = self._attempt_smiles_repair(repaired_smiles)
-                            mol = Chem.MolFromSmiles(repaired_smiles)
+                            if attempt == 0:
+                                # Strategy 1: Remove all ()
+                                test_smiles = repaired_smiles.replace('()', '')
+                            elif attempt == 1:
+                                # Strategy 2: Replace () with C
+                                test_smiles = repaired_smiles.replace('()', 'C')
+                            else:
+                                # Strategy 3: More aggressive repair
+                                test_smiles = self._aggressive_repair(repaired_smiles)
+                            
+                            mol = Chem.MolFromSmiles(test_smiles)
                             if mol is not None:
-                                numbered_smiles = repaired_smiles
+                                numbered_smiles = test_smiles
                                 if self.verbose:
-                                    logger.info(f"Auto-repaired SMILES (attempt {attempt+2}): {smiles} → {repaired_smiles}")
+                                    logger.info(f"Auto-repaired SMILES (attempt {attempt+2}): {smiles} → {test_smiles}")
                                 break
             
             if mol is None:
@@ -178,12 +199,21 @@ class PolymerDatabaseManager:
 
     def _attempt_smiles_repair(self, smiles: str) -> str:
         """
-        Intelligent SMILES repair using chemical knowledge and pattern detection
+        Enhanced intelligent SMILES repair with pre-filtering
         """
         if '()' not in smiles:
             return smiles  # No empty parentheses to fix
         
         repaired = smiles
+        
+        # ✅ NEW: Pre-filter obviously corrupted patterns
+        corrupted_patterns = [
+            (r'\(\)\(\)', ''),                          # ()() → remove
+            (r'\(\)\(\)\(\)', ''),                      # ()()() → remove
+        ]
+        
+        for pattern, replacement in corrupted_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
         
         # ✅ COMPREHENSIVE: Apply repairs in order of specificity
         repaired = self._repair_aromatic_rings(repaired)
@@ -382,6 +412,27 @@ class PolymerDatabaseManager:
         
         for pattern, replacement in remaining_patterns:
             repaired = re.sub(pattern, replacement, repaired)
+        
+        return repaired
+
+    def _aggressive_repair(self, smiles: str) -> str:
+        """
+        Aggressive repair strategy for severely corrupted SMILES
+        """
+        repaired = smiles
+        
+        # Remove multiple consecutive empty parentheses
+        repaired = re.sub(r'\(\)\(\)+', '', repaired)
+        
+        # Remove empty parentheses at start/end
+        repaired = re.sub(r'^\(\)', '', repaired)
+        repaired = re.sub(r'\(\)$', '', repaired)
+        
+        # Fix common ring patterns
+        repaired = re.sub(r'([A-Za-z])([0-9]+)\(\)([A-Za-z])', r'\1\2\3', repaired)
+        
+        # Remove remaining empty parentheses
+        repaired = repaired.replace('()', '')
         
         return repaired
     

@@ -941,14 +941,14 @@ class PolymerDatabaseManager:
         cleaned = poly_input.strip()
         
         if remove_trailing_values:
-            # Remove property values appended at the end (anything after ~ including ~)
-            # Pattern: ~502.5, ~123, ~45.67, etc.
             import re
-            cleaned = re.sub(r'~\d*\.?\d*$', '', cleaned).strip()
+            # Only remove values that start with ~ (tilde)
+            # Pattern: ~502.5, ~123, ~45.67, etc.
+            cleaned = re.sub(r'~[0-9]*\.?[0-9]*$', '', cleaned).strip()
             
-            # Also remove any standalone trailing numbers without ~
-            # Pattern: ...connectivity123.45 (in case ~ was stripped elsewhere)
-            cleaned = re.sub(r'(?<=[<>:\d])\d+\.\d+$', '', cleaned).strip()
+            # ✅ REMOVED: The aggressive second regex that was cutting off valid connectivity values
+            # The issue was: re.sub(r'(?<=[<>:\d])\d+\.\d+$', '', cleaned) 
+            # This was removing valid "0.5" from connectivity patterns!
         
         return cleaned if cleaned else None
 

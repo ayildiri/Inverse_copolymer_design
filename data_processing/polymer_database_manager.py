@@ -1015,19 +1015,17 @@ class PolymerDatabaseManager:
         
         return new_df
 
-    def append_to_template(self, new_df: pd.DataFrame, output_path: str = None) -> pd.DataFrame:
-        """
-        Append new dataset to existing template
-        FLEXIBLE: Preserves ALL columns from both datasets
-        """
+    def append_to_template(self, new_df: pd.DataFrame, output_path: str = None, 
+                      exclude_columns: List[str] = None) -> pd.DataFrame:
+    """
+    Append new dataset to existing template with optional column cleanup
+    """
+        if exclude_columns is None:
+            exclude_columns = []
+        
         if self.template_df is None:
-            if self.verbose:
-                logger.info("No existing template found, using new data as template")
             combined_df = new_df.copy()
         else:
-            if self.verbose:
-                logger.info(f"Appending {len(new_df)} rows to existing template with {len(self.template_df)} rows")
-            
             # Align columns - preserves ALL columns from both datasets
             all_columns = list(set(self.template_df.columns) | set(new_df.columns))
             
@@ -1049,8 +1047,16 @@ class PolymerDatabaseManager:
             # Combine dataframes
             combined_df = pd.concat([self.template_df, new_df], ignore_index=True)
         
+        # ✅ NEW: Remove unwanted columns from final output
+        if exclude_columns:
+            columns_to_remove = [col for col in exclude_columns if col in combined_df.columns]
+            if columns_to_remove:
+                combined_df = combined_df.drop(columns=columns_to_remove)
+                if self.verbose:
+                    logger.info(f"Removed unwanted columns: {columns_to_remove}")
+        
         if output_path:
-            combined_df.to_csv(output_path, index=False)
+            combined_df.to_csv(output_path, index=False)  # ✅ Saves only wanted columns
             if self.verbose:
                 logger.info(f"Saved combined dataset to {output_path}")
         

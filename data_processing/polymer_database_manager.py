@@ -1017,9 +1017,9 @@ class PolymerDatabaseManager:
 
     def append_to_template(self, new_df: pd.DataFrame, output_path: str = None, 
                       exclude_columns: List[str] = None) -> pd.DataFrame:
-    """
-    Append new dataset to existing template with optional column cleanup
-    """
+        """
+        Append new dataset to existing template with optional column cleanup
+        """
         if exclude_columns is None:
             exclude_columns = []
         

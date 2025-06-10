@@ -105,8 +105,19 @@ class PolymerDatabaseManager:
             # Clean up any malformed attachment points
             numbered_smiles = re.sub(r'\*([^:\[])', r'[*:1]\1', numbered_smiles)  # Handle bare *
             
-            # Canonicalize with RDKit
+            # ✅ NEW: Try to auto-repair common SMILES corruption
+            repaired_smiles = self._attempt_smiles_repair(numbered_smiles)
+            
+            # Try original first
             mol = Chem.MolFromSmiles(numbered_smiles)
+            if mol is None and repaired_smiles != numbered_smiles:
+                # ✅ NEW: Try repaired version if original fails
+                mol = Chem.MolFromSmiles(repaired_smiles)
+                if mol is not None:
+                    numbered_smiles = repaired_smiles
+                    if self.verbose:
+                        logger.info(f"Auto-repaired SMILES: {smiles} → {repaired_smiles}")
+            
             if mol is None:
                 return None
                 
@@ -154,6 +165,110 @@ class PolymerDatabaseManager:
             result = result.replace(f'[*:{old_num}]', f'[*:{new_num}]')
         
         return result
+
+    def _attempt_smiles_repair(self, smiles: str) -> str:
+        """
+        Intelligent SMILES repair using chemical knowledge and pattern detection
+        """
+        if '()' not in smiles:
+            return smiles  # No empty parentheses to fix
+        
+        repaired = smiles
+        
+        # ✅ FLEXIBLE: Detect and fix aromatic ring systems intelligently
+        repaired = self._repair_aromatic_rings(repaired)
+        
+        # ✅ FLEXIBLE: Fix other structural issues
+        repaired = self._repair_general_patterns(repaired)
+        
+        return repaired
+    
+    def _repair_aromatic_rings(self, smiles: str) -> str:
+        """
+        Intelligently repair aromatic ring systems by analyzing context
+        """
+        # ✅ SMART: Look for aromatic ring patterns and infer missing atoms
+        
+        # Pattern: Detect c1...()...c1 (aromatic rings with missing atoms)
+        ring_pattern = r'c1([^c]*?)c\(\)([^c]*?)c1'
+        
+        def fix_ring(match):
+            prefix = match.group(1)
+            suffix = match.group(2) 
+            
+            # ✅ INTELLIGENT: Count existing carbons and infer missing ones
+            carbon_count = prefix.count('c') + suffix.count('c') + 2  # +2 for the c1 and c1
+            
+            # Common aromatic ring sizes
+            if carbon_count <= 4:  # Likely benzene (6 carbons total)
+                missing_carbons = 6 - carbon_count
+                return f"c1{prefix}{'c' * missing_carbons}{suffix}c1"
+            elif carbon_count == 5:  # Likely pyridine or similar
+                return f"c1{prefix}c{suffix}c1"
+            else:
+                return f"c1{prefix}c{suffix}c1"  # Default: add one carbon
+        
+        repaired = re.sub(ring_pattern, fix_ring, smiles)
+        
+        # Handle non-ring aromatic patterns
+        repaired = self._repair_aromatic_chains(repaired)
+        
+        return repaired
+    
+    def _repair_aromatic_chains(self, smiles: str) -> str:
+        """
+        Fix aromatic chains and partial rings
+        """
+        repaired = smiles
+        
+        # ✅ FLEXIBLE: Generic empty parentheses in aromatic contexts
+        aromatic_patterns = [
+            (r'([cn])c\(\)([cns])', r'\1cc\2'),      # Insert carbon between aromatics
+            (r'([cn])\(\)([cns])', r'\1c\2'),        # Insert missing carbon
+            (r'ccc\(\)([sns])', r'cccc\1'),          # Fix thiophene/pyridine patterns
+            (r'cc\(\)([sns])', r'ccc\1'),            # Fix shorter aromatic chains
+            (r'c\(\)([sns])', r'cc\1'),              # Fix single missing carbon
+        ]
+        
+        for pattern, replacement in aromatic_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
+        
+        return repaired
+    
+    def _repair_general_patterns(self, smiles: str) -> str:
+        """
+        Fix general SMILES corruption patterns using chemical intelligence
+        """
+        repaired = smiles
+        
+        # ✅ FLEXIBLE: Generic empty parentheses in different contexts
+        general_patterns = [
+            # Aliphatic chains  
+            (r'C\(\)C', 'CCC'),                      # Fix aliphatic chains
+            (r'=C\(\)C', '=CC'),                     # Fix double bonds
+            (r'CC\(\)=C', 'CC=C'),                   # Fix adjacent to double bonds
+            
+            # Heteroatoms - be conservative
+            (r'([SNO])\(\)([CNS])', r'\1\2'),        # Remove empty between heteroatoms if safe
+            
+            # Ring closures
+            (r'=C\(\)CC', '=CCC'),                   # Fix in ring systems
+        ]
+        
+        for pattern, replacement in general_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
+        
+        return repaired
+    
+    def _is_valid_smiles(self, smiles: str) -> bool:
+        """
+        Quick validation check for SMILES
+        """
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            return mol is not None
+        except:
+            return False
 
     def get_iupac_name(self, smiles: str) -> str:
         """

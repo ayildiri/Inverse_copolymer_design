@@ -105,18 +105,28 @@ class PolymerDatabaseManager:
             # Clean up any malformed attachment points
             numbered_smiles = re.sub(r'\*([^:\[])', r'[*:1]\1', numbered_smiles)  # Handle bare *
             
-            # ✅ NEW: Try to auto-repair common SMILES corruption
-            repaired_smiles = self._attempt_smiles_repair(numbered_smiles)
-            
-            # Try original first
+            # ✅ IMPROVED: Try original first, then attempt repair if needed
             mol = Chem.MolFromSmiles(numbered_smiles)
-            if mol is None and repaired_smiles != numbered_smiles:
-                # ✅ NEW: Try repaired version if original fails
-                mol = Chem.MolFromSmiles(repaired_smiles)
-                if mol is not None:
-                    numbered_smiles = repaired_smiles
-                    if self.verbose:
-                        logger.info(f"Auto-repaired SMILES: {smiles} → {repaired_smiles}")
+            
+            if mol is None:
+                # ✅ IMPROVED: Try auto-repair if original fails
+                repaired_smiles = self._attempt_smiles_repair(numbered_smiles)
+                if repaired_smiles != numbered_smiles:
+                    mol = Chem.MolFromSmiles(repaired_smiles)
+                    if mol is not None:
+                        numbered_smiles = repaired_smiles
+                        if self.verbose:
+                            logger.info(f"Auto-repaired SMILES: {smiles} → {repaired_smiles}")
+                    else:
+                        # ✅ IMPROVED: Try multiple repair attempts
+                        for attempt in range(3):
+                            repaired_smiles = self._attempt_smiles_repair(repaired_smiles)
+                            mol = Chem.MolFromSmiles(repaired_smiles)
+                            if mol is not None:
+                                numbered_smiles = repaired_smiles
+                                if self.verbose:
+                                    logger.info(f"Auto-repaired SMILES (attempt {attempt+2}): {smiles} → {repaired_smiles}")
+                                break
             
             if mol is None:
                 return None
@@ -175,40 +185,57 @@ class PolymerDatabaseManager:
         
         repaired = smiles
         
-        # ✅ FLEXIBLE: Detect and fix aromatic ring systems intelligently
+        # ✅ COMPREHENSIVE: Apply repairs in order of specificity
         repaired = self._repair_aromatic_rings(repaired)
-        
-        # ✅ FLEXIBLE: Fix other structural issues
+        repaired = self._repair_aliphatic_rings(repaired)
         repaired = self._repair_general_patterns(repaired)
+        repaired = self._repair_simple_patterns(repaired)
         
         return repaired
     
     def _repair_aromatic_rings(self, smiles: str) -> str:
         """
-        Intelligently repair aromatic ring systems by analyzing context
+        Repair aromatic ring systems with comprehensive pattern matching
         """
         repaired = smiles
         
-        # ✅ COMPREHENSIVE: Handle various numbered ring patterns
-        ring_patterns = [
-            # c1...()...c1 patterns
-            (r'c1([^c]*?)c\(\)([^c]*?)c1', lambda m: f"c1{m.group(1)}c{m.group(2)}c1"),
+        # ✅ COMPREHENSIVE: Handle numbered aromatic rings first (most specific)
+        numbered_ring_patterns = [
+            # Single digit rings: c1...()...c1, c2...()...c2, etc.
+            (r'c(\d)([^c]*?)c\(\)([^c]*?)c\1', r'c\1\2c\3c\1'),
             
-            # c2...()...c2 patterns  
-            (r'c2([^c]*?)c\(\)([^c]*?)c2', lambda m: f"c2{m.group(1)}c{m.group(2)}c2"),
-            
-            # Generic numbered rings
-            (r'c(\d+)([^c]*?)c\(\)([^c]*?)c\1', lambda m: f"c{m.group(1)}{m.group(2)}c{m.group(3)}c{m.group(1)}"),
+            # Handle cases like c1cc()ccc1, c1c()cccc1, etc.
+            (r'c(\d)((?:c{0,5}|[sno])*?)\(\)((?:c{0,5}|[sno])*?)c\1', r'c\1\2c\3c\1'),
         ]
         
-        for pattern, replacement in ring_patterns:
-            if callable(replacement):
-                repaired = re.sub(pattern, replacement, repaired)
-            else:
-                repaired = re.sub(pattern, replacement, repaired)
+        for pattern, replacement in numbered_ring_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
         
-        # Handle non-ring aromatic patterns
-        repaired = self._repair_aromatic_chains(repaired)
+        # ✅ COMPREHENSIVE: Handle aromatic chains without ring numbers
+        aromatic_chain_patterns = [
+            # Basic aromatic chains
+            (r'cc\(\)cc', 'cccc'),           # cc()cc → cccc
+            (r'ccc\(\)cc', 'ccccc'),         # ccc()cc → ccccc  
+            (r'cc\(\)ccc', 'ccccc'),         # cc()ccc → ccccc
+            (r'ccc\(\)c', 'cccc'),           # ccc()c → cccc
+            (r'c\(\)ccc', 'cccc'),           # c()ccc → cccc
+            (r'cc\(\)c', 'ccc'),             # cc()c → ccc
+            (r'c\(\)cc', 'ccc'),             # c()cc → ccc
+            (r'c\(\)c', 'cc'),               # c()c → cc
+            
+            # With heteroatoms (s, n, o)
+            (r'cc\(\)([sno])', r'cc\1'),     # cc()s → ccs
+            (r'c\(\)([sno])', r'c\1'),       # c()s → cs
+            (r'([sno])\(\)c', r'\1c'),       # s()c → sc
+            (r'([sno])c\(\)', r'\1c'),       # sc() → sc
+            
+            # Mixed aromatic/heteroaromatic
+            (r'([cn])\(\)([cn])', r'\1c\2'), # n()c → ncc, c()n → ccn
+            (r'([cn])c\(\)([cn])', r'\1cc\2'), # nc()c → ncc, cc()n → ccn
+        ]
+        
+        for pattern, replacement in aromatic_chain_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
         
         return repaired
     
@@ -255,6 +282,44 @@ class PolymerDatabaseManager:
             repaired = re.sub(pattern, replacement, repaired)
         
         return repaired
+
+    def _repair_aliphatic_rings(self, smiles: str) -> str:
+        """
+        Repair aliphatic ring systems and chains
+        """
+        repaired = smiles
+        
+        # ✅ COMPREHENSIVE: Handle numbered aliphatic rings
+        aliphatic_ring_patterns = [
+            # Single digit rings: C1...()...C1, C2...()...C2, etc.
+            (r'C(\d)([^C]*?)C\(\)([^C]*?)C\1', r'C\1\2C\3C\1'),
+            
+            # Handle mixed case in rings
+            (r'C(\d)((?:C{0,10})*?)\(\)((?:C{0,10})*?)C\1', r'C\1\2C\3C\1'),
+        ]
+        
+        for pattern, replacement in aliphatic_ring_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
+        
+        # ✅ COMPREHENSIVE: Handle aliphatic chains
+        aliphatic_chain_patterns = [
+            # Basic aliphatic chains
+            (r'CC\(\)CC', 'CCCC'),           # CC()CC → CCCC
+            (r'CCC\(\)CC', 'CCCCC'),         # CCC()CC → CCCCC
+            (r'CC\(\)CCC', 'CCCCC'),         # CC()CCC → CCCCC
+            (r'CC\(\)C', 'CCC'),             # CC()C → CCC
+            (r'C\(\)CC', 'CCC'),             # C()CC → CCC
+            (r'C\(\)C', 'CC'),               # C()C → CC
+            
+            # With substituents
+            (r'C\(([^)]+)\)\(\)', r'C(\1)C'), # C(substituent)() → C(substituent)C
+            (r'\(\)C\(([^)]+)\)', r'CC(\1)'), # ()C(substituent) → CC(substituent)
+        ]
+        
+        for pattern, replacement in aliphatic_chain_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
+        
+        return repaired
     
     def _repair_general_patterns(self, smiles: str) -> str:
         """
@@ -262,21 +327,28 @@ class PolymerDatabaseManager:
         """
         repaired = smiles
         
-        # ✅ FLEXIBLE: Generic empty parentheses in different contexts
-        general_patterns = [
-            # Aliphatic chains  
-            (r'C\(\)C', 'CCC'),                      # Fix aliphatic chains
-            (r'=C\(\)C', '=CC'),                     # Fix double bonds
-            (r'CC\(\)=C', 'CC=C'),                   # Fix adjacent to double bonds
+        # ✅ COMPREHENSIVE: Handle complex functional groups
+        functional_group_patterns = [
+            # Carbonyl groups
+            (r'O=C\(\)([CO])', r'O=C\1'),           # O=C()O → O=CO, O=C()C → O=CC
+            (r'([CO])C\(\)=O', r'\1C=O'),           # CC()=O → CC=O
             
-            # Heteroatoms - be conservative
-            (r'([SNO])\(\)([CNS])', r'\1\2'),        # Remove empty between heteroatoms if safe
+            # Double bonds
+            (r'=C\(\)C', '=CC'),                     # =C()C → =CC
+            (r'C\(\)=C', 'C=C'),                     # C()=C → C=C
+            (r'CC\(\)=C', 'CC=C'),                   # CC()=C → CC=C
+            (r'=C\(\)CC', '=CCC'),                   # =C()CC → =CCC
             
-            # Ring closures
-            (r'=C\(\)CC', '=CCC'),                   # Fix in ring systems
+            # Heteroatoms in chains
+            (r'([SNO])\(\)([CNS])', r'\1\2'),        # S()C → SC, N()C → NC, etc.
+            (r'([CNS])\(\)([SNO])', r'\1\2'),        # C()S → CS, N()O → NO, etc.
+            
+            # Ring junction patterns
+            (r'([^=])\(\)([123456789])', r'\1\2'),   # Remove () before ring numbers
+            (r'([123456789])\(\)([^=])', r'\1\2'),   # Remove () after ring numbers
         ]
         
-        for pattern, replacement in general_patterns:
+        for pattern, replacement in functional_group_patterns:
             repaired = re.sub(pattern, replacement, repaired)
         
         return repaired

@@ -902,6 +902,35 @@ class PolymerDatabaseManager:
         except:
             return None, None
 
+    def clean_poly_chemprop_input(self, poly_input: str, remove_trailing_values: bool = True) -> Optional[str]:
+        """
+        Clean poly_chemprop_input by removing trailing property values and other artifacts
+        
+        Args:
+            poly_input: Raw poly_chemprop_input string
+            remove_trailing_values: Whether to remove ~XXX.X patterns at the end
+            
+        Returns:
+            Cleaned poly_chemprop_input string
+        """
+        if pd.isna(poly_input) or not isinstance(poly_input, str):
+            return None
+        
+        cleaned = poly_input.strip()
+        
+        if remove_trailing_values:
+            # Remove property values appended at the end (anything after ~ including ~)
+            # Pattern: ~502.5, ~123, ~45.67, etc.
+            import re
+            cleaned = re.sub(r'~\d*\.?\d*$', '', cleaned).strip()
+            
+            # Also remove any standalone trailing numbers without ~
+            # Pattern: ...connectivity123.45 (in case ~ was stripped elsewhere)
+            cleaned = re.sub(r'(?<=[<>:\d])\d+\.\d+$', '', cleaned).strip()
+        
+        return cleaned if cleaned else None
+
+    
     # ========================
     # Database Management
     # ========================
@@ -1189,12 +1218,34 @@ class PolymerDatabaseManager:
     # ========================
     
     def _process_existing_poly_chemprop_dataset(self, new_df: pd.DataFrame, 
-                                              target_columns: List[str] = None,
-                                              column_mapping: Dict[str, str] = None,
-                                              exclude_columns: List[str] = None) -> pd.DataFrame:
+                                          target_columns: List[str] = None,
+                                          column_mapping: Dict[str, str] = None,
+                                          exclude_columns: List[str] = None,
+                                          clean_poly_inputs: bool = True) -> pd.DataFrame:
         """
         Process a dataset that already contains poly_chemprop_input
         """
+        # ✅ NEW: Clean poly_chemprop_input data if requested
+        if clean_poly_inputs and 'poly_chemprop_input' in new_df.columns:
+            if self.verbose:
+                logger.info("Cleaning poly_chemprop_input data (removing trailing property values)...")
+            
+            # Count corrupted entries before cleaning
+            corrupted_count = new_df['poly_chemprop_input'].astype(str).str.contains('~', na=False).sum()
+            if corrupted_count > 0 and self.verbose:
+                logger.info(f"Found {corrupted_count} entries with trailing property values to clean")
+            
+            # Clean the data
+            new_df['poly_chemprop_input'] = new_df['poly_chemprop_input'].apply(
+                lambda x: self.clean_poly_chemprop_input(x, remove_trailing_values=True)
+            )
+            
+            # Remove rows where cleaning failed
+            initial_count = len(new_df)
+            new_df = new_df[new_df['poly_chemprop_input'].notna()]
+            if len(new_df) != initial_count and self.verbose:
+                logger.warning(f"Removed {initial_count - len(new_df)} rows due to poly_chemprop_input cleaning failures")
+        
         # Handle target column selection - COMPLETELY FLEXIBLE
         if target_columns is None or column_mapping is None:
             target_columns, column_mapping = self.interactive_column_selection(new_df, interactive=True)
@@ -1328,11 +1379,11 @@ class PolymerDatabaseManager:
     
     # ✅ NEW: Add exclude_columns parameter
     def process_new_dataset(self, input_path: str = None, df: pd.DataFrame = None,
-                          expand_variants: bool = True, generate_iupac: bool = True,
-                          interactive: bool = True, target_columns: List[str] = None,
-                          column_mapping: Dict[str, str] = None, 
-                          poly_types: List[str] = None, compositions: List[str] = None,
-                          exclude_columns: List[str] = None):
+                      expand_variants: bool = True, generate_iupac: bool = True,
+                      interactive: bool = True, target_columns: List[str] = None,
+                      column_mapping: Dict[str, str] = None, 
+                      poly_types: List[str] = None, compositions: List[str] = None,
+                      exclude_columns: List[str] = None, clean_poly_inputs: bool = True):
         
         # ✅ NEW: Store for later use
         self._exclude_columns = exclude_columns if exclude_columns else []
@@ -1361,7 +1412,7 @@ class PolymerDatabaseManager:
         if has_poly_chemprop and not has_monomers:
             if self.verbose:
                 logger.info("Dataset contains poly_chemprop_input - processing as pre-processed polymer data")
-            return self._process_existing_poly_chemprop_dataset(new_df, target_columns, column_mapping, exclude_columns)
+            return self._process_existing_poly_chemprop_dataset(new_df, target_columns, column_mapping, exclude_columns, clean_poly_inputs=True)
         
         # Standardize column names - flexible mappings
         column_mapping_standard = {
@@ -1774,6 +1825,8 @@ Examples:
                        help='Do not expand polymer variants (keep original data structure)')
     parser.add_argument('--no-iupac', action='store_true',
                        help='Do not generate IUPAC names')
+    parser.add_argument('--no-clean-poly', action='store_true',
+                       help='Do not clean poly_chemprop_input (keep trailing property values)')
     parser.add_argument('--non-interactive', action='store_true',
                        help='Use non-interactive mode (auto-detect all numeric columns)')
     parser.add_argument('--verbose', '-v', action='store_true', default=True,
@@ -1945,6 +1998,7 @@ Examples:
             target_columns=target_columns,
             column_mapping=column_mapping,
             exclude_columns=args.exclude_columns,  # ✅ NEW: Pass exclude_columns
+            clean_poly_inputs=not args.no_clean_poly,  # ✅ NEW: Clean poly inputs by default
             poly_types=args.poly_types if args.poly_types != ['alternating', 'block', 'random'] else None,
             compositions=args.compositions if args.compositions != ['4A_4B', '6A_2B', '2A_6B'] else None
         )

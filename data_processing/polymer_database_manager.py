@@ -869,11 +869,16 @@ class PolymerDatabaseManager:
     # Main Processing Methods - FULLY FLEXIBLE
     # ========================
     
+    # ✅ NEW: Add exclude_columns parameter
     def process_new_dataset(self, input_path: str = None, df: pd.DataFrame = None,
                           expand_variants: bool = True, generate_iupac: bool = True,
                           interactive: bool = True, target_columns: List[str] = None,
                           column_mapping: Dict[str, str] = None, 
-                          poly_types: List[str] = None, compositions: List[str] = None) -> pd.DataFrame:
+                          poly_types: List[str] = None, compositions: List[str] = None,
+                          exclude_columns: List[str] = None):
+        
+        # ✅ NEW: Store for later use
+        self._exclude_columns = exclude_columns if exclude_columns else []
         """
         Process a new dataset and prepare it for appending to template
         COMPLETELY FLEXIBLE - no hardcoded assumptions about target properties
@@ -1469,13 +1474,15 @@ Examples:
             interactive=not args.non_interactive,
             target_columns=target_columns,
             column_mapping=column_mapping,
+            exclude_columns=args.exclude_columns  # ✅ NEW: Pass exclude_columns
             poly_types=args.poly_types if args.poly_types != ['alternating', 'block', 'random'] else None,
             compositions=args.compositions if args.compositions != ['4A_4B', '6A_2B', '2A_6B'] else None
         )
         
-        # Append to template and save
-        combined_df = manager.append_to_template(processed_df, output_path)
-        
+        # ✅ NEW: Use stored exclude_columns when appending
+        exclude_cols = getattr(manager, '_exclude_columns', [])
+        combined_df = manager.append_to_template(processed_df, output_path, exclude_columns=exclude_cols)
+                
         if args.verbose:
             print(f"\n✓ Processing completed successfully!")
             print(f"✓ Input file: {args.input}")

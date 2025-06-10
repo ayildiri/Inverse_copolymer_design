@@ -90,15 +90,20 @@ class PolymerDatabaseManager:
     def canonicalize_smiles(self, smiles: str) -> Optional[str]:
         """
         Canonicalize SMILES and convert attachment points to numbered format
-        Ensures chemical validity is preserved
+        Ensures chemical validity is preserved and consistent formatting
         """
         try:
-            # Convert [*] to [*:1], [*:2] etc.
+            # Handle different attachment point formats
             numbered_smiles = smiles
+            
+            # Convert [*] to [*:1], [*:2] etc.
             counter = 1
             while '[*]' in numbered_smiles:
                 numbered_smiles = numbered_smiles.replace('[*]', f'[*:{counter}]', 1)
                 counter += 1
+            
+            # Clean up any malformed attachment points
+            numbered_smiles = re.sub(r'\*([^:\[])', r'[*:1]\1', numbered_smiles)  # Handle bare *
             
             # Canonicalize with RDKit
             mol = Chem.MolFromSmiles(numbered_smiles)
@@ -108,7 +113,12 @@ class PolymerDatabaseManager:
             # Ensure aromatic atoms have proper valence before canonicalization
             try:
                 Chem.SanitizeMol(mol)
-                return Chem.MolToSmiles(mol, canonical=True)
+                canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
+                
+                # Ensure consistent attachment point numbering
+                canonical_smiles = self._standardize_attachment_points(canonical_smiles)
+                
+                return canonical_smiles
             except:
                 # If sanitization fails, try to fix the structure
                 for atom in mol.GetAtoms():
@@ -117,9 +127,184 @@ class PolymerDatabaseManager:
                         atom.SetNoImplicit(False)
                 try:
                     Chem.SanitizeMol(mol)
-                    return Chem.MolToSmiles(mol, canonical=True)
+                    canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
+                    canonical_smiles = self._standardize_attachment_points(canonical_smiles)
+                    return canonical_smiles
                 except:
                     return None
+        except:
+            return None
+
+    def _standardize_attachment_points(self, smiles: str) -> str:
+        """
+        Standardize attachment point numbering to ensure consistency
+        """
+        # Find all attachment points
+        attachment_points = re.findall(r'\[\*:(\d+)\]', smiles)
+        if not attachment_points:
+            return smiles
+        
+        # Create mapping for sequential numbering
+        unique_points = sorted(set(map(int, attachment_points)))
+        point_mapping = {old: new for new, old in enumerate(unique_points, 1)}
+        
+        # Replace with standardized numbering
+        result = smiles
+        for old_num, new_num in point_mapping.items():
+            result = result.replace(f'[*:{old_num}]', f'[*:{new_num}]')
+        
+        return result
+
+    def get_iupac_name(self, smiles: str) -> str:
+        """
+        Get IUPAC name for a SMILES string with multiple fallback strategies
+        """
+        try:
+            # Remove attachment points for name generation
+            clean_smiles = re.sub(r'\[\*:\d+\]', '', smiles)
+            clean_smiles = re.sub(r'\[\*\]', '', clean_smiles)
+            clean_smiles = re.sub(r'\*', '', clean_smiles)
+            
+            mol = Chem.MolFromSmiles(clean_smiles)
+            if mol is None:
+                return "Invalid_SMILES"
+            
+            # Strategy 1: Try to use a lookup table for common polymers
+            iupac_name = self._lookup_common_polymer_names(clean_smiles)
+            if iupac_name:
+                return iupac_name
+            
+            # Strategy 2: Try PubChem lookup (if available)
+            iupac_name = self._try_pubchem_lookup(clean_smiles)
+            if iupac_name:
+                return iupac_name
+            
+            # Strategy 3: Generate descriptive name based on functional groups
+            descriptive_name = self._generate_descriptive_name(mol, clean_smiles)
+            if descriptive_name:
+                return descriptive_name
+            
+            # Strategy 4: Fallback to molecular formula
+            formula = CalcMolFormula(mol)
+            return f"Polymer_{formula}"
+            
+        except Exception as e:
+            if self.verbose:
+                logger.warning(f"Could not generate IUPAC name for {smiles}: {e}")
+            return "Unknown_compound"
+
+    def _lookup_common_polymer_names(self, smiles: str) -> Optional[str]:
+        """
+        Lookup table for common polymer monomers
+        """
+        # Common polymer monomer names
+        common_names = {
+            'CCc1ccc(CC)cc1': 'diethylbenzene',
+            'c1ccc2c(c1)cccc2': 'naphthalene',
+            'CC(C)c1ccc(C(C)C)cc1': 'diisopropylbenzene',
+            'Nc1ccccc1': 'aniline',
+            'CCC': 'propane',
+            'CCCC': 'butane',
+            'CCCCC': 'pentane',
+            'C1CCCCC1': 'cyclohexane',
+            'C1CCC1': 'cyclobutane',
+            'CC(C)C': 'isobutane',
+            'CC(CC)C': 'isopentane',
+            'CC': 'ethane',
+            'C': 'methane',
+            'c1ccccc1': 'benzene',
+            'CC(C)(C)c1ccc(C(C)(C)C)cc1': 'di-tert-butylbenzene',
+            'Oc1ccccc1': 'phenol',
+            'Nc1cc(N)ccc1': 'diaminobenzene',
+            'Fc1ccc(F)cc1': 'difluorobenzene',
+            'Clc1ccc(Cl)cc1': 'dichlorobenzene',
+            'Brc1ccc(Br)cc1': 'dibromobenzene',
+        }
+        
+        return common_names.get(smiles)
+
+    def _try_pubchem_lookup(self, smiles: str) -> Optional[str]:
+        """
+        Try to lookup IUPAC name from PubChem (placeholder for future implementation)
+        """
+        # This would require PubChemPy or similar
+        # For now, return None to fall back to other methods
+        try:
+            # Example implementation (would need pubchempy):
+            # import pubchempy as pcp
+            # compound = pcp.get_compounds(smiles, namespace='smiles')
+            # if compound and compound[0].iupac_name:
+            #     return compound[0].iupac_name
+            pass
+        except:
+            pass
+        return None
+
+    def _generate_descriptive_name(self, mol: Chem.Mol, smiles: str) -> Optional[str]:
+        """
+        Generate a descriptive name based on molecular features
+        """
+        try:
+            # Basic descriptive naming based on functional groups and structure
+            name_parts = []
+            
+            # Check for rings
+            ring_info = mol.GetRingInfo()
+            num_rings = ring_info.NumRings()
+            
+            if num_rings > 0:
+                # Check for aromatic rings
+                aromatic_atoms = [atom for atom in mol.GetAtoms() if atom.GetIsAromatic()]
+                if aromatic_atoms:
+                    if num_rings == 1 and len(aromatic_atoms) == 6:
+                        name_parts.append("benzene")
+                    elif num_rings == 2:
+                        name_parts.append("naphthalene")
+                    else:
+                        name_parts.append(f"aromatic_{num_rings}ring")
+                else:
+                    name_parts.append(f"cyclic_{num_rings}ring")
+            else:
+                # Aliphatic compound
+                carbon_count = sum(1 for atom in mol.GetAtoms() if atom.GetSymbol() == 'C')
+                if carbon_count <= 10:
+                    alkane_names = {1: "methane", 2: "ethane", 3: "propane", 4: "butane", 
+                                  5: "pentane", 6: "hexane", 7: "heptane", 8: "octane",
+                                  9: "nonane", 10: "decane"}
+                    base_name = alkane_names.get(carbon_count, f"C{carbon_count}_alkane")
+                    name_parts.append(base_name)
+                else:
+                    name_parts.append(f"C{carbon_count}_alkane")
+            
+            # Check for functional groups
+            functional_groups = []
+            
+            # Common functional group SMARTS patterns
+            fg_patterns = {
+                'amine': '[NX3;H2,H1;!$(NC=O)]',
+                'alcohol': '[OX2H]',
+                'carboxylic_acid': '[CX3](=O)[OX2H1]',
+                'ester': '[#6][CX3](=O)[OX2H0][#6]',
+                'nitro': '[NX3+](=O)[O-]',
+                'sulfonyl': '[SX4](=O)(=O)',
+                'halide': '[F,Cl,Br,I]',
+                'nitrile': '[CX2]#[NX1]',
+            }
+            
+            for fg_name, pattern in fg_patterns.items():
+                if mol.HasSubstructMatch(Chem.MolFromSmarts(pattern)):
+                    functional_groups.append(fg_name)
+            
+            if functional_groups:
+                name_parts.extend(functional_groups)
+            
+            if name_parts:
+                return "_".join(name_parts) + "_derivative"
+            
+            # Final fallback
+            formula = CalcMolFormula(mol)
+            return f"compound_{formula}"
+            
         except:
             return None
 
@@ -424,22 +609,6 @@ class PolymerDatabaseManager:
         
         return result_ids
 
-    def get_iupac_name(self, smiles: str) -> str:
-        """Get IUPAC name for a SMILES string (placeholder implementation)"""
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                return "Invalid_SMILES"
-            
-            # Generate a simple name based on molecular formula as placeholder
-            formula = CalcMolFormula(mol)
-            return f"Compound_{formula}"
-            
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"Could not generate IUPAC name for {smiles}: {e}")
-            return "Unknown_compound"
-
     def expand_polymer_variants(self, df: pd.DataFrame, poly_types: List[str] = None, 
                               compositions: List[str] = None) -> pd.DataFrame:
         """
@@ -628,6 +797,7 @@ class PolymerDatabaseManager:
         """
         Process a new dataset and prepare it for appending to template
         COMPLETELY FLEXIBLE - no hardcoded assumptions about target properties
+        WITH CONSISTENT CANONICALIZATION
         """
         # Load data
         if df is not None:
@@ -658,14 +828,34 @@ class PolymerDatabaseManager:
         if 'monoA' not in new_df.columns:
             raise ValueError("No 'monoA', 'smiles', or 'MonA' column found!")
         
+        # CANONICALIZE monoA SMILES IMMEDIATELY
+        if self.verbose:
+            logger.info("Canonicalizing monoA SMILES...")
+        new_df['monoA'] = new_df['monoA'].apply(
+            lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
+        )
+        
+        # Remove rows where canonicalization failed
+        initial_count = len(new_df)
+        new_df = new_df[new_df['monoA'].notna()]
+        if len(new_df) != initial_count and self.verbose:
+            logger.warning(f"Removed {initial_count - len(new_df)} rows due to invalid monoA SMILES")
+        
         # Handle monoB for homopolymers
         if 'monoB' not in new_df.columns:
-            new_df['monoB'] = new_df['monoA']
+            new_df['monoB'] = new_df['monoA']  # Homopolymer: monoB = monoA
             if self.verbose:
                 logger.info("Added monoB column (same as monoA for homopolymers)")
         else:
             # Fill missing monoB with monoA (homopolymers)
             new_df['monoB'] = new_df['monoB'].fillna(new_df['monoA'])
+            
+            # CANONICALIZE monoB SMILES
+            if self.verbose:
+                logger.info("Canonicalizing monoB SMILES...")
+            new_df['monoB'] = new_df['monoB'].apply(
+                lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
+            )
         
         # Handle target column selection - COMPLETELY FLEXIBLE
         if target_columns is None or column_mapping is None:
@@ -702,7 +892,7 @@ class PolymerDatabaseManager:
         
         new_df['poly_id'] = self.generate_poly_ids(new_df, existing_ids)
         
-        # Generate IUPAC names if requested
+        # Generate IUPAC names if requested (IMPROVED)
         if generate_iupac:
             if 'monoA_IUPAC' not in new_df.columns:
                 if self.verbose:
@@ -714,7 +904,7 @@ class PolymerDatabaseManager:
                     logger.info("Generating IUPAC names for monoB...")
                 new_df['monoB_IUPAC'] = new_df['monoB'].apply(self.get_iupac_name)
         
-        # Generate ChemProp inputs
+        # Generate ChemProp inputs with CONSISTENT PROCESSING
         if self.verbose:
             logger.info("Generating ChemProp inputs...")
         
@@ -811,6 +1001,124 @@ class PolymerDatabaseManager:
         combined_df = self.append_to_template(processed_df, output_path)
         return combined_df
 
+    def cleanup_existing_database(self, input_path: str, output_path: str) -> pd.DataFrame:
+        """
+        Clean up an existing database to ensure consistent formatting
+        Useful for fixing databases created with earlier versions
+        """
+        if self.verbose:
+            logger.info(f"Cleaning up existing database: {input_path}")
+        
+        df = pd.read_csv(input_path)
+        original_count = len(df)
+        
+        # Canonicalize existing SMILES
+        if 'monoA' in df.columns:
+            if self.verbose:
+                logger.info("Re-canonicalizing monoA SMILES...")
+            df['monoA'] = df['monoA'].apply(
+                lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
+            )
+        
+        if 'monoB' in df.columns:
+            if self.verbose:
+                logger.info("Re-canonicalizing monoB SMILES...")
+            df['monoB'] = df['monoB'].apply(
+                lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
+            )
+        
+        # Re-generate IUPAC names with improved algorithm
+        if 'monoA_IUPAC' in df.columns:
+            if self.verbose:
+                logger.info("Re-generating IUPAC names for monoA...")
+            df['monoA_IUPAC'] = df['monoA'].apply(self.get_iupac_name)
+        
+        if 'monoB_IUPAC' in df.columns:
+            if self.verbose:
+                logger.info("Re-generating IUPAC names for monoB...")
+            df['monoB_IUPAC'] = df['monoB'].apply(self.get_iupac_name)
+        
+        # Re-generate ChemProp inputs for consistency
+        if all(col in df.columns for col in ['monoA', 'monoB']):
+            if self.verbose:
+                logger.info("Re-generating master ChemProp inputs...")
+            df['master_chemprop_input'] = [
+                self.make_master_chemprop_input(sA, sB) 
+                for sA, sB in zip(df['monoA'], df['monoB'])
+            ]
+        
+        if all(col in df.columns for col in ['monoA', 'monoB', 'poly_type', 'fracA']):
+            if self.verbose:
+                logger.info("Re-generating poly ChemProp inputs...")
+            df['poly_chemprop_input'] = [
+                self.make_poly_chemprop_input(sA, sB, t, fA, selfedges=True)
+                for sA, sB, t, fA in zip(
+                    df['monoA'], df['monoB'], 
+                    df['poly_type'], df['fracA']
+                )
+            ]
+        
+        # Remove any rows that failed processing
+        df = df[df['poly_chemprop_input'].notna()] if 'poly_chemprop_input' in df.columns else df
+        final_count = len(df)
+        
+        # Save cleaned database
+        df.to_csv(output_path, index=False)
+        
+        if self.verbose:
+            logger.info(f"Database cleanup complete!")
+            logger.info(f"Original rows: {original_count}")
+            logger.info(f"Final rows: {final_count}")
+            logger.info(f"Cleaned database saved to: {output_path}")
+        
+        return df
+
+# ========================
+# Additional Utility Functions
+# ========================
+
+def cleanup_database(input_path: str, output_path: str, verbose: bool = True) -> pd.DataFrame:
+    """
+    Standalone function to clean up an existing polymer database
+    
+    Args:
+        input_path: Path to existing database CSV
+        output_path: Path to save cleaned database
+        verbose: Whether to show detailed output
+        
+    Returns:
+        Cleaned DataFrame
+    """
+    manager = PolymerDatabaseManager(verbose=verbose)
+    return manager.cleanup_existing_database(input_path, output_path)
+
+def fix_database_consistency(database_path: str, backup: bool = True) -> str:
+    """
+    Fix consistency issues in an existing database (in-place with backup)
+    
+    Args:
+        database_path: Path to database to fix
+        backup: Whether to create backup before fixing
+        
+    Returns:
+        Path to the fixed database
+    """
+    import shutil
+    from datetime import datetime
+    
+    if backup:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = database_path.replace('.csv', f'_backup_{timestamp}.csv')
+        shutil.copy2(database_path, backup_path)
+        print(f"Created backup: {backup_path}")
+    
+    # Clean the database
+    manager = PolymerDatabaseManager(verbose=True)
+    cleaned_df = manager.cleanup_existing_database(database_path, database_path)
+    
+    print(f"Fixed database saved to: {database_path}")
+    return database_path
+
 # ========================
 # Convenience Functions - NO HARDCODING
 # ========================
@@ -872,6 +1180,9 @@ Examples:
   # Non-interactive with output directory
   !python data_processing/polymer_database_manager.py -i data.csv -o results/ --non-interactive
   
+  # Clean up existing database for consistency
+  !python data_processing/polymer_database_manager.py --cleanup input_db.csv -o cleaned_db.csv
+  
   # Custom polymer types and compositions
   !python data_processing/polymer_database_manager.py -i data.csv -o output.csv --poly-types alternating block --compositions 4A_4B 6A_2B
   
@@ -884,7 +1195,7 @@ Examples:
     )
     
     # Required arguments
-    parser.add_argument('-i', '--input', required=True,
+    parser.add_argument('-i', '--input', 
                        help='Input CSV file path')
     parser.add_argument('-o', '--output', required=True,
                        help='Output CSV file path or directory')
@@ -892,6 +1203,10 @@ Examples:
     # Optional arguments
     parser.add_argument('-t', '--template',
                        help='Existing template CSV file path to append to')
+    
+    # Cleanup mode
+    parser.add_argument('--cleanup', action='store_true',
+                       help='Clean up existing database for consistency (use with -i for input database)')
     
     # Processing options
     parser.add_argument('--no-expand', action='store_true',
@@ -933,6 +1248,26 @@ Examples:
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     
     args = parser.parse_args()
+    
+    # Handle cleanup mode
+    if args.cleanup:
+        if not args.input:
+            print("Error: --cleanup requires --input to specify the database to clean")
+            return 1
+        
+        try:
+            cleaned_df = cleanup_database(args.input, args.output, verbose=not args.quiet)
+            print(f"✓ Database cleanup completed!")
+            print(f"✓ Cleaned database saved to: {args.output}")
+            return 0
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            return 1
+    
+    # Regular processing mode requires input
+    if not args.input:
+        print("Error: --input is required for regular processing")
+        return 1
     
     # Handle conflicting arguments
     if args.quiet:

@@ -352,6 +352,38 @@ class PolymerDatabaseManager:
             repaired = re.sub(pattern, replacement, repaired)
         
         return repaired
+
+    def _repair_simple_patterns(self, smiles: str) -> str:
+        """
+        Simple fallback patterns for any remaining () issues
+        """
+        repaired = smiles
+        
+        # ✅ FALLBACK: Last resort patterns - context-aware replacement
+        remaining_patterns = [
+            # In aromatic contexts, replace () with c
+            (r'([a-z])\(\)([a-z])', r'\1c\2'),      # aromatic()aromatic → aromaticccaromatic
+            (r'([a-z])\(\)', r'\1c'),               # aromatic() → aromaticc
+            (r'\(\)([a-z])', r'c\1'),               # ()aromatic → caromatic
+            
+            # In aliphatic contexts, replace () with C  
+            (r'([A-Z])\(\)([A-Z])', r'\1C\2'),      # ALIPHATIC()ALIPHATIC → ALIPHATICCALIPHATIC
+            (r'([A-Z])\(\)', r'\1C'),               # ALIPHATIC() → ALIPHATICC
+            (r'\(\)([A-Z])', r'C\1'),               # ()ALIPHATIC → CALIPHATIC
+            
+            # Mixed contexts - be conservative, use C
+            (r'([A-Za-z])\(\)([A-Za-z])', r'\1C\2'), # letter()letter → letterCletter
+            (r'([A-Za-z])\(\)', r'\1C'),            # letter() → letterC
+            (r'\(\)([A-Za-z])', r'C\1'),            # ()letter → Cletter
+            
+            # Final fallback - just remove empty parentheses
+            (r'\(\)', 'C'),                         # () → C (conservative default)
+        ]
+        
+        for pattern, replacement in remaining_patterns:
+            repaired = re.sub(pattern, replacement, repaired)
+        
+        return repaired
     
     def _is_valid_smiles(self, smiles: str) -> bool:
         """

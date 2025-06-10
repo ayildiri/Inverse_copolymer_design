@@ -56,13 +56,14 @@ class PolymerDatabaseManager:
     Main class for managing polymer databases with comprehensive processing capabilities
     """
     
-    def __init__(self, template_path: str = None, verbose: bool = True):
+    def __init__(self, template_path: str = None, verbose: bool = True, clean_template: bool = True):
         """
         Initialize the Polymer Database Manager
         
         Args:
             template_path: Path to existing template CSV file
             verbose: Whether to print detailed logs
+            clean_template: Whether to clean poly_chemprop_input in template
         """
         self.template_path = template_path
         self.template_df = None
@@ -72,6 +73,27 @@ class PolymerDatabaseManager:
             self.template_df = pd.read_csv(template_path)
             if verbose:
                 logger.info(f"Loaded template with {len(self.template_df)} rows and {len(self.template_df.columns)} columns")
+            
+            # ✅ NEW: Clean template poly_chemprop_input if requested
+            if clean_template and 'poly_chemprop_input' in self.template_df.columns:
+                if verbose:
+                    logger.info("Cleaning template poly_chemprop_input data...")
+                
+                # Count corrupted entries in template
+                corrupted_count = self.template_df['poly_chemprop_input'].astype(str).str.contains('~', na=False).sum()
+                if corrupted_count > 0 and verbose:
+                    logger.info(f"Found {corrupted_count} corrupted entries in template to clean")
+                
+                # Clean template data
+                self.template_df['poly_chemprop_input'] = self.template_df['poly_chemprop_input'].apply(
+                    lambda x: self.clean_poly_chemprop_input(x, remove_trailing_values=True)
+                )
+                
+                # Remove rows where cleaning failed
+                initial_count = len(self.template_df)
+                self.template_df = self.template_df[self.template_df['poly_chemprop_input'].notna()]
+                if len(self.template_df) != initial_count and verbose:
+                    logger.warning(f"Removed {initial_count - len(self.template_df)} corrupted rows from template")
         
         # Default polymer configurations - NOT hardcoded, can be modified
         self.default_poly_types = ['alternating', 'block', 'random']
@@ -1732,18 +1754,19 @@ def fix_database_consistency(database_path: str, backup: bool = True) -> str:
 # Convenience Functions - NO HARDCODING
 # ========================
 
-def create_database_manager(template_path: str = None) -> PolymerDatabaseManager:
+def create_database_manager(template_path: str = None, clean_template: bool = True) -> PolymerDatabaseManager:
     """Create a new database manager instance"""
-    return PolymerDatabaseManager(template_path)
+    return PolymerDatabaseManager(template_path, clean_template=clean_template)
 
 def quick_process_dataset(input_path: str, output_path: str, template_path: str = None,
                          expand_variants: bool = True, interactive: bool = True,
-                         poly_types: List[str] = None, compositions: List[str] = None) -> pd.DataFrame:
+                         poly_types: List[str] = None, compositions: List[str] = None,
+                         clean_template: bool = True) -> pd.DataFrame:
     """
     Quick function to process a dataset with minimal setup
     FLEXIBLE: Can override all default behaviors
     """
-    manager = PolymerDatabaseManager(template_path)
+    manager = PolymerDatabaseManager(template_path, clean_template=clean_template)
     return manager.quick_process(input_path, output_path, expand_variants, interactive, poly_types, compositions)
 
 # ========================
@@ -1826,7 +1849,7 @@ Examples:
     parser.add_argument('--no-iupac', action='store_true',
                        help='Do not generate IUPAC names')
     parser.add_argument('--no-clean-poly', action='store_true',
-                       help='Do not clean poly_chemprop_input (keep trailing property values)')
+                       help='Do not clean poly_chemprop_input in input data and template (keep trailing property values)')
     parser.add_argument('--non-interactive', action='store_true',
                        help='Use non-interactive mode (auto-detect all numeric columns)')
     parser.add_argument('--verbose', '-v', action='store_true', default=True,
@@ -1960,7 +1983,7 @@ Examples:
             if args.template:
                 print(f"Using template: {args.template}")
         
-        manager = PolymerDatabaseManager(template_path=args.template, verbose=args.verbose)
+        manager = PolymerDatabaseManager(template_path=args.template, verbose=args.verbose, clean_template=not args.no_clean_poly)
         
         # Update configurations if provided
         if args.poly_types != ['alternating', 'block', 'random']:

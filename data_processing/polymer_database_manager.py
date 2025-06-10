@@ -588,26 +588,80 @@ class PolymerDatabaseManager:
     # ========================
     
     def generate_poly_ids(self, df: pd.DataFrame, existing_ids: set = None) -> List[str]:
-        """Generate unique polymer IDs"""
-        if existing_ids is None:
-            existing_ids = set()
+    """Generate unique polymer IDs that continue from existing template"""
+    if existing_ids is None:
+        existing_ids = set()
+    
+    # ✅ NEW: Parse existing IDs to find the highest number and detect naming pattern
+    max_id = -1
+    id_prefix = ""
+    id_format = "numeric"  # Default format
+    
+    if existing_ids:
+        for existing_id in existing_ids:
+            try:
+                # ✅ NEW: Handle different ID formats
+                if existing_id.startswith('p_'):
+                    # Format: p_12345
+                    id_prefix = "p_"
+                    id_format = "p_prefix"
+                    num = int(existing_id.replace('p_', ''))  # ✅ Extract 42966 from p_42966
+                    max_id = max(max_id, num)
+                elif '_' in existing_id:
+                    # Format: 12345_6 
+                    parts = existing_id.split('_')
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        num = int(parts[0])
+                        max_id = max(max_id, num)
+                        id_format = "underscore"
+                elif existing_id.isdigit():
+                    # Format: 12345
+                    num = int(existing_id)
+                    max_id = max(max_id, num)
+                    id_format = "numeric"
+            except (ValueError, AttributeError):
+                continue
+    
+    # ✅ NEW: Generate new IDs continuing from the highest found
+    poly_ids = []
+    unique_pairs = df[['monoA', 'monoB']].drop_duplicates()
+    
+    # ✅ NEW: Start from the next number after max_id
+    current_id = max_id + 1  # ✅ Start from 42967 if max was 42966
+    
+    for idx, (_, row) in enumerate(unique_pairs.iterrows()):
+        # ✅ NEW: Generate ID based on detected format
+        if id_format == "p_prefix":
+            new_id = f"p_{current_id}"  # ✅ Generates p_42967, p_42968, etc.
+        elif id_format == "underscore":
+            new_id = f"{current_id}_{idx}"
+        else:
+            new_id = str(current_id)
         
-        poly_ids = []
-        base_id = len(existing_ids)
+        # ✅ NEW: Ensure uniqueness
+        while new_id in existing_ids:
+            current_id += 1
+            if id_format == "p_prefix":
+                new_id = f"p_{current_id}"
+            elif id_format == "underscore":
+                new_id = f"{current_id}_{idx}"
+            else:
+                new_id = str(current_id)
         
-        unique_pairs = df[['monoA', 'monoB']].drop_duplicates()
-        
-        for idx, (_, row) in enumerate(unique_pairs.iterrows()):
-            while f"{base_id}_{idx}" in existing_ids:
-                base_id += 1
-            poly_ids.append(f"{base_id}_{idx}")
-            existing_ids.add(f"{base_id}_{idx}")
-        
-        # Map back to original dataframe
-        pair_to_id = dict(zip(zip(unique_pairs['monoA'], unique_pairs['monoB']), poly_ids))
-        result_ids = [pair_to_id[(row['monoA'], row['monoB'])] for _, row in df.iterrows()]
-        
-        return result_ids
+        poly_ids.append(new_id)
+        existing_ids.add(new_id)
+        current_id += 1
+    
+    # Map back to original dataframe
+    pair_to_id = dict(zip(zip(unique_pairs['monoA'], unique_pairs['monoB']), poly_ids))
+    result_ids = [pair_to_id[(row['monoA'], row['monoB'])] for _, row in df.iterrows()]
+    
+    # ✅ NEW: Logging for debugging
+    if self.verbose:
+        logger.info(f"Generated poly_ids continuing from {max_id} using format: {id_format}")
+        logger.info(f"New ID range: {poly_ids[0] if poly_ids else 'None'} to {poly_ids[-1] if poly_ids else 'None'}")
+    
+    return result_ids
 
     def expand_polymer_variants(self, df: pd.DataFrame, poly_types: List[str] = None, 
                               compositions: List[str] = None) -> pd.DataFrame:

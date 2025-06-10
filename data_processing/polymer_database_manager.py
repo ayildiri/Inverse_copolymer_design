@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Polymer Database Manager
 ========================
@@ -874,6 +873,35 @@ class PolymerDatabaseManager:
                 logger.error(f"Error in make_poly_chemprop_input: {e}")
             return None
 
+    def _extract_monomers_from_poly_input(self, poly_input: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract monomer SMILES from poly_chemprop_input format
+        Format: monA.monB|stoich|connectivity
+        """
+        try:
+            if pd.isna(poly_input) or not isinstance(poly_input, str):
+                return None, None
+            
+            # Split by first pipe to get monomers part
+            parts = poly_input.split('|')
+            if len(parts) < 1:
+                return None, None
+            
+            monomers_part = parts[0]
+            
+            # Split by dot to get individual monomers
+            if '.' in monomers_part:
+                monomers = monomers_part.split('.')
+                if len(monomers) >= 2:
+                    return monomers[0].strip(), monomers[1].strip()
+                elif len(monomers) == 1:
+                    # Homopolymer case
+                    return monomers[0].strip(), monomers[0].strip()
+            
+            return None, None
+        except:
+            return None, None
+
     # ========================
     # Database Management
     # ========================
@@ -1160,6 +1188,144 @@ class PolymerDatabaseManager:
     # Main Processing Methods - FULLY FLEXIBLE
     # ========================
     
+    def _process_existing_poly_chemprop_dataset(self, new_df: pd.DataFrame, 
+                                              target_columns: List[str] = None,
+                                              column_mapping: Dict[str, str] = None,
+                                              exclude_columns: List[str] = None) -> pd.DataFrame:
+        """
+        Process a dataset that already contains poly_chemprop_input
+        """
+        # Handle target column selection - COMPLETELY FLEXIBLE
+        if target_columns is None or column_mapping is None:
+            target_columns, column_mapping = self.interactive_column_selection(new_df, interactive=True)
+        
+        # Rename target columns according to mapping
+        for old_name, new_name in column_mapping.items():
+            if old_name != new_name and old_name in new_df.columns:
+                new_df.rename(columns={old_name: new_name}, inplace=True)
+        
+        # Update target_columns to use new names
+        final_target_columns = [column_mapping[col] for col in target_columns]
+        
+        # Generate poly_ids for existing poly_chemprop_inputs
+        existing_ids = set()
+        if self.template_df is not None and 'poly_id' in self.template_df.columns:
+            existing_ids = set(self.template_df['poly_id'].unique())
+        
+        # Create unique identifiers based on poly_chemprop_input
+        unique_polys = new_df['poly_chemprop_input'].drop_duplicates()
+        poly_id_mapping = {}
+        
+        # ✅ NEW: Parse existing IDs to find the highest number and detect naming pattern
+        max_id = -1
+        id_format = "numeric"  # Default format
+        
+        if existing_ids:
+            for existing_id in existing_ids:
+                try:
+                    if existing_id.startswith('p_'):
+                        # Format: p_12345
+                        id_format = "p_prefix"
+                        num = int(existing_id.replace('p_', ''))
+                        max_id = max(max_id, num)
+                    elif '_' in existing_id:
+                        # Format: 12345_6 
+                        parts = existing_id.split('_')
+                        if len(parts) >= 2 and parts[0].isdigit():
+                            num = int(parts[0])
+                            max_id = max(max_id, num)
+                            id_format = "underscore"
+                    elif existing_id.isdigit():
+                        # Format: 12345
+                        num = int(existing_id)
+                        max_id = max(max_id, num)
+                        id_format = "numeric"
+                except (ValueError, AttributeError):
+                    continue
+        
+        # Generate new IDs
+        current_id = max_id + 1
+        for poly_input in unique_polys:
+            if id_format == "p_prefix":
+                new_id = f"p_{current_id}"
+            elif id_format == "underscore":
+                new_id = f"{current_id}_0"
+            else:
+                new_id = str(current_id)
+            
+            while new_id in existing_ids:
+                current_id += 1
+                if id_format == "p_prefix":
+                    new_id = f"p_{current_id}"
+                elif id_format == "underscore":
+                    new_id = f"{current_id}_0"
+                else:
+                    new_id = str(current_id)
+            
+            poly_id_mapping[poly_input] = new_id
+            existing_ids.add(new_id)
+            current_id += 1
+        
+        # Map poly_ids to dataframe
+        new_df['poly_id'] = new_df['poly_chemprop_input'].map(poly_id_mapping)
+        
+        # Extract monomers from poly_chemprop_input if possible
+        if 'monoA' not in new_df.columns or 'monoB' not in new_df.columns:
+            if self.verbose:
+                logger.info("Attempting to extract monomer information from poly_chemprop_input...")
+            
+            monomers_extracted = new_df['poly_chemprop_input'].apply(self._extract_monomers_from_poly_input)
+            new_df['monoA'] = monomers_extracted.apply(lambda x: x[0] if x else None)
+            new_df['monoB'] = monomers_extracted.apply(lambda x: x[1] if x else None)
+        
+        # Add missing polymer-related columns with defaults
+        if 'poly_type' not in new_df.columns:
+            new_df['poly_type'] = 'unknown'
+        if 'comp' not in new_df.columns:
+            new_df['comp'] = 'unknown'
+        if 'fracA' not in new_df.columns:
+            new_df['fracA'] = 0.5
+        if 'fracB' not in new_df.columns:
+            new_df['fracB'] = 0.5
+        
+        # Generate master_chemprop_input if missing
+        if 'master_chemprop_input' not in new_df.columns:
+            if 'monoA' in new_df.columns and 'monoB' in new_df.columns:
+                new_df['master_chemprop_input'] = [
+                    self.make_master_chemprop_input(sA, sB) if pd.notna(sA) and pd.notna(sB) else None
+                    for sA, sB in zip(new_df['monoA'], new_df['monoB'])
+                ]
+            else:
+                new_df['master_chemprop_input'] = None
+        
+        # Generate IUPAC names if monomers are available
+        if 'monoA' in new_df.columns and new_df['monoA'].notna().any():
+            if 'monoA_IUPAC' not in new_df.columns:
+                if self.verbose:
+                    logger.info("Generating IUPAC names for monoA...")
+                new_df['monoA_IUPAC'] = new_df['monoA'].apply(
+                    lambda x: self.get_iupac_name(x) if pd.notna(x) else "Unknown_compound"
+                )
+            
+            if 'monoB_IUPAC' not in new_df.columns:
+                if self.verbose:
+                    logger.info("Generating IUPAC names for monoB...")
+                new_df['monoB_IUPAC'] = new_df['monoB'].apply(
+                    lambda x: self.get_iupac_name(x) if pd.notna(x) else "Unknown_compound"
+                )
+        else:
+            # Set default IUPAC names if monomers unavailable
+            if 'monoA_IUPAC' not in new_df.columns:
+                new_df['monoA_IUPAC'] = "Unknown_compound"
+            if 'monoB_IUPAC' not in new_df.columns:
+                new_df['monoB_IUPAC'] = "Unknown_compound"
+        
+        if self.verbose:
+            logger.info(f"Successfully processed poly_chemprop_input dataset with {len(new_df)} rows")
+            logger.info(f"Target columns preserved: {final_target_columns}")
+        
+        return new_df
+    
     # ✅ NEW: Add exclude_columns parameter
     def process_new_dataset(self, input_path: str = None, df: pd.DataFrame = None,
                           expand_variants: bool = True, generate_iupac: bool = True,
@@ -1174,6 +1340,7 @@ class PolymerDatabaseManager:
         Process a new dataset and prepare it for appending to template
         COMPLETELY FLEXIBLE - no hardcoded assumptions about target properties
         WITH CONSISTENT CANONICALIZATION
+        Can handle both monomer-based datasets and pre-processed poly_chemprop_input datasets
         """
         # Load data
         if df is not None:
@@ -1186,6 +1353,15 @@ class PolymerDatabaseManager:
                 logger.info(f"Loaded {len(new_df)} rows from {input_path}")
         else:
             raise ValueError("Either input_path or df must be provided")
+        
+        # ✅ NEW: Check if dataset already has poly_chemprop_input
+        has_poly_chemprop = 'poly_chemprop_input' in new_df.columns
+        has_monomers = any(col in new_df.columns for col in ['monoA', 'smiles', 'MonA', 'SMILES', 'Smiles'])
+        
+        if has_poly_chemprop and not has_monomers:
+            if self.verbose:
+                logger.info("Dataset contains poly_chemprop_input - processing as pre-processed polymer data")
+            return self._process_existing_poly_chemprop_dataset(new_df, target_columns, column_mapping, exclude_columns)
         
         # Standardize column names - flexible mappings
         column_mapping_standard = {
@@ -1202,7 +1378,7 @@ class PolymerDatabaseManager:
         
         # Validate required columns
         if 'monoA' not in new_df.columns:
-            raise ValueError("No 'monoA', 'smiles', or 'MonA' column found!")
+            raise ValueError("No 'monoA', 'smiles', 'MonA', or 'poly_chemprop_input' column found!")
         
         # CANONICALIZE monoA SMILES IMMEDIATELY
         if self.verbose:
@@ -1555,6 +1731,9 @@ def main():
 Examples:
   # Basic usage - interactive column selection
   !python data_processing/polymer_database_manager.py -i input.csv -o output.csv
+  
+  # Process dataset with existing poly_chemprop_input
+  !python data_processing/polymer_database_manager.py -i poly_dataset.csv -o output.csv -t template.csv
   
   # With existing template
   !python data_processing/polymer_database_manager.py -i new_data.csv -o updated_db.csv -t existing_template.csv

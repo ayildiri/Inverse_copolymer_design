@@ -715,23 +715,49 @@ class PolymerDatabaseManager:
     # Interactive Processing
     # ========================
     
-    def detect_target_columns(self, df: pd.DataFrame, exclude_columns: List[str] = None) -> List[str]:
+    def detect_target_columns(self, df: pd.DataFrame, exclude_columns: List[str] = None, 
+                         auto_exclude_patterns: List[str] = None) -> List[str]:
         """
-        Automatically detect potential target columns (numeric columns)
-        FLEXIBLE: Can provide custom exclude list
+        Automatically detect potential target columns with flexible exclusion patterns
         """
         if exclude_columns is None:
-            # Default exclusions - but this can be overridden
-            exclude_columns = ['pol_id', 'hp_id', 'poly_id', 'MonA', 'MonB', 'monoA', 'monoB', 
-                             'stoich', 'connectivity', 'smiles', 'canonical_smiles', 'fracA', 'fracB',
-                             'poly_type', 'comp', 'master_chemprop_input', 'poly_chemprop_input',
-                             'monoA_IUPAC', 'monoB_IUPAC']
+            exclude_columns = []
+        
+        # ✅ NEW: Auto-exclude common non-target patterns
+        if auto_exclude_patterns is None:
+            auto_exclude_patterns = [
+                # Structure columns
+                'id', 'smiles', 'canonical', 'iupac', 'formula',
+                # Polymer-specific columns  
+                'mono', 'poly', 'frac', 'comp', 'stoich', 'connectivity',
+                # ChemProp columns
+                'chemprop', 'master', 'input',
+                # Common metadata
+                'source', 'reference', 'notes', 'comments', 'url'
+            ]
+        
+        # ✅ NEW: Build comprehensive exclusion list
+        comprehensive_exclude = set(exclude_columns)
+        
+        # Add columns that match patterns (case-insensitive)
+        for col in df.columns:
+            col_lower = col.lower()
+            for pattern in auto_exclude_patterns:
+                if pattern in col_lower:
+                    comprehensive_exclude.add(col)
+                    break
         
         # Find numeric columns
         numeric_columns = df.select_dtypes(include=['float64', 'int64', 'float32', 'int32']).columns.tolist()
         
         # Remove excluded columns
-        potential_targets = [col for col in numeric_columns if col not in exclude_columns]
+        potential_targets = [col for col in numeric_columns if col not in comprehensive_exclude]
+        
+        # ✅ NEW: Log what was excluded for transparency
+        if self.verbose:
+            excluded_found = [col for col in df.columns if col in comprehensive_exclude]
+            if excluded_found:
+                logger.info(f"Auto-excluded columns: {excluded_found}")
         
         return potential_targets
 
@@ -1279,8 +1305,16 @@ Examples:
                        help='Specific target column names to use')
     parser.add_argument('--target-names', nargs='+',
                        help='New names for target columns (must match --target-columns length)')
+    
+    # ✅ NEW: More flexible exclusion options
     parser.add_argument('--exclude-columns', nargs='+',
-                       help='Column names to exclude from auto-detection')
+                       help='Specific column names to exclude from auto-detection')
+    parser.add_argument('--exclude-patterns', nargs='+',
+                       help='Column name patterns to exclude (e.g., "id" excludes hp_id, pol_id)')
+    parser.add_argument('--keep-all-columns', action='store_true',
+                       help='Keep ALL original columns (disable auto-cleanup)')
+    parser.add_argument('--remove-empty-columns', action='store_true',
+                       help='Remove columns that are mostly empty/null')
     
     # Polymer configuration
     parser.add_argument('--poly-types', nargs='+', 
@@ -1351,7 +1385,13 @@ Examples:
         try:
             df = pd.read_csv(args.input)
             manager = PolymerDatabaseManager(verbose=False)
-            potential_targets = manager.detect_target_columns(df, exclude_columns=args.exclude_columns)
+            # ✅ NEW: Flexible exclusion handling
+            exclude_patterns = args.exclude_patterns if hasattr(args, 'exclude_patterns') else None
+            potential_targets = manager.detect_target_columns(
+                df, 
+                exclude_columns=args.exclude_columns,
+                auto_exclude_patterns=exclude_patterns if not args.keep_all_columns else []
+            )
             
             print(f"Columns in {args.input}:")
             print("-" * 50)

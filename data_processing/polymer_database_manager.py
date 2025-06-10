@@ -1474,7 +1474,7 @@ Examples:
             interactive=not args.non_interactive,
             target_columns=target_columns,
             column_mapping=column_mapping,
-            exclude_columns=args.exclude_columns  # ✅ NEW: Pass exclude_columns
+            exclude_columns=args.exclude_columns,  # ✅ NEW: Pass exclude_columns
             poly_types=args.poly_types if args.poly_types != ['alternating', 'block', 'random'] else None,
             compositions=args.compositions if args.compositions != ['4A_4B', '6A_2B', '2A_6B'] else None
         )

@@ -187,28 +187,25 @@ class PolymerDatabaseManager:
         """
         Intelligently repair aromatic ring systems by analyzing context
         """
-        # ✅ SMART: Look for aromatic ring patterns and infer missing atoms
+        repaired = smiles
         
-        # Pattern: Detect c1...()...c1 (aromatic rings with missing atoms)
-        ring_pattern = r'c1([^c]*?)c\(\)([^c]*?)c1'
+        # ✅ COMPREHENSIVE: Handle various numbered ring patterns
+        ring_patterns = [
+            # c1...()...c1 patterns
+            (r'c1([^c]*?)c\(\)([^c]*?)c1', lambda m: f"c1{m.group(1)}c{m.group(2)}c1"),
+            
+            # c2...()...c2 patterns  
+            (r'c2([^c]*?)c\(\)([^c]*?)c2', lambda m: f"c2{m.group(1)}c{m.group(2)}c2"),
+            
+            # Generic numbered rings
+            (r'c(\d+)([^c]*?)c\(\)([^c]*?)c\1', lambda m: f"c{m.group(1)}{m.group(2)}c{m.group(3)}c{m.group(1)}"),
+        ]
         
-        def fix_ring(match):
-            prefix = match.group(1)
-            suffix = match.group(2) 
-            
-            # ✅ INTELLIGENT: Count existing carbons and infer missing ones
-            carbon_count = prefix.count('c') + suffix.count('c') + 2  # +2 for the c1 and c1
-            
-            # Common aromatic ring sizes
-            if carbon_count <= 4:  # Likely benzene (6 carbons total)
-                missing_carbons = 6 - carbon_count
-                return f"c1{prefix}{'c' * missing_carbons}{suffix}c1"
-            elif carbon_count == 5:  # Likely pyridine or similar
-                return f"c1{prefix}c{suffix}c1"
+        for pattern, replacement in ring_patterns:
+            if callable(replacement):
+                repaired = re.sub(pattern, replacement, repaired)
             else:
-                return f"c1{prefix}c{suffix}c1"  # Default: add one carbon
-        
-        repaired = re.sub(ring_pattern, fix_ring, smiles)
+                repaired = re.sub(pattern, replacement, repaired)
         
         # Handle non-ring aromatic patterns
         repaired = self._repair_aromatic_chains(repaired)
@@ -221,13 +218,37 @@ class PolymerDatabaseManager:
         """
         repaired = smiles
         
-        # ✅ FLEXIBLE: Generic empty parentheses in aromatic contexts
+        # ✅ COMPREHENSIVE: Cover all the patterns we're seeing
         aromatic_patterns = [
-            (r'([cn])c\(\)([cns])', r'\1cc\2'),      # Insert carbon between aromatics
-            (r'([cn])\(\)([cns])', r'\1c\2'),        # Insert missing carbon
-            (r'ccc\(\)([sns])', r'cccc\1'),          # Fix thiophene/pyridine patterns
-            (r'cc\(\)([sns])', r'ccc\1'),            # Fix shorter aromatic chains
-            (r'c\(\)([sns])', r'cc\1'),              # Fix single missing carbon
+            # Benzene ring patterns (most common)
+            (r'ccc\(\)cc', 'ccccc'),                # ccc()cc → ccccc
+            (r'cc\(\)cc', 'cccc'),                  # cc()cc → cccc  
+            (r'c\(\)cc', 'ccc'),                    # c()cc → ccc
+            (r'cc\(\)c', 'ccc'),                    # cc()c → ccc
+            (r'c\(\)c', 'cc'),                      # c()c → cc
+            
+            # Thiophene patterns 
+            (r'ccc\(\)s', 'cccs'),                  # ccc()s → cccs
+            (r'cc\(\)s', 'ccs'),                    # cc()s → ccs
+            (r'c\(\)s', 'cs'),                      # c()s → cs
+            
+            # Pyridine patterns
+            (r'ccc\(\)n', 'cccn'),                  # ccc()n → cccn
+            (r'cc\(\)n', 'ccn'),                    # cc()n → ccn
+            (r'c\(\)n', 'cn'),                      # c()n → cn
+            
+            # With substituents (like your error cases)
+            (r'([cn])c\(\)([cn])', r'\1cc\2'),       # Insert carbon between aromatics
+            (r'([cn])\(\)([cn])', r'\1c\2'),         # Insert missing carbon
+            
+            # Complex ring systems (like c2ccc()cc2)
+            (r'c(\d+)ccc\(\)cc\1', r'c\1ccccc\1'),  # c2ccc()cc2 → c2ccccc2
+            (r'c(\d+)cc\(\)cc\1', r'c\1cccc\1'),    # c2cc()cc2 → c2cccc2
+            (r'c(\d+)c\(\)cc\1', r'c\1ccc\1'),      # c2c()cc2 → c2ccc2
+            
+            # Numbered ring with heteroatoms
+            (r'c(\d+)ccc\(\)s\1', r'c\1cccs\1'),    # c1ccc()s1 → c1cccs1
+            (r'c(\d+)cc\(\)s\1', r'c\1ccs\1'),      # c1cc()s1 → c1ccs1
         ]
         
         for pattern, replacement in aromatic_patterns:

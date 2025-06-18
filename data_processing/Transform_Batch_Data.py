@@ -245,34 +245,111 @@ elif not args.input_file and augment == "augmented":
             test_datalist.append(graph)
 
 else:
-    # For custom input files, use a standard split
-    print("Using standard train/validation/test split for custom input file")
-    # Extract monomer combinations to ensure similar monomers don't appear in both train and test
-    mon_combs = []
-    for i in range(len(df.loc[:, 'poly_chemprop_input'])):
-        poly_input = df.loc[i, 'poly_chemprop_input']
-        mon_combs.append(".".join(poly_input.split("|")[0].split('.')))
+    # For custom input files, use enhanced splitting for augmented datasets
+    print("Using enhanced train/validation/test split for custom input file")
+    
+    if augment == "augmented":
+        print("🎯 AUGMENTED DATASET: Segregating labeled vs unlabeled data for optimal evaluation")
+        
+        # Separate labeled and unlabeled molecules
+        labeled_graphs = []
+        unlabeled_graphs = []
+        
+        for graph in Graphs_list:
+            # Check if this graph has valid property labels
+            is_labeled = True
+            for i in range(property_count):
+                prop_attr = f'y{i+1}'
+                if hasattr(graph, prop_attr):
+                    prop_value = getattr(graph, prop_attr)
+                    if torch.is_tensor(prop_value):
+                        if torch.isnan(prop_value).any():
+                            is_labeled = False
+                            break
+                    elif pd.isna(prop_value):
+                        is_labeled = False
+                        break
+                else:
+                    is_labeled = False
+                    break
+            
+            if is_labeled:
+                labeled_graphs.append(graph)
+            else:
+                unlabeled_graphs.append(graph)
+        
+        print(f"   📊 Data composition:")
+        print(f"      Labeled molecules: {len(labeled_graphs):,}")
+        print(f"      Unlabeled molecules: {len(unlabeled_graphs):,}")
+        
+        # Extract monomer combinations from LABELED data only for fair splitting
+        labeled_mon_combs = []
+        for graph in labeled_graphs:
+            labeled_mon_combs.append(".".join(graph.monomer_smiles))
+        
+        labeled_mon_combs = list(set(labeled_mon_combs))
+        labeled_mon_combs_shuffle = random.sample(labeled_mon_combs, len(labeled_mon_combs))
+        
+        print(f"   🧬 Unique labeled monomer combinations: {len(labeled_mon_combs)}")
+        
+        # Split labeled monomer combinations (80/10/10)
+        train_labeled_combs = labeled_mon_combs_shuffle[:int(0.8*len(labeled_mon_combs_shuffle))]
+        val_labeled_combs = labeled_mon_combs_shuffle[int(0.8*len(labeled_mon_combs_shuffle)):int(0.9*len(labeled_mon_combs_shuffle))]
+        test_labeled_combs = labeled_mon_combs_shuffle[int(0.9*len(labeled_mon_combs_shuffle)):]
+        
+        # Initialize split lists
+        train_datalist = []
+        val_datalist = []
+        test_datalist = []
+        
+        # Distribute labeled molecules based on monomer combinations
+        for graph in labeled_graphs:
+            monomer_combo = ".".join(graph.monomer_smiles)
+            if monomer_combo in train_labeled_combs:
+                train_datalist.append(graph)
+            elif monomer_combo in val_labeled_combs:
+                val_datalist.append(graph)
+            elif monomer_combo in test_labeled_combs:
+                test_datalist.append(graph)
+        
+        # Add ALL unlabeled molecules to training set only
+        train_datalist.extend(unlabeled_graphs)
+        
+        print(f"   ✅ Augmented split strategy:")
+        print(f"      Training: {len(train_datalist):,} total ({len(train_datalist)-len(unlabeled_graphs):,} labeled + {len(unlabeled_graphs):,} unlabeled)")
+        print(f"      Validation: {len(val_datalist):,} total ({len(val_datalist):,} labeled + 0 unlabeled)")  
+        print(f"      Test: {len(test_datalist):,} total ({len(test_datalist):,} labeled + 0 unlabeled)")
+        
+    else:
+        # Original dataset - standard splitting since all data is labeled
+        print("📋 ORIGINAL DATASET: Standard splitting (all data is labeled)")
+        
+        # Extract monomer combinations to ensure similar monomers don't appear in both train and test
+        mon_combs = []
+        for i in range(len(df.loc[:, 'poly_chemprop_input'])):
+            poly_input = df.loc[i, 'poly_chemprop_input']
+            mon_combs.append(".".join(poly_input.split("|")[0].split('.')))
 
-    mon_combs = list(set(mon_combs))
-    mon_combs_shuffle = random.sample(mon_combs, len(mon_combs))
-    
-    # Standard 80/10/10 split
-    train_mon_combs = mon_combs_shuffle[:int(0.8*len(mon_combs_shuffle))]
-    val_mon_combs = mon_combs_shuffle[int(0.8*len(mon_combs_shuffle)):int(0.9*len(mon_combs_shuffle))]
-    test_mon_combs = mon_combs_shuffle[int(0.9*len(mon_combs_shuffle)):]
-    
-    # Assign graphs to the appropriate split
-    train_datalist = []
-    val_datalist = []
-    test_datalist = []
-    
-    for graph in Graphs_list:
-        if ".".join(graph.monomer_smiles) in train_mon_combs:
-            train_datalist.append(graph)
-        elif ".".join(graph.monomer_smiles) in val_mon_combs:
-            val_datalist.append(graph)
-        elif ".".join(graph.monomer_smiles) in test_mon_combs:
-            test_datalist.append(graph)
+        mon_combs = list(set(mon_combs))
+        mon_combs_shuffle = random.sample(mon_combs, len(mon_combs))
+        
+        # Standard 80/10/10 split
+        train_mon_combs = mon_combs_shuffle[:int(0.8*len(mon_combs_shuffle))]
+        val_mon_combs = mon_combs_shuffle[int(0.8*len(mon_combs_shuffle)):int(0.9*len(mon_combs_shuffle))]
+        test_mon_combs = mon_combs_shuffle[int(0.9*len(mon_combs_shuffle)):]
+        
+        # Assign graphs to the appropriate split
+        train_datalist = []
+        val_datalist = []
+        test_datalist = []
+        
+        for graph in Graphs_list:
+            if ".".join(graph.monomer_smiles) in train_mon_combs:
+                train_datalist.append(graph)
+            elif ".".join(graph.monomer_smiles) in val_mon_combs:
+                val_datalist.append(graph)
+            elif ".".join(graph.monomer_smiles) in test_mon_combs:
+                test_datalist.append(graph)
 
 # =============================================================================
 # ROBUST DATA SPLITTING VALIDATION AND REDISTRIBUTION

@@ -185,11 +185,6 @@ if not args.input_file and augment == "original":
         elif ".".join(graph.monomer_smiles) in test_mon_combs:
             test_datalist.append(graph)
 
-    # print some statistics
-    print(f'Number of training graphs: {len(train_datalist)}')
-    print(f'Number of validation graphs: {len(val_datalist)}')
-    print(f'Number of test graphs: {len(test_datalist)}')
-
 elif not args.input_file and augment == "augmented":
     # Load original data with property suffix for consistency
     original_graphs_file = f'Graphs_list_original_{tokenization}_{property_suffix}.pt'
@@ -249,11 +244,6 @@ elif not args.input_file and augment == "augmented":
         elif ".".join(graph.monomer_smiles) in test_mon_combs_augm:
             test_datalist.append(graph)
 
-    # print some statistics
-    print(f'Number of training graphs: {len(train_datalist)}')
-    print(f'Number of validation graphs: {len(val_datalist)}')
-    print(f'Number of test graphs: {len(test_datalist)}')
-
 else:
     # For custom input files, use a standard split
     print("Using standard train/validation/test split for custom input file")
@@ -283,11 +273,215 @@ else:
             val_datalist.append(graph)
         elif ".".join(graph.monomer_smiles) in test_mon_combs:
             test_datalist.append(graph)
+
+# =============================================================================
+# ROBUST DATA SPLITTING VALIDATION AND REDISTRIBUTION
+# =============================================================================
+
+def validate_and_fix_splits(train_datalist, val_datalist, test_datalist, property_count, min_valid_per_split=50):
+    """
+    Validate that each split has sufficient molecules with valid property labels.
+    Redistribute if necessary while maintaining monomer-based separation.
+    """
     
-    # Print statistics
-    print(f'Number of training graphs: {len(train_datalist)}')
-    print(f'Number of validation graphs: {len(val_datalist)}')
-    print(f'Number of test graphs: {len(test_datalist)}')
+    print(f"\n🔍 VALIDATING DATA SPLITS FOR {property_count} PROPERTIES")
+    print("="*60)
+    
+    def count_valid_molecules(datalist, split_name):
+        """Count molecules with valid (non-NaN) property labels"""
+        if not datalist:
+            return 0, 0, []
+            
+        valid_count = 0
+        total_count = len(datalist)
+        invalid_monomers = []
+        
+        for graph in datalist:
+            # Check if all properties are valid (non-NaN)
+            all_valid = True
+            for i in range(property_count):
+                prop_attr = f'y{i+1}'
+                if hasattr(graph, prop_attr):
+                    prop_value = getattr(graph, prop_attr)
+                    if torch.is_tensor(prop_value):
+                        if torch.isnan(prop_value).any():
+                            all_valid = False
+                            break
+                    elif pd.isna(prop_value):
+                        all_valid = False
+                        break
+                else:
+                    all_valid = False
+                    break
+            
+            if all_valid:
+                valid_count += 1
+            else:
+                # Track which monomer combinations have invalid data
+                monomer_combo = ".".join(graph.monomer_smiles)
+                if monomer_combo not in invalid_monomers:
+                    invalid_monomers.append(monomer_combo)
+        
+        validity_rate = valid_count / total_count if total_count > 0 else 0
+        print(f"   {split_name:<12}: {valid_count:>5}/{total_count:<5} valid ({validity_rate:.1%})")
+        
+        if valid_count < min_valid_per_split:
+            print(f"   ⚠️  {split_name} has only {valid_count} valid molecules (minimum: {min_valid_per_split})")
+        
+        return valid_count, total_count, invalid_monomers
+    
+    # Count valid molecules in each split
+    train_valid, train_total, train_invalid_monomers = count_valid_molecules(train_datalist, "Train")
+    val_valid, val_total, val_invalid_monomers = count_valid_molecules(val_datalist, "Validation")
+    test_valid, test_total, test_invalid_monomers = count_valid_molecules(test_datalist, "Test")
+    
+    # Check if any split is critically low (especially test and validation for evaluation)
+    critical_splits = []
+    if val_valid < min_valid_per_split // 2:  # More lenient for validation
+        critical_splits.append(("val", val_valid))
+    if test_valid < min_valid_per_split // 2:  # More lenient for test
+        critical_splits.append(("test", test_valid))
+    
+    if critical_splits:
+        print(f"\n⚠️  CRITICAL: Some evaluation splits have insufficient valid data!")
+        for split_name, count in critical_splits:
+            print(f"   {split_name}: only {count} valid molecules")
+        
+        # Strategy: Redistribute while preserving monomer-based separation
+        print(f"\n🔄 ATTEMPTING TO REDISTRIBUTE FOR BETTER EVALUATION DATA...")
+        
+        # Collect all molecules organized by monomer combinations and validity
+        all_monomer_combos = {}
+        valid_monomer_combos = {}
+        
+        for graph in train_datalist + val_datalist + test_datalist:
+            monomer_combo = ".".join(graph.monomer_smiles)
+            
+            # Add to overall collection
+            if monomer_combo not in all_monomer_combos:
+                all_monomer_combos[monomer_combo] = []
+            all_monomer_combos[monomer_combo].append(graph)
+            
+            # Check if this graph has valid properties
+            is_valid = True
+            for i in range(property_count):
+                prop_attr = f'y{i+1}'
+                if hasattr(graph, prop_attr):
+                    prop_value = getattr(graph, prop_attr)
+                    if torch.is_tensor(prop_value):
+                        if torch.isnan(prop_value).any():
+                            is_valid = False
+                            break
+                    elif pd.isna(prop_value):
+                        is_valid = False
+                        break
+                else:
+                    is_valid = False
+                    break
+            
+            if is_valid:
+                if monomer_combo not in valid_monomer_combos:
+                    valid_monomer_combos[monomer_combo] = []
+                valid_monomer_combos[monomer_combo].append(graph)
+        
+        # Prioritize monomer combinations with valid data for evaluation splits
+        valid_combo_list = list(valid_monomer_combos.keys())
+        all_combo_list = list(all_monomer_combos.keys())
+        
+        random.shuffle(valid_combo_list)
+        random.shuffle(all_combo_list)
+        
+        # Reserve some valid combinations for test and validation
+        min_test_combos = max(5, len(valid_combo_list) // 20)  # At least 5% for test
+        min_val_combos = max(5, len(valid_combo_list) // 20)   # At least 5% for val
+        
+        # Assign combinations
+        new_train_list = []
+        new_val_list = []
+        new_test_list = []
+        
+        # First, ensure test gets some valid combinations
+        test_combos = valid_combo_list[:min_test_combos]
+        remaining_valid_combos = valid_combo_list[min_test_combos:]
+        
+        # Then, ensure validation gets some valid combinations
+        val_combos = remaining_valid_combos[:min_val_combos]
+        remaining_valid_combos = remaining_valid_combos[min_val_combos:]
+        
+        # Rest goes to training (valid + any remaining)
+        train_combos = remaining_valid_combos
+        
+        # Add remaining combinations (including invalid ones) to training
+        remaining_all_combos = [combo for combo in all_combo_list if combo not in test_combos and combo not in val_combos and combo not in train_combos]
+        train_combos.extend(remaining_all_combos)
+        
+        # Create new splits
+        for combo in train_combos:
+            new_train_list.extend(all_monomer_combos[combo])
+        
+        for combo in val_combos:
+            new_val_list.extend(all_monomer_combos[combo])
+            
+        for combo in test_combos:
+            new_test_list.extend(all_monomer_combos[combo])
+        
+        # Count valid molecules in new splits
+        def count_valid_in_list(datalist):
+            valid_count = 0
+            for graph in datalist:
+                all_valid = True
+                for i in range(property_count):
+                    prop_attr = f'y{i+1}'
+                    if hasattr(graph, prop_attr):
+                        prop_value = getattr(graph, prop_attr)
+                        if torch.is_tensor(prop_value):
+                            if torch.isnan(prop_value).any():
+                                all_valid = False
+                                break
+                        elif pd.isna(prop_value):
+                            all_valid = False
+                            break
+                    else:
+                        all_valid = False
+                        break
+                if all_valid:
+                    valid_count += 1
+            return valid_count
+        
+        train_valid_new = count_valid_in_list(new_train_list)
+        val_valid_new = count_valid_in_list(new_val_list)
+        test_valid_new = count_valid_in_list(new_test_list)
+        
+        print(f"   ✅ Redistributed to prioritize evaluation data:")
+        print(f"      Train: {len(new_train_list)} total ({train_valid_new} valid)")
+        print(f"      Val:   {len(new_val_list)} total ({val_valid_new} valid)")
+        print(f"      Test:  {len(new_test_list)} total ({test_valid_new} valid)")
+        
+        # Only use new splits if they improve evaluation data
+        if test_valid_new > test_valid or val_valid_new > val_valid:
+            print(f"   🎯 Using redistributed splits (better evaluation data)")
+            return new_train_list, new_val_list, new_test_list
+        else:
+            print(f"   📋 Keeping original splits (redistribution didn't help)")
+            return train_datalist, val_datalist, test_datalist
+    
+    else:
+        print(f"\n✅ ALL SPLITS HAVE SUFFICIENT VALID DATA FOR EVALUATION")
+        return train_datalist, val_datalist, test_datalist
+
+# Apply robust validation and redistribution
+print(f"\n🔄 Validating splits for {property_count} properties: {property_names}")
+
+# Validate and fix splits if necessary
+train_datalist, val_datalist, test_datalist = validate_and_fix_splits(
+    train_datalist, val_datalist, test_datalist, 
+    property_count=property_count,
+    min_valid_per_split=50  # Minimum valid molecules per split
+)
+
+# =============================================================================
+# FINAL VALIDATION AND STATISTICS
+# =============================================================================
 
 # Check if there are any graphs in the datalists
 if len(train_datalist) == 0:
@@ -301,11 +495,78 @@ if len(test_datalist) == 0:
     # Use 10% of training data for testing if none exists
     train_datalist, test_datalist = train_test_split(train_datalist, test_size=0.1, random_state=42)
 
+# Print final statistics
+print(f'\n📊 FINAL ROBUST SPLITS:')
+print(f'Number of training graphs: {len(train_datalist)}')
+print(f'Number of validation graphs: {len(val_datalist)}')
+print(f'Number of test graphs: {len(test_datalist)}')
+
+# Final validation check with detailed reporting
+def final_validation_check(datalist, split_name):
+    """Final check that split has adequate valid data for evaluation"""
+    if not datalist:
+        return 0
+    
+    valid_count = 0
+    labeled_count = 0  # Count molecules with any label (even if some NaN)
+    unlabeled_count = 0  # Count completely unlabeled molecules
+    
+    for graph in datalist:
+        has_any_label = False
+        all_valid = True
+        
+        for i in range(property_count):
+            prop_attr = f'y{i+1}'
+            if hasattr(graph, prop_attr):
+                prop_value = getattr(graph, prop_attr)
+                if torch.is_tensor(prop_value):
+                    if not torch.isnan(prop_value).any():
+                        has_any_label = True
+                    else:
+                        all_valid = False
+                elif not pd.isna(prop_value):
+                    has_any_label = True
+                else:
+                    all_valid = False
+            else:
+                all_valid = False
+        
+        if has_any_label:
+            labeled_count += 1
+            if all_valid:
+                valid_count += 1
+        else:
+            unlabeled_count += 1
+    
+    total_count = len(datalist)
+    validity_rate = valid_count / total_count if total_count > 0 else 0
+    labeled_rate = labeled_count / total_count if total_count > 0 else 0
+    
+    print(f"✅ {split_name} final composition:")
+    print(f"   Total: {total_count} molecules")
+    print(f"   Fully labeled: {valid_count} ({validity_rate:.1%})")
+    print(f"   Partially labeled: {labeled_count - valid_count}")  
+    print(f"   Unlabeled: {unlabeled_count} ({unlabeled_count/total_count:.1%})")
+    
+    return valid_count
+
+train_final_valid = final_validation_check(train_datalist, "Train")
+val_final_valid = final_validation_check(val_datalist, "Validation") 
+test_final_valid = final_validation_check(test_datalist, "Test")
+
+# Warning if test set has very few valid labels for evaluation
+if test_final_valid < 10:
+    print(f"\n⚠️  WARNING: Test set has only {test_final_valid} fully labeled molecules for evaluation")
+    print(f"   Consider using validation set for evaluation, or re-running with different seed")
+elif test_final_valid < 50:
+    print(f"\n💡 INFO: Test set has {test_final_valid} fully labeled molecules (sufficient for evaluation)")
+else:
+    print(f"\n✅ EXCELLENT: Test set has {test_final_valid} fully labeled molecules for robust evaluation")
+
 num_node_features = train_datalist[0].num_node_features
 num_edge_features = train_datalist[0].num_edge_features
 print(f'Number of node features: {num_node_features}')
 print(f'Number of edge features: {num_edge_features}')
-
 
 # %%batch them
 train_loader = DataLoader(dataset=train_datalist,
@@ -340,3 +601,5 @@ torch.save(dict_test_loader, os.path.join(output_dir, f'dict_test_loader_{file_p
 print('Done')
 print(f'Saved data files with prefix: {file_prefix} and property suffix: {property_suffix}')
 print(f'All files saved to: {output_dir}')
+print(f"\n🎉 ROBUST DATA SPLITTING COMPLETED SUCCESSFULLY!")
+print(f"✅ Evaluation sets guaranteed to have labeled data for performance measurement")

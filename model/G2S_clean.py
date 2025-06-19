@@ -405,9 +405,11 @@ class SequenceDecoder(nn.Module):
             has_numbers = any(c.isdigit() or c == '.' for c in sequence)
             pipe_count = sequence.count('|')
             
-            # For complete format, we need at least SMILES|stoichiometry
-            # More complete would have SMILES|stoich1|stoich2|connectivity
-            return has_pipe and has_numbers and pipe_count >= 2
+            # 🔧 NEW: Require connectivity patterns
+            has_connectivity = '<' in sequence and ':' in sequence
+            
+            # For complete format, require SMILES|stoich AND connectivity
+            return has_pipe and has_numbers and pipe_count >= 2 and has_connectivity
             
         except Exception:
             return False
@@ -507,7 +509,7 @@ class SequenceDecoder(nn.Module):
             batch_size=z.size(0),
             
             # 🔧 FIX: Increase min_length to force longer generation
-            min_length=150,        # Changed from 1 to force complete format generation
+            min_length=250,        # Changed from 1 to force complete format generation
             n_best=1,
             stepwise_penalty=None,
             ratio=0.0,

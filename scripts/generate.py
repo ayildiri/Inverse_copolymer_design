@@ -209,6 +209,242 @@ def is_chemically_valid_polymer(polymer_string):
     except Exception:
         return False
 
+def fix_polymer_smiles_comprehensive(polymer_string):
+    """Comprehensive SMILES fixing with multiple strategies"""
+    if not polymer_string:
+        return polymer_string
+    
+    # Remove padding
+    clean_string = polymer_string.rstrip('_').strip()
+    
+    # Strategy 1: Fix obvious parentheses issues
+    fixed = fix_parentheses_advanced(clean_string)
+    
+    # Strategy 2: Handle polymer format specifically
+    if '|' in fixed:
+        parts = fixed.split('|')
+        if len(parts) > 0:
+            smiles_part = parts[0]
+            
+            # Fix the SMILES component
+            fixed_smiles = fix_smiles_syntax(smiles_part)
+            if fixed_smiles:
+                parts[0] = fixed_smiles
+                fixed = '|'.join(parts)
+    else:
+        # Regular SMILES
+        fixed = fix_smiles_syntax(fixed)
+    
+    return fixed
+
+def fix_parentheses_advanced(smiles_string):
+    """Advanced parentheses fixing with chemical awareness"""
+    if not smiles_string:
+        return smiles_string
+    
+    # Count different types of brackets
+    open_paren = smiles_string.count('(')
+    close_paren = smiles_string.count(')')
+    open_bracket = smiles_string.count('[')
+    close_bracket = smiles_string.count(']')
+    
+    # Fix parentheses - ADD MISSING CLOSING PARENTHESES
+    if open_paren > close_paren:
+        missing_close = open_paren - close_paren
+        smiles_string += ')' * missing_close
+    elif close_paren > open_paren:
+        # Remove extra closing parentheses from the end
+        excess_close = close_paren - open_paren
+        smiles_string = smiles_string[::-1].replace(')', '', excess_close)[::-1]
+    
+    # Fix brackets
+    if open_bracket > close_bracket:
+        missing_close = open_bracket - close_bracket
+        smiles_string += ']' * missing_close
+    elif close_bracket > open_bracket:
+        # Remove extra closing brackets from the end
+        excess_close = close_bracket - open_bracket
+        smiles_string = smiles_string[::-1].replace(']', '', excess_close)[::-1]
+    
+    return smiles_string
+
+def fix_smiles_syntax(smiles_string):
+    """Fix SMILES syntax issues"""
+    if not smiles_string:
+        return smiles_string
+    
+    # Remove invalid characters that might break parsing
+    valid_chars = set('CNOSPFClBrI[]()=\\/#-+0123456789:.*')
+    cleaned = ''.join(c for c in smiles_string if c in valid_chars)
+    
+    # Fix common issues
+    fixed = fix_parentheses_advanced(cleaned)
+    
+    # Ensure proper atom notation
+    fixed = ensure_proper_atoms(fixed)
+    
+    return fixed
+
+def ensure_proper_atoms(smiles_string):
+    """Ensure proper atom notation in SMILES"""
+    import re
+    
+    # Fix lowercase atoms that should be capitalized
+    fixes = {
+        'cl': 'Cl', 'br': 'Br', 'mg': 'Mg', 'ca': 'Ca', 
+        'na': 'Na', 'al': 'Al', 'si': 'Si', 'se': 'Se'
+    }
+    
+    for wrong, correct in fixes.items():
+        smiles_string = re.sub(r'\b' + wrong + r'\b', correct, smiles_string)
+    
+    return smiles_string
+
+def validate_polymer_advanced(polymer_string):
+    """Advanced polymer validation with multiple fallback strategies"""
+    try:
+        from rdkit import Chem
+        
+        if not polymer_string or polymer_string.strip() == '':
+            return False
+        
+        # Try original string first
+        if try_parse_polymer(polymer_string):
+            return True
+            
+        # Try fixed version
+        fixed_string = fix_polymer_smiles_comprehensive(polymer_string)
+        if fixed_string and try_parse_polymer(fixed_string):
+            return True
+            
+        # Try extracting just the chemical part (before first |)
+        if '|' in polymer_string:
+            chemical_part = polymer_string.split('|')[0]
+            if try_parse_polymer(chemical_part):
+                return True
+                
+        return False
+        
+    except Exception:
+        return False
+
+def try_parse_polymer(smiles_string):
+    """Try to parse a polymer SMILES with various strategies"""
+    try:
+        from rdkit import Chem
+        
+        # Direct parsing
+        mol = Chem.MolFromSmiles(smiles_string)
+        if mol is not None:
+            return True
+        
+        # Try removing attachment points
+        clean_smiles = smiles_string
+        for i in range(1, 10):
+            clean_smiles = clean_smiles.replace(f'[*:{i}]', '*')
+        clean_smiles = clean_smiles.replace('[*]', '*')
+        
+        mol = Chem.MolFromSmiles(clean_smiles)
+        if mol is not None:
+            return True
+            
+        # Try parsing individual monomers if separated by '.'
+        if '.' in smiles_string:
+            monomers = smiles_string.split('.')
+            valid_monomers = 0
+            for monomer in monomers:
+                if monomer.strip():
+                    mol = Chem.MolFromSmiles(monomer.strip())
+                    if mol is not None:
+                        valid_monomers += 1
+            return valid_monomers > 0
+            
+        return False
+        
+    except Exception:
+        return False
+
+def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100, max_attempts=500,
+                                   batch_size=16, embedding_dimension=32, device=device, 
+                                   enforce_homopolymer=False, save_properties=False):
+    """Generation with enhanced decoding strategies"""
+    
+    all_valid_predictions = []
+    all_properties = [] if save_properties else None
+    attempts = 0
+    
+    print(f"🎯 Enhanced decoding generation: targeting {target_count} valid molecules")
+    
+    with torch.no_grad():
+        model.eval()
+        
+        while len(all_valid_predictions) < target_count and attempts < max_attempts:
+            
+            # Use very conservative sampling
+            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 0.1
+            
+            try:
+                # Standard inference
+                predictions_rand, _, _, z, y = model.inference(
+                    data=z_rand, device=device, sample=False, log_var=None
+                )
+                
+                # Enhanced processing for each prediction
+                batch_valid = []
+                batch_properties = []
+                
+                for sample in range(len(predictions_rand)):
+                    pred_tokens = predictions_rand[sample][0].tolist()
+                    pred_string = combine_tokens(
+                        tokenids_to_vocab(pred_tokens, vocab), 
+                        tokenization=tokenization
+                    )
+                    
+                    # THIS IS THE KEY: Try comprehensive fixing
+                    fixed_string = fix_polymer_smiles_comprehensive(pred_string)
+                    
+                    if fixed_string and validate_polymer_advanced(fixed_string):
+                        if enforce_homopolymer:
+                            fixed_string = convert_to_homopolymer_format(fixed_string)
+                        
+                        batch_valid.append(fixed_string)
+                        
+                        if save_properties and torch.is_tensor(y):
+                            batch_properties.append(y[sample].cpu().numpy())
+                
+                all_valid_predictions.extend(batch_valid)
+                if save_properties and batch_properties:
+                    all_properties.extend(batch_properties)
+                
+                attempts += batch_size
+                
+                # Progress reporting
+                if attempts % (batch_size * 5) == 0 or len(batch_valid) > 0:
+                    batch_validity = len(batch_valid) / batch_size if batch_size > 0 else 0
+                    total_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
+                    
+                    print(f'Batch {attempts//batch_size}: {len(batch_valid)}/{batch_size} valid ({batch_validity:.1%}) | '
+                          f'Total: {len(all_valid_predictions)}/{attempts} ({total_validity:.1%}) | '
+                          f'Progress: {len(all_valid_predictions)}/{target_count} '
+                          f'({len(all_valid_predictions)/target_count:.1%})')
+                
+                # Early stopping if very poor performance
+                if attempts > 200 and len(all_valid_predictions) < attempts * 0.01:
+                    print("⚠️  Very low validity rate. Decoder may need retraining.")
+                    break
+                    
+            except Exception as e:
+                print(f"Error in generation batch: {e}")
+                attempts += batch_size
+                continue
+    
+    final_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
+    print(f"✅ Enhanced generation completed: {len(all_valid_predictions)} valid polymers from {attempts} attempts")
+    print(f"📊 Final validity rate: {final_validity:.1%}")
+    
+    return all_valid_predictions[:target_count], all_properties
+
+
 def sample_latent_space(batch_size, embedding_dim, device, strategy='conservative', epsilon=1.0):
     """Sample from latent space with different strategies for better quality"""
     
@@ -365,23 +601,21 @@ if os.path.isfile(filepath):
 
     ### RANDOM GENERATION ###
     if args.quality_control:
-        print(f'🎲 Generate random samples with quality control')
+        print(f'🎲 Generate random samples with enhanced decoding')
         torch.manual_seed(args.seed)
         
-        # Use quality-controlled generation
-        all_predictions, all_properties = generate_with_quality_control(
+        # Use enhanced decoding generation
+        all_predictions, all_properties = generate_with_enhanced_decoding(  # ← NEW FUNCTION
             model=model,
             vocab=vocab,
             tokenization=tokenization,
             target_count=args.target_molecules,
             max_attempts=args.max_attempts,
-            batch_size=64,
+            batch_size=16,  # Smaller batch size
             embedding_dimension=embedding_dimension,
             device=device,
             enforce_homopolymer=args.enforce_homopolymer,
-            save_properties=args.save_properties,
-            sampling_strategy=args.sampling_strategy,
-            epsilon=args.epsilon
+            save_properties=args.save_properties
         )
         
     else:

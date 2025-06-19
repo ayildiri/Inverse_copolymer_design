@@ -505,7 +505,7 @@ def fix_polymer_representation_correct(polymer_string):
         return f"{fixed_smiles}|1.0|"
 
 # ================================
-# VALIDATION FUNCTIONS
+# BASIC VALIDATION FUNCTIONS
 # ================================
 
 def validate_smiles_component(smiles_string):
@@ -583,25 +583,28 @@ def validate_polymer_format_correct(polymer_string):
 def enhanced_polymer_processing_correct(pred_string, enforce_homopolymer=False):
     """Enhanced processing with improved SMILES fixing"""
     
-    # Try multiple fixing strategies in order of preference
+    # FIRST: Check if original is already valid - don't fix if not needed!
+    if validate_polymer_format_correct(pred_string):
+        if enforce_homopolymer:
+            return convert_to_homopolymer_format(pred_string)
+        return pred_string  # Return original if already valid
+    
+    # If not valid, then try fixing strategies...
     candidates = []
     
-    # Strategy 1: Original string
-    candidates.append(pred_string)
-    
-    # Strategy 2: Main fix with enhanced SMILES handling
+    # Strategy 1: Main fix with enhanced SMILES handling
     main_fix = fix_polymer_representation_correct(pred_string)
     if main_fix:
         candidates.append(main_fix)
     
-    # Strategy 3: Extract and fix just the SMILES part if polymer format is broken
+    # Strategy 2: Extract and fix just the SMILES part if polymer format is broken
     if '|' in pred_string:
         smiles_only = pred_string.split('|')[0]
         smiles_fixed = fix_smiles_component(smiles_only)
         if smiles_fixed:
             candidates.append(f"{smiles_fixed}|1.0|")
     
-    # Strategy 4: Try basic cleaning
+    # Strategy 3: Try basic cleaning
     basic_clean = clean_output(pred_string)
     if basic_clean != pred_string:
         candidates.append(basic_clean)
@@ -617,6 +620,283 @@ def enhanced_polymer_processing_correct(pred_string, enforce_homopolymer=False):
             return candidate
     
     return None
+
+# ================================
+# COMPREHENSIVE VALIDATION FUNCTIONS (NEW)
+# ================================
+
+def validate_complete_polymer_format(polymer_string, verbose=False):
+    """
+    Comprehensive validation of the complete polymer format:
+    SMILES|stoichiometry|connectivity_patterns
+    
+    Based on README format:
+    [*:1]c1ccc2c(c1)S(=O)(=O)c1cc([*:2])ccc1-2.[*:3]c1ccc([*:4])c(N)c1|0.25|0.75|<1-3:0.25:0.25<1-4:0.25:0.25<...
+    """
+    if not polymer_string or polymer_string.strip() == '':
+        if verbose: print("❌ Empty string")
+        return False
+    
+    # Split into main components
+    if '|' not in polymer_string:
+        if verbose: print("❌ Missing | separators - not in polymer format")
+        return False
+    
+    parts = polymer_string.split('|')
+    if len(parts) < 3:  # Need at least SMILES|stoich1|stoich2 or connectivity
+        if verbose: print(f"❌ Too few components: {len(parts)}, need at least 3")
+        return False
+    
+    # Part 1: Validate SMILES component
+    smiles_part = parts[0]
+    smiles_valid, smiles_info = validate_smiles_polymer_format(smiles_part)
+    if not smiles_valid:
+        if verbose: print(f"❌ Invalid SMILES: {smiles_info}")
+        return False
+    
+    # Part 2: Validate stoichiometry components
+    stoich_parts = []
+    connectivity_parts = []
+    
+    for i, part in enumerate(parts[1:], 1):
+        part = part.strip()
+        if not part:
+            continue
+            
+        if part.startswith('<'):
+            connectivity_parts.append(part)
+        else:
+            # Should be stoichiometry (numbers)
+            try:
+                val = float(part)
+                if 0 <= val <= 1:
+                    stoich_parts.append(val)
+                else:
+                    if verbose: print(f"❌ Stoichiometry value out of range [0,1]: {val}")
+                    return False
+            except ValueError:
+                if verbose: print(f"❌ Invalid stoichiometry value: {part}")
+                return False
+    
+    # Validate stoichiometry makes sense
+    if len(stoich_parts) == 0:
+        if verbose: print("❌ No stoichiometry values found")
+        return False
+    
+    # Stoichiometry should roughly sum to 1.0 (allow some tolerance)
+    stoich_sum = sum(stoich_parts)
+    if abs(stoich_sum - 1.0) > 0.1:
+        if verbose: print(f"❌ Stoichiometry doesn't sum to ~1.0: {stoich_sum}")
+        return False
+    
+    # Part 3: Validate connectivity patterns (optional but good to have)
+    if connectivity_parts:
+        conn_valid, conn_info = validate_connectivity_patterns(connectivity_parts, smiles_info['attachment_points'])
+        if not conn_valid:
+            if verbose: print(f"❌ Invalid connectivity: {conn_info}")
+            return False
+    
+    if verbose:
+        print("✅ Valid complete polymer format!")
+        print(f"  - SMILES: {smiles_info['monomer_count']} monomers, {len(smiles_info['attachment_points'])} attachment points")
+        print(f"  - Stoichiometry: {stoich_parts} (sum={stoich_sum:.3f})")
+        print(f"  - Connectivity: {len(connectivity_parts)} patterns")
+    
+    return True
+
+def validate_smiles_polymer_format(smiles_string):
+    """Validate SMILES component of polymer format"""
+    try:
+        from rdkit import Chem
+        
+        if not smiles_string or smiles_string.strip() == '':
+            return False, "Empty SMILES"
+        
+        # Check for attachment points [*:1], [*:2], etc.
+        attachment_points = re.findall(r'\[\*:\d+\]', smiles_string)
+        if len(attachment_points) < 2:
+            return False, f"Need at least 2 attachment points, found {len(attachment_points)}"
+        
+        # Check for multiple monomers (separated by .)
+        if '.' in smiles_string:
+            monomers = smiles_string.split('.')
+            monomer_count = len(monomers)
+            
+            # Validate each monomer
+            valid_monomers = 0
+            for monomer in monomers:
+                monomer = monomer.strip()
+                if monomer:
+                    # Test with attachment points replaced
+                    test_monomer = re.sub(r'\[\*:\d+\]', '*', monomer)
+                    mol = Chem.MolFromSmiles(test_monomer)
+                    if mol is not None and mol.GetNumAtoms() > 0:
+                        valid_monomers += 1
+            
+            if valid_monomers == 0:
+                return False, "No valid monomers found"
+        else:
+            # Single monomer
+            monomer_count = 1
+            test_smiles = re.sub(r'\[\*:\d+\]', '*', smiles_string)
+            mol = Chem.MolFromSmiles(test_smiles)
+            if mol is None or mol.GetNumAtoms() == 0:
+                return False, "Invalid single monomer SMILES"
+            valid_monomers = 1
+        
+        return True, {
+            'monomer_count': monomer_count,
+            'attachment_points': attachment_points,
+            'valid_monomers': valid_monomers
+        }
+        
+    except Exception as e:
+        return False, f"SMILES parsing error: {str(e)}"
+
+def validate_connectivity_patterns(connectivity_parts, attachment_points):
+    """Validate connectivity patterns like <1-3:0.25:0.25"""
+    try:
+        # Extract attachment point numbers
+        attachment_nums = []
+        for ap in attachment_points:
+            match = re.search(r'\[\*:(\d+)\]', ap)
+            if match:
+                attachment_nums.append(int(match.group(1)))
+        
+        max_attachment = max(attachment_nums) if attachment_nums else 0
+        
+        valid_patterns = 0
+        for pattern in connectivity_parts:
+            # Pattern should look like: <1-3:0.25:0.25
+            match = re.match(r'<(\d+)-(\d+):([\d.]+):([\d.]+)', pattern)
+            if not match:
+                return False, f"Invalid connectivity pattern format: {pattern}"
+            
+            from_point = int(match.group(1))
+            to_point = int(match.group(2))
+            prob1 = float(match.group(3))
+            prob2 = float(match.group(4))
+            
+            # Check attachment points exist
+            if from_point > max_attachment or to_point > max_attachment:
+                return False, f"Connectivity references non-existent attachment point: {pattern}"
+            
+            # Check probabilities are reasonable
+            if not (0 <= prob1 <= 1) or not (0 <= prob2 <= 1):
+                return False, f"Invalid probabilities in connectivity: {pattern}"
+            
+            valid_patterns += 1
+        
+        return True, f"Valid connectivity patterns: {valid_patterns}"
+        
+    except Exception as e:
+        return False, f"Connectivity validation error: {str(e)}"
+
+def analyze_generated_polymers(polymer_list, sample_size=10):
+    """Analyze a list of generated polymers for format compliance"""
+    
+    print("🔍 COMPREHENSIVE POLYMER FORMAT ANALYSIS")
+    print("="*60)
+    
+    if not polymer_list:
+        print("❌ No polymers to analyze")
+        return
+    
+    # Take a sample for detailed analysis
+    sample_polymers = polymer_list[:sample_size] if len(polymer_list) > sample_size else polymer_list
+    
+    format_compliant = 0
+    basic_valid = 0
+    
+    print(f"\n📊 Analyzing {len(sample_polymers)} sample polymers...")
+    print("-"*60)
+    
+    for i, polymer in enumerate(sample_polymers):
+        print(f"\n🧪 Polymer {i+1}:")
+        print(f"   {polymer[:80]}...")
+        
+        # Check basic validity (what we were doing before)
+        basic_valid_result = validate_polymer_format_correct(polymer)
+        if basic_valid_result:
+            basic_valid += 1
+            
+        # Check complete format compliance (new comprehensive check)
+        complete_valid_result = validate_complete_polymer_format(polymer, verbose=True)
+        if complete_valid_result:
+            format_compliant += 1
+        
+        print()
+    
+    print("="*60)
+    print("📋 ANALYSIS SUMMARY:")
+    print(f"   Basic SMILES validity: {basic_valid}/{len(sample_polymers)} ({basic_valid/len(sample_polymers)*100:.1f}%)")
+    print(f"   Complete format compliance: {format_compliant}/{len(sample_polymers)} ({format_compliant/len(sample_polymers)*100:.1f}%)")
+    
+    if format_compliant < basic_valid:
+        print("\n⚠️  ISSUE DETECTED:")
+        print(f"   {basic_valid - format_compliant} polymers are basic valid but not format-compliant")
+        print("   This means they parse as SMILES but don't follow the full polymer representation")
+    
+    if format_compliant == len(sample_polymers):
+        print("\n✅ EXCELLENT: All polymers follow the complete format!")
+    elif format_compliant > len(sample_polymers) * 0.8:
+        print("\n👍 GOOD: Most polymers follow the complete format")
+    elif format_compliant > len(sample_polymers) * 0.5:
+        print("\n⚠️  MODERATE: Some polymers follow the complete format")
+    else:
+        print("\n❌ POOR: Few polymers follow the complete format")
+    
+    print("\n🎯 RECOMMENDATION:")
+    if format_compliant < len(sample_polymers) * 0.8:
+        print("   Consider improving the fixing functions to preserve polymer format components")
+    else:
+        print("   Format compliance is good - polymers should work for your research!")
+    
+    return {
+        'total_analyzed': len(sample_polymers),
+        'basic_valid': basic_valid,
+        'format_compliant': format_compliant,
+        'compliance_rate': format_compliant / len(sample_polymers) if sample_polymers else 0
+    }
+
+def enhanced_validation_of_results(all_predictions):
+    """Run comprehensive validation on generated results"""
+    
+    print("\n" + "="*60)
+    print("🔬 COMPREHENSIVE VALIDATION OF GENERATED POLYMERS")
+    print("="*60)
+    
+    # Analyze sample of generated polymers
+    analysis_result = analyze_generated_polymers(all_predictions, sample_size=min(20, len(all_predictions)))
+    
+    # Save analysis report
+    if analysis_result:
+        with open(os.path.join(dir_name, 'polymer_format_analysis.txt'), 'w') as f:
+            f.write("Polymer Format Analysis Report\n")
+            f.write("="*40 + "\n\n")
+            f.write(f"Total polymers analyzed: {analysis_result['total_analyzed']}\n")
+            f.write(f"Basic SMILES validity: {analysis_result['basic_valid']}\n")
+            f.write(f"Complete format compliance: {analysis_result['format_compliant']}\n")
+            f.write(f"Compliance rate: {analysis_result['compliance_rate']:.1%}\n\n")
+            
+            f.write("Sample polymers:\n")
+            for i, polymer in enumerate(all_predictions[:10]):
+                f.write(f"{i+1}: {polymer}\n")
+    
+    return analysis_result
+
+def save_polymers_as_text(polymers_list, filename, title="Generated Polymers"):
+    """Save polymers as readable text file"""
+    with open(filename, 'w') as f:
+        f.write(f"{title}\n")
+        f.write("="*len(title) + "\n\n")
+        f.write(f"Total count: {len(polymers_list)}\n")
+        f.write(f"Format: SMILES|stoichiometry|connectivity\n\n")
+        
+        for i, polymer in enumerate(polymers_list, 1):
+            f.write(f"{i:4d}: {polymer}\n")
+    
+    print(f"✅ Saved {len(polymers_list)} polymers to readable text file: {filename}")
 
 # ================================
 # ENHANCED GENERATION FUNCTION
@@ -675,6 +955,14 @@ def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100
                     all_properties.extend(batch_properties)
                 
                 attempts += batch_size
+                
+                # Quick format compliance check on first few polymers
+                if len(all_valid_predictions) >= 5 and attempts == batch_size:  # First batch
+                    print("\n🔍 Quick format compliance check on first 5 polymers:")
+                    for i, polymer in enumerate(all_valid_predictions[:5]):
+                        compliant = validate_complete_polymer_format(polymer, verbose=False)
+                        print(f"  Polymer {i+1}: {'✅ Compliant' if compliant else '❌ Non-compliant'}")
+                    print()
                 
                 # Progress reporting
                 if attempts % (batch_size * 5) == 0 or len(batch_valid) > 0:
@@ -780,10 +1068,12 @@ if os.path.isfile(filepath):
     for i, test in enumerate(test_cases):
         fixed = enhanced_polymer_processing_correct(test)
         valid = validate_polymer_format_correct(fixed) if fixed else False
+        compliant = validate_complete_polymer_format(fixed, verbose=False) if fixed else False
         print(f"Test {i+1}:")
-        print(f"  Original: {test}")
-        print(f"  Fixed:    {fixed}")
-        print(f"  Valid:    {valid}")
+        print(f"  Original:  {test}")
+        print(f"  Fixed:     {fixed}")
+        print(f"  Valid:     {valid}")
+        print(f"  Compliant: {compliant}")
         print()
 
     ### RANDOM GENERATION ###
@@ -834,10 +1124,17 @@ if os.path.isfile(filepath):
                         properties_batch = y.cpu().numpy()
                         all_properties.extend(properties_batch)
    
-    # Save random generation results
+    # Save random generation results (BOTH pickle AND text)
     with open(os.path.join(dir_name, 'generated_polymers.pkl'), 'wb') as f:
         pickle.dump(all_predictions, f)
     print(f"✅ Saved {len(all_predictions)} random generations to generated_polymers.pkl")
+    
+    # Save as readable text file
+    save_polymers_as_text(
+        all_predictions,
+        os.path.join(dir_name, 'generated_polymers.txt'),
+        "Random Generated Polymers"
+    )
     
     if args.save_properties and all_properties:
         all_properties = np.array(all_properties)
@@ -951,6 +1248,13 @@ if os.path.isfile(filepath):
     with open(os.path.join(dir_name, f'generated_polymers_from_seed_noise{std:.4f}.pkl'), 'wb') as f:
         pickle.dump(all_predictions_seed, f)
         
+    # Save seed-based as text too
+    save_polymers_as_text(
+        all_predictions_seed,
+        os.path.join(dir_name, f'seed_based_polymers.txt'),
+        "Seed-Based Generated Polymers"
+    )
+        
     print(f"✅ Saved {len(all_predictions_seed)} seed-based generations")
     
     if args.save_properties and all_properties_seed:
@@ -1048,30 +1352,55 @@ if os.path.isfile(filepath):
 
     print(f"✅ Saved {examples} interpolation examples with {len(all_predictions_interp_all)} total interpolated molecules")
     
+    # Save interpolated as text too
+    save_polymers_as_text(
+        all_predictions_interp_all,
+        os.path.join(dir_name, 'interpolated_polymers.txt'),
+        "Interpolated Polymers"
+    )
+    
     if args.save_properties and all_properties_interp_all:
         all_properties_interp_all = np.array(all_properties_interp_all)
         with open(os.path.join(dir_name, 'interpolated_polymers_properties.npy'), 'wb') as f:
             np.save(f, all_properties_interp_all)
         print(f"✅ Saved properties of interpolated molecules: {all_properties_interp_all.shape}")
 
-    # Final summary
+    # ================================
+    # FINAL SUMMARY WITH COMPREHENSIVE VALIDATION
+    # ================================
+
+    # Final summary with comprehensive validation
     print('\n' + '='*60)
     print('🎉 GENERATION COMPLETED SUCCESSFULLY')
     print('='*60)
+
+    # Run comprehensive validation
+    validation_results = enhanced_validation_of_results(all_predictions)
+
     print(f"📊 Generation Summary:")
     print(f"  Random generations: {len(all_predictions)}")
     print(f"  Seed-based generations: {len(all_predictions_seed)}")
     print(f"  Interpolated molecules: {len(all_predictions_interp_all)}")
     print(f"  Total molecules generated: {len(all_predictions) + len(all_predictions_seed) + len(all_predictions_interp_all)}")
     print(f"📁 Results saved to: {dir_name}")
+
+    if validation_results:
+        print(f"\n🔬 FORMAT COMPLIANCE:")
+        print(f"  Basic SMILES validity: {validation_results['basic_valid']}/{validation_results['total_analyzed']} ({validation_results['basic_valid']/validation_results['total_analyzed']*100:.1f}%)")
+        print(f"  Complete format compliance: {validation_results['format_compliant']}/{validation_results['total_analyzed']} ({validation_results['compliance_rate']*100:.1f}%)")
+
     if args.enforce_homopolymer:
         print(f"🧪 Homopolymer format enforced on all generated structures")
     if args.save_properties:
         print(f"🔬 Property predictions saved for all generated molecules")
         print(f"📋 Properties: {property_names}")
-    if args.quality_control:
-        final_validity = len(all_predictions) / max(args.max_attempts, len(all_predictions)) if len(all_predictions) > 0 else 0
-        print(f"🎯 Quality control used - generated {len(all_predictions)} valid molecules with enhanced processing")
+    
+    print(f"\n📄 SAVED FILES:")
+    print(f"  - generated_polymers.pkl (binary)")
+    print(f"  - generated_polymers.txt (readable)")
+    print(f"  - seed_based_polymers.txt (readable)")
+    print(f"  - interpolated_polymers.txt (readable)")
+    print(f"  - polymer_format_analysis.txt (validation report)")
 
 else: 
     print("❌ The model training diverged and there is no trained model file!")

@@ -278,296 +278,121 @@ class SequenceDecoder(nn.Module):
                 reduction="none"
             )
 
-    # 🔥 ENHANCED VALIDATION METHODS FOR G2S FORMAT
-    def validate_smiles_component(self, smiles_string):
-        """Validate SMILES component with attachment points"""
+    def get_current_tokens_from_predictions(self, predictions):
+        """Extract current tokens from beam search predictions"""
+        tokens = []
         try:
-            if not smiles_string or smiles_string.strip() == '':
-                return False
-            
-            # Check for valid attachment points pattern [*:X]
-            import re
-            
-            # Must contain attachment points
-            if not re.search(r'\[\*:\d+\]', smiles_string):
-                return False
-            
-            # Handle multiple monomers separated by '.'
-            if '.' in smiles_string:
-                monomers = smiles_string.split('.')
-                valid_count = 0
-                for monomer in monomers:
-                    monomer = monomer.strip()
-                    if monomer and re.search(r'\[\*:\d+\]', monomer):
-                        valid_count += 1
-                return valid_count >= 2  # Need at least 2 monomers
-            else:
-                # Single monomer case - should have at least 2 attachment points
-                attachment_points = re.findall(r'\[\*:(\d+)\]', smiles_string)
-                return len(attachment_points) >= 2
+            if hasattr(predictions, '__iter__'):
+                for token_id in predictions:
+                    if isinstance(token_id, torch.Tensor):
+                        token_id = token_id.item()
+                    
+                    if token_id == self.vocab.get("_EOS", -1):
+                        break
+                    
+                    token = self.inv_vocab.get(token_id, '')
+                    if token not in ['_SOS', '_PAD', '_UNK']:
+                        tokens.append(token)
+        except:
+            pass
         
-        except Exception:
-            return False
-
-    def validate_stoichiometry(self, stoich_string):
-        """Validate stoichiometry format: |0.25|0.75|"""
-        try:
-            if not stoich_string:
-                return False
-            
-            # Split by | and filter empty strings
-            parts = [p.strip() for p in stoich_string.split('|') if p.strip()]
-            
-            if len(parts) < 2:
-                return False
-            
-            # Check if all parts are valid numbers between 0 and 1
-            values = []
-            for part in parts:
-                try:
-                    val = float(part)
-                    if 0 <= val <= 1:
-                        values.append(val)
-                    else:
-                        return False
-                except ValueError:
-                    return False
-            
-            # Check if they sum to approximately 1.0
-            total = sum(values)
-            return 0.8 <= total <= 1.2  # Allow some tolerance
-            
-        except Exception:
-            return False
-
-    def validate_connectivity_patterns(self, connectivity_string):
-        """Validate G2S connectivity patterns: <1-3:0.25:0.25<1-4:0.25:0.25..."""
-        try:
-            import re
-            
-            if not connectivity_string:
-                return False
-            
-            # Split by < to get individual patterns
-            patterns = [p.strip() for p in connectivity_string.split('<') if p.strip()]
-            
-            if len(patterns) == 0:
-                return False
-            
-            # Validate each pattern: X-Y:prob1:prob2
-            for pattern in patterns:
-                # Pattern should match: digits-digits:float:float
-                if not re.match(r'^\d+-\d+:[\d.]+:[\d.]+$', pattern):
-                    return False
-                
-                # Extract and validate the numbers
-                parts = pattern.split(':')
-                if len(parts) != 3:
-                    return False
-                
-                # Validate connection part (X-Y)
-                connection_part = parts[0]
-                if '-' not in connection_part:
-                    return False
-                
-                try:
-                    start, end = connection_part.split('-')
-                    start_num = int(start)
-                    end_num = int(end)
-                    if start_num < 1 or end_num < 1 or start_num > 10 or end_num > 10:
-                        return False
-                except ValueError:
-                    return False
-                
-                # Validate probabilities
-                try:
-                    prob1 = float(parts[1])
-                    prob2 = float(parts[2])
-                    if not (0 <= prob1 <= 1 and 0 <= prob2 <= 1):
-                        return False
-                except ValueError:
-                    return False
-            
-            return True
-            
-        except Exception:
-            return False
-
-    def validate_complete_g2s_format(self, polymer_string, verbose=False):
-        """Validate complete G2S polymer format"""
-        try:
-            if not polymer_string:
-                if verbose: print("❌ Empty string")
-                return False
-            
-            # Clean padding first
-            clean_string = polymer_string.rstrip('_')
-            
-            if '|' not in clean_string:
-                if verbose: print("❌ No pipe separators found")
-                return False
-            
-            # Split by first two pipes to separate SMILES, stoich, and connectivity
-            parts = clean_string.split('|')
-            if len(parts) < 3:
-                if verbose: print("❌ Missing required parts (need at least SMILES|stoich|connectivity)")
-                return False
-            
-            # Extract components
-            smiles_part = parts[0]
-            
-            # Find where connectivity starts (marked by '<')
-            connectivity_start_idx = None
-            for i, part in enumerate(parts):
-                if '<' in part:
-                    connectivity_start_idx = i
-                    break
-            
-            if connectivity_start_idx is None:
-                if verbose: print("❌ No connectivity patterns found")
-                return False
-            
-            # Stoichiometry is between SMILES and connectivity
-            stoich_parts = parts[1:connectivity_start_idx]
-            
-            # Connectivity is from the first '<' onwards
-            connectivity_parts = parts[connectivity_start_idx:]
-            
-            # Validate SMILES
-            if not self.validate_smiles_component(smiles_part):
-                if verbose: print("❌ Invalid SMILES component")
-                return False
-            
-            # Validate stoichiometry
-            stoich_string = '|'.join([''] + stoich_parts + [''])  # Reconstruct with | separators
-            if not self.validate_stoichiometry(stoich_string):
-                if verbose: print("❌ Invalid stoichiometry")
-                return False
-            
-            # Validate connectivity
-            connectivity_string = '|'.join(connectivity_parts)
-            if not self.validate_connectivity_patterns(connectivity_string):
-                if verbose: print("❌ Invalid connectivity patterns")
-                return False
-            
-            if verbose:
-                print("✅ Valid G2S format!")
-                print(f"  - SMILES: {smiles_part}")
-                print(f"  - Stoichiometry: {stoich_parts}")
-                print(f"  - Connectivity patterns: {len(connectivity_parts)} found")
-            
-            return True
-            
-        except Exception as e:
-            if verbose: print(f"❌ Validation error: {str(e)}")
-            return False
+        return tokens
 
     def check_sequence_completeness(self, tokens):
         """Check if generated sequence has complete G2S polymer format"""
         try:
             # Convert tokens to string
-            if isinstance(tokens, torch.Tensor):
-                tokens = tokens.tolist()
+            current_tokens = self.get_current_tokens_from_predictions(tokens)
+            sequence = ''.join(current_tokens)
             
-            token_strings = []
-            for t in tokens:
-                if isinstance(t, torch.Tensor):
-                    t = t.item()
-                token_str = self.inv_vocab.get(t, '')
-                if token_str not in ['_SOS', '_PAD', '_UNK']:
-                    token_strings.append(token_str)
-            
-            sequence = ''.join(token_strings)
-            
-            # Quick checks first
-            if not sequence or '|' not in sequence:
+            if not sequence or len(sequence) < 20:
                 return False
             
-            # Check for basic G2S components
+            # Quick checks for G2S components
             has_attachment_points = '[*:' in sequence and ']' in sequence
-            has_stoichiometry = len([p for p in sequence.split('|') if p.strip() and p.replace('.', '').isdigit()]) >= 2
-            has_connectivity = '<' in sequence and ':' in sequence and '-' in sequence
+            has_pipes = sequence.count('|') >= 3  # Need SMILES|stoich1|stoich2|connectivity
+            has_connectivity_start = '<' in sequence
+            has_connectivity_format = ':' in sequence and '-' in sequence
             
-            # All three components must be present
-            return has_attachment_points and has_stoichiometry and has_connectivity
+            # Must have all essential G2S components
+            return has_attachment_points and has_pipes and has_connectivity_start and has_connectivity_format
             
         except Exception:
             return False
 
-    def is_valid_next_token(self, current_smiles_tokens, next_token_id):
-        """Check if adding next_token keeps G2S format valid"""
-        # Convert token ID to actual token string
-        next_token_str = self.inv_vocab.get(next_token_id, '')
-        
-        # Skip validation for special tokens
-        if next_token_str in ['_SOS', '_EOS', '_PAD', '_UNK']:
-            return True
-        
-        # Allow all tokens during early generation
-        if len(current_smiles_tokens) < 10:
-            return True
-        
-        test_tokens = current_smiles_tokens + [next_token_str]
-        current_sequence = ''.join(test_tokens)
-        
-        # Basic structural checks
-        if current_sequence.count('[') != current_sequence.count(']'):
-            # Allow if we're in the middle of building a bracket
-            if next_token_str in ['[', '*', ':', ']'] or next_token_str.isdigit():
+    def is_valid_next_token(self, current_tokens, next_token_id):
+        """Prevent malformed connectivity patterns during generation"""
+        try:
+            next_token_str = self.inv_vocab.get(next_token_id, '')
+            
+            # Skip validation for special tokens
+            if next_token_str in ['_SOS', '_EOS', '_PAD', '_UNK']:
                 return True
-            return False
-        
-        # Don't allow too many repeated characters
-        if len(next_token_str) == 1 and current_sequence.endswith(next_token_str * 3):
-            return False
-        
-        # Length check
-        if len(current_sequence) > 500:
-            return False
-        
-        return True
+            
+            # Allow early generation
+            if len(current_tokens) < 15:
+                return True
+            
+            current_sequence = ''.join(current_tokens)
+            test_sequence = current_sequence + next_token_str
+            
+            # 🔥 CRITICAL: Prevent malformed connectivity patterns
+            # Look for pattern like ":0.500:0.500:0.500" (too many repeated values)
+            if ':' in next_token_str and current_sequence.endswith(':0.500'):
+                # Don't allow more than 2 probability values after a connectivity pattern
+                last_pattern_start = current_sequence.rfind('<')
+                if last_pattern_start != -1:
+                    pattern_fragment = current_sequence[last_pattern_start:]
+                    colon_count = pattern_fragment.count(':')
+                    if colon_count >= 2:  # Already have X-Y:prob1:prob2, don't add more
+                        return False
+            
+            # Prevent repeated connectivity patterns without proper structure
+            if next_token_str == '<' and current_sequence.endswith('<'):
+                return False
+                
+            # Prevent malformed attachment points
+            if next_token_str == '[' and current_sequence.count('[') > current_sequence.count(']') + 5:
+                return False
+            
+            # Length check
+            if len(test_sequence) > 400:
+                return False
+                
+            return True
+            
+        except Exception:
+            return True  # If validation fails, allow the token
 
     def filter_invalid_tokens_optimized(self, decode_strategy, log_probs):
-        """OPTIMIZED: Filter out tokens that would create invalid G2S format"""
+        """Prevent malformed G2S connectivity patterns"""
         batch_size, vocab_size = log_probs.shape
         filtered_log_probs = log_probs.clone()
         
-        # Only check top-K most likely tokens for performance
-        TOP_K_TOKENS = 50  # Reduced for better performance
-        
-        # Get top-k tokens for each batch to reduce computation
+        # Only check top tokens for performance
+        TOP_K_TOKENS = 30
         top_k_probs, top_k_indices = torch.topk(log_probs, min(TOP_K_TOKENS, vocab_size), dim=1)
         
-        # Process each sequence in the batch
         for batch_idx in range(batch_size):
-            # Get current tokens for this sequence
             try:
-                if hasattr(decode_strategy, 'alive_seq') and len(decode_strategy.alive_seq) > batch_idx:
+                # Get current tokens
+                if hasattr(decode_strategy, 'alive_seq') and batch_idx < len(decode_strategy.alive_seq):
                     current_predictions = decode_strategy.alive_seq[batch_idx]
-                elif hasattr(decode_strategy, 'current_predictions'):
+                elif hasattr(decode_strategy, 'current_predictions') and batch_idx < len(decode_strategy.current_predictions):
                     current_predictions = decode_strategy.current_predictions[batch_idx]
                 else:
-                    current_predictions = []
+                    continue
                 
-                # Convert to token strings
-                current_tokens = []
-                for t in current_predictions:
-                    if isinstance(t, torch.Tensor):
-                        t = t.item()
-                    token_str = self.inv_vocab.get(t, '')
-                    if token_str not in ['_SOS', '_PAD', '_UNK']:
-                        current_tokens.append(token_str)
+                current_tokens = self.get_current_tokens_from_predictions(current_predictions)
+                
+                # Validate top-k tokens
+                top_k_batch_indices = top_k_indices[batch_idx]
+                for token_id in top_k_batch_indices:
+                    if not self.is_valid_next_token(current_tokens, token_id.item()):
+                        filtered_log_probs[batch_idx, token_id] = float('-inf')
                         
-            except:
-                current_tokens = []
-            
-            # Only validate top-k tokens instead of all vocab
-            top_k_batch_indices = top_k_indices[batch_idx]
-            
-            for i, token_id in enumerate(top_k_batch_indices):
-                if not self.is_valid_next_token(current_tokens, token_id.item()):
-                    # Set probability to very low value for invalid tokens
-                    filtered_log_probs[batch_idx, token_id] = float('-inf')
+            except Exception:
+                continue
         
         return filtered_log_probs
 
@@ -661,12 +486,12 @@ class SequenceDecoder(nn.Module):
             unk=self.vocab['_UNK'],
             ban_unk_token = True, # TODO: Check if true 
             global_scorer=global_scorer,
-            beam_size=3,  # Reduced beam size for better diversity
+            beam_size=2,  # Smaller beam for better diversity
             start=self.vocab["_SOS"], # can be either bos or eos token
             batch_size=z.size(0),
             
-            # 🔧 CRITICAL: Ensure complete G2S format generation
-            min_length=180,        # Increased to force complete connectivity generation
+            # 🔧 BALANCED: Force complete generation without being too restrictive
+            min_length=120,        # Reduced but still ensures connectivity
             n_best=1,
             stepwise_penalty=None,
             ratio=0.0,
@@ -705,7 +530,7 @@ class SequenceDecoder(nn.Module):
         if fn_map_state is not None:
             self.Decoder.map_state(fn_map_state)
 
-        # (3) Begin decoding step by step with G2S-specific validation:
+        # (3) Begin decoding step by step with enhanced validation:
         for step in range(decode_strategy.max_length):
             #decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
             decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)
@@ -718,36 +543,35 @@ class SequenceDecoder(nn.Module):
             scores = self.output_layer(dec_outs.squeeze(1))
             log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
 
-            # 🔥 G2S-OPTIMIZED: Add validation every few steps to ensure format compliance
-            if step > 20 and step % 5 == 0:  # Start validation after some tokens, then every 5 steps
+            # 🔥 CRITICAL: Apply validation to prevent malformed patterns
+            if step > 30 and step % 8 == 0:  # Apply validation periodically
                 try:
                     log_probs = self.filter_invalid_tokens_optimized(decode_strategy, log_probs)
                 except Exception as e:
                     # If validation fails, continue without filtering
-                    print(f"Warning: G2S validation filtering failed at step {step}: {e}")
                     pass
 
             decode_strategy.advance(log_probs, attn)
             
             any_finished = decode_strategy.is_finished.any()
             if any_finished:
-                # 🔧 CRITICAL: Check G2S format completeness before allowing early stopping
+                # Check for complete G2S sequences
                 complete_sequences = 0
                 try:
                     for i, seq in enumerate(decode_strategy.alive_seq):
                         if self.check_sequence_completeness(seq):
                             complete_sequences += 1
                 except:
-                    complete_sequences = 0  # If checking fails, don't allow early stopping
+                    complete_sequences = 0
                 
                 decode_strategy.update_finished()
                 
-                # Only stop if we have complete G2S sequences AND normal stopping conditions
-                if decode_strategy.done and (complete_sequences > 0 or step > 350):
+                # Allow stopping with reasonable completeness criteria
+                if decode_strategy.done and (complete_sequences > 0 or step > 250):
                     break
-                elif step > 450:  # Safety valve - don't generate forever
+                elif step > 400:  # Safety valve
                     break
-            elif step > 450:  # Safety valve
+            elif step > 400:  # Safety valve
                 break
 
             select_indices = decode_strategy.select_indices

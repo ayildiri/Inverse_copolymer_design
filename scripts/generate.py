@@ -53,11 +53,10 @@ parser.add_argument("--dataset_path", type=str, default=None,
                     help="Path to custom dataset files (will use default naming pattern if not specified)")
 parser.add_argument("--save_properties", action="store_true",
                     help="Save predicted properties of generated molecules")
-# FIXED: Add argument to control homopolymer enforcement with default=False
 parser.add_argument("--enforce_homopolymer", action="store_true", default=False,
                     help="Enforce homopolymer format in generated structures")
 
-# NEW: Quality control arguments
+# Quality control arguments
 parser.add_argument("--quality_control", action="store_true", default=True,
                     help="Enable quality control to filter invalid molecules during generation")
 parser.add_argument("--target_molecules", type=int, default=16000,
@@ -117,7 +116,7 @@ num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
 
 # ================================
-# ORIGINAL FUNCTIONS (PRESERVED)
+# ORIGINAL UTILITY FUNCTIONS (PRESERVED)
 # ================================
 
 def clean_output(polymer_string):
@@ -170,76 +169,56 @@ def process_generated_string(polymer_string, enforce_homopolymer=False):
         return clean_string
 
 # ================================
-# ENHANCED POLYMER FIXING FUNCTIONS (NEW)
+# ENHANCED SMILES FIXING FUNCTIONS
 # ================================
 
-def fix_polymer_representation_correct(polymer_string):
-    """Fix polymer representation understanding the correct format"""
-    if not polymer_string or polymer_string.strip() == '':
-        return None
-    
-    # Clean basic padding
-    clean_string = polymer_string.rstrip('_').strip()
-    
-    # Split into components
-    if '|' not in clean_string:
-        # If no |, treat as pure SMILES and try to add missing components
-        fixed_smiles = fix_smiles_component(clean_string)
-        if fixed_smiles:
-            # Add minimal stoichiometry for single monomer
-            return f"{fixed_smiles}|1.0|"
-        return None
-    
-    # Split by | to get components
-    parts = clean_string.split('|')
-    
-    if len(parts) < 2:
-        return None
-    
-    # Fix each component according to its type
-    fixed_smiles = fix_smiles_component(parts[0])
-    if not fixed_smiles:
-        return None
-    
-    # Fix stoichiometry section
-    fixed_stoich = fix_stoichiometry_section(parts[1:])  # All parts after SMILES
-    
-    # Combine fixed components
-    if fixed_stoich:
-        return f"{fixed_smiles}|{fixed_stoich}"
-    else:
-        # Fallback: just SMILES with simple stoichiometry
-        return f"{fixed_smiles}|1.0|"
-
-def fix_smiles_component(smiles_part):
-    """Fix the SMILES component (first part before |)"""
-    if not smiles_part or smiles_part.strip() == '':
-        return None
-    
-    smiles_part = smiles_part.strip()
-    
-    # Check if it contains actual chemical elements
-    has_atoms = bool(re.search(r'[CNOSPFBrClI]', smiles_part, re.IGNORECASE))
-    if not has_atoms:
-        return None
-    
-    # Fix parentheses and brackets
-    fixed = fix_parentheses_and_brackets(smiles_part)
-    
-    # Fix ring notation issues
-    fixed = fix_ring_notation_polymer(fixed)
-    
-    # Remove trailing numbers that shouldn't be there
-    fixed = clean_smiles_syntax(fixed)
-    
-    return fixed if fixed else None
-
-def fix_parentheses_and_brackets(smiles_string):
-    """Fix parentheses and bracket balancing"""
+def clean_obvious_smiles_junk(smiles_string):
+    """Remove obvious junk that corrupts SMILES"""
     if not smiles_string:
         return smiles_string
     
-    # Count and balance parentheses
+    # Remove trailing junk patterns that got mixed in
+    patterns_to_remove = [
+        r'\)\|\d+$',       # )|0, )|1 etc at end
+        r'\|[\d:]*$',      # |0, |:0, |1:2 etc at end
+        r'\d+\)$',         # trailing numbers before )
+    ]
+    
+    for pattern in patterns_to_remove:
+        smiles_string = re.sub(pattern, '', smiles_string)
+    
+    return smiles_string
+
+def fix_complex_ring_notation(smiles_string):
+    """Fix complex ring notation issues"""
+    if not smiles_string:
+        return smiles_string
+    
+    # Problem: "O=C(C[*:3])3)[*:4])" 
+    # The "3)" after [*:3] is invalid ring notation
+    
+    # Fix pattern: [*:n])digit) -> [*:n])
+    smiles_string = re.sub(r'(\[\*:\d+\])\)\d+\)', r'\1)', smiles_string)
+    
+    # Fix pattern: )digit) -> )
+    smiles_string = re.sub(r'\)\d+\)', ')', smiles_string)
+    
+    # Fix orphaned digits that look like ring numbers but aren't
+    # Pattern: atom-digit-) where digit is not a valid ring closer
+    smiles_string = re.sub(r'([CNOSPFBrClI])\d+\)', r'\1)', smiles_string)
+    
+    # Remove standalone digits that aren't ring numbers
+    # Keep only single digits that are properly part of ring notation
+    smiles_string = re.sub(r'(?<![CNOSPFBrClI])\d+(?!\])', '', smiles_string)
+    
+    return smiles_string
+
+def fix_parentheses_and_brackets_aggressive(smiles_string):
+    """Aggressive parentheses fixing for heavily corrupted SMILES"""
+    if not smiles_string:
+        return smiles_string
+    
+    # Count parentheses
     open_paren = smiles_string.count('(')
     close_paren = smiles_string.count(')')
     
@@ -247,13 +226,29 @@ def fix_parentheses_and_brackets(smiles_string):
         # Add missing closing parentheses
         smiles_string += ')' * (open_paren - close_paren)
     elif close_paren > open_paren:
-        # Remove excess closing parentheses from end
+        # Remove excess closing parentheses - be more aggressive
         excess = close_paren - open_paren
-        # Remove from the end by reversing, removing, and reversing back
-        temp = smiles_string[::-1]
-        for _ in range(excess):
-            temp = temp.replace(')', '', 1)
-        smiles_string = temp[::-1]
+        
+        # Strategy: Remove from the end first, then from problematic areas
+        # Remove from end
+        while excess > 0 and smiles_string.endswith(')'):
+            smiles_string = smiles_string[:-1]
+            excess -= 1
+        
+        # If still excess, remove from obvious problem areas
+        if excess > 0:
+            # Remove )()) -> ()
+            smiles_string = re.sub(r'\)\(\)', '()', smiles_string)
+            
+            # Recount
+            new_close = smiles_string.count(')')
+            new_open = smiles_string.count('(')
+            if new_close > new_open:
+                # Still excess, remove more aggressively
+                temp = smiles_string[::-1]  # Reverse
+                for _ in range(min(excess, new_close - new_open)):
+                    temp = temp.replace(')', '', 1)
+                smiles_string = temp[::-1]  # Reverse back
     
     # Same for brackets
     open_bracket = smiles_string.count('[')
@@ -270,67 +265,130 @@ def fix_parentheses_and_brackets(smiles_string):
     
     return smiles_string
 
-def fix_ring_notation_polymer(smiles_string):
-    """Fix ring notation issues specific to polymer SMILES"""
+def final_smiles_cleanup(smiles_string):
+    """Final cleanup of SMILES syntax"""
     if not smiles_string:
         return smiles_string
     
-    # Remove invalid patterns like ")3)" -> ")"
-    smiles_string = re.sub(r'\)\d+\)', ')', smiles_string)
+    # Remove double punctuation
+    smiles_string = re.sub(r'\)\)', ')', smiles_string)  # )) -> )
+    smiles_string = re.sub(r'\(\(', '(', smiles_string)   # (( -> (
+    smiles_string = re.sub(r'\]\]', ']', smiles_string)  # ]] -> ]
+    smiles_string = re.sub(r'\[\[', '[', smiles_string)   # [[ -> [
     
-    # Fix patterns like "1(-2(" which are invalid ring notation
-    smiles_string = re.sub(r'\d+\(-\d+\(', '', smiles_string)
+    # Remove empty parentheses
+    smiles_string = re.sub(r'\(\)', '', smiles_string)
     
-    # Remove orphaned ring numbers not properly connected
-    # Keep attachment points like [*:1], [*:2], etc.
-    
-    return smiles_string
-
-def clean_smiles_syntax(smiles_string):
-    """Clean SMILES syntax issues"""
-    if not smiles_string:
-        return smiles_string
-    
-    # Remove trailing junk that got mixed in from other sections
-    # But preserve attachment points [*:n]
-    
-    # Remove patterns where numbers appear incorrectly
-    # This is tricky - we want to preserve [*:1] but remove "3)[*:4])"
-    
-    # Remove standalone numbers that don't belong
-    smiles_string = re.sub(r'(?<![:\[])\b\d{2,}\b(?![\]:)])', '', smiles_string)
+    # Fix common atom notation issues
+    smiles_string = re.sub(r'\bcl\b', 'Cl', smiles_string, flags=re.IGNORECASE)
+    smiles_string = re.sub(r'\bbr\b', 'Br', smiles_string, flags=re.IGNORECASE)
     
     return smiles_string.strip()
 
-def fix_stoichiometry_section(stoich_parts):
-    """Fix the stoichiometry and connectivity sections"""
-    if not stoich_parts:
-        return "1.0|"
+def validate_fixed_smiles(smiles_string):
+    """Test if the fixed SMILES is actually valid"""
+    if not smiles_string:
+        return False
     
-    fixed_parts = []
-    
-    for part in stoich_parts:
-        part = part.strip()
-        if not part:
-            continue
-            
-        # Check if this looks like stoichiometry (numbers, decimals, colons)
-        if is_stoichiometry_like(part):
-            fixed_stoich = fix_stoichiometry_values(part)
-            if fixed_stoich:
-                fixed_parts.append(fixed_stoich)
+    try:
+        from rdkit import Chem
         
-        # Check if this looks like connectivity (< symbols, colons, numbers)
-        elif is_connectivity_like(part):
-            fixed_conn = fix_connectivity_values(part)
-            if fixed_conn:
-                fixed_parts.append(fixed_conn)
+        # Replace attachment points for testing
+        test_smiles = re.sub(r'\[\*:\d+\]', '*', smiles_string)
+        
+        # Try to parse
+        mol = Chem.MolFromSmiles(test_smiles)
+        if mol is not None and mol.GetNumAtoms() > 0:
+            return True
+            
+        # If failed, try without attachment points entirely
+        test_smiles_clean = re.sub(r'\[\*:\d+\]', '', smiles_string)
+        if test_smiles_clean:
+            mol = Chem.MolFromSmiles(test_smiles_clean)
+            return mol is not None and mol.GetNumAtoms() > 0
+        
+        return False
+        
+    except Exception:
+        return False
+
+def aggressive_smiles_salvage(original_smiles):
+    """Last resort: try to salvage something useful from heavily corrupted SMILES"""
+    if not original_smiles:
+        return None
     
-    # If we couldn't fix anything, provide defaults
-    if not fixed_parts:
-        return "1.0|"
+    # Strategy: Look for recognizable chemical patterns and rebuild
     
-    return "|".join(fixed_parts) + "|"
+    # Find atoms and basic connectivity
+    atoms = re.findall(r'[CNOSPFBrClI]', original_smiles, re.IGNORECASE)
+    if len(atoms) < 2:
+        return None
+    
+    # Find attachment points
+    attachment_points = re.findall(r'\[\*:\d+\]', original_smiles)
+    
+    # Try to build a minimal valid structure
+    if 'C' in atoms and 'O' in atoms:
+        # Common pattern: carbonyl
+        if len(attachment_points) >= 2:
+            return f"O=C({attachment_points[0]}){attachment_points[1] if len(attachment_points) > 1 else '[*:2]'}"
+        else:
+            return "O=C([*:1])[*:2]"
+    elif 'C' in atoms:
+        # Just carbon chain
+        if len(attachment_points) >= 2:
+            return f"C({attachment_points[0]}){attachment_points[1] if len(attachment_points) > 1 else '[*:2]'}"
+        else:
+            return "C([*:1])[*:2]"
+    
+    return None
+
+def fix_smiles_component(smiles_part):
+    """Enhanced SMILES component fixing for complex corruption cases"""
+    if not smiles_part or smiles_part.strip() == '':
+        return None
+    
+    smiles_part = smiles_part.strip()
+    
+    # If it's just numbers, try to see if it's a corrupted valid SMILES
+    if re.match(r'^\d+$', smiles_part):
+        # Pure numbers like "500" - likely too corrupted to fix
+        return None
+    
+    # Check if it contains actual chemical elements
+    has_atoms = bool(re.search(r'[CNOSPFBrClI]', smiles_part, re.IGNORECASE))
+    if not has_atoms:
+        return None
+    
+    # Multi-stage fixing approach
+    fixed = smiles_part
+    
+    # Stage 1: Clean obvious junk first
+    fixed = clean_obvious_smiles_junk(fixed)
+    
+    # Stage 2: Fix ring notation issues BEFORE parentheses (important!)
+    fixed = fix_complex_ring_notation(fixed)
+    
+    # Stage 3: Fix parentheses and brackets
+    fixed = fix_parentheses_and_brackets_aggressive(fixed)
+    
+    # Stage 4: Final cleanup
+    fixed = final_smiles_cleanup(fixed)
+    
+    # Stage 5: Validate the fix worked
+    if validate_fixed_smiles(fixed):
+        return fixed
+    
+    # Stage 6: If still broken, try aggressive salvage
+    salvaged = aggressive_smiles_salvage(smiles_part)
+    if salvaged and validate_fixed_smiles(salvaged):
+        return salvaged
+    
+    return None
+
+# ================================
+# POLYMER FORMAT HANDLING FUNCTIONS
+# ================================
 
 def is_stoichiometry_like(part):
     """Check if part looks like stoichiometry values"""
@@ -381,6 +439,110 @@ def fix_connectivity_values(conn_string):
     # Fallback: create simple connectivity for attachment points
     return "<1-2:0.5:0.5"
 
+def fix_stoichiometry_section(stoich_parts):
+    """Fix the stoichiometry and connectivity sections"""
+    if not stoich_parts:
+        return "1.0|"
+    
+    fixed_parts = []
+    
+    for part in stoich_parts:
+        part = part.strip()
+        if not part:
+            continue
+            
+        # Check if this looks like stoichiometry (numbers, decimals, colons)
+        if is_stoichiometry_like(part):
+            fixed_stoich = fix_stoichiometry_values(part)
+            if fixed_stoich:
+                fixed_parts.append(fixed_stoich)
+        
+        # Check if this looks like connectivity (< symbols, colons, numbers)
+        elif is_connectivity_like(part):
+            fixed_conn = fix_connectivity_values(part)
+            if fixed_conn:
+                fixed_parts.append(fixed_conn)
+    
+    # If we couldn't fix anything, provide defaults
+    if not fixed_parts:
+        return "1.0|"
+    
+    return "|".join(fixed_parts) + "|"
+
+def fix_polymer_representation_correct(polymer_string):
+    """Fix polymer representation understanding the correct format"""
+    if not polymer_string or polymer_string.strip() == '':
+        return None
+    
+    # Clean basic padding
+    clean_string = polymer_string.rstrip('_').strip()
+    
+    # Handle no | case
+    if '|' not in clean_string:
+        fixed_smiles = fix_smiles_component(clean_string)
+        if fixed_smiles:
+            return f"{fixed_smiles}|1.0|"
+        return None
+    
+    # Split by | to get components
+    parts = clean_string.split('|')
+    
+    if len(parts) < 2:
+        return None
+    
+    # Fix SMILES component with enhanced method
+    fixed_smiles = fix_smiles_component(parts[0])
+    if not fixed_smiles:
+        return None
+    
+    # Fix stoichiometry section
+    fixed_stoich = fix_stoichiometry_section(parts[1:])
+    
+    # Combine
+    if fixed_stoich:
+        return f"{fixed_smiles}|{fixed_stoich}"
+    else:
+        return f"{fixed_smiles}|1.0|"
+
+# ================================
+# VALIDATION FUNCTIONS
+# ================================
+
+def validate_smiles_component(smiles_string):
+    """Validate just the SMILES part"""
+    try:
+        from rdkit import Chem
+        
+        if not smiles_string or smiles_string.strip() == '':
+            return False
+        
+        # Handle multiple monomers separated by '.'
+        if '.' in smiles_string:
+            monomers = smiles_string.split('.')
+            valid_count = 0
+            for monomer in monomers:
+                monomer = monomer.strip()
+                if monomer:
+                    # Try parsing with attachment points replaced
+                    test_monomer = monomer
+                    test_monomer = re.sub(r'\[\*:\d+\]', '*', test_monomer)
+                    
+                    mol = Chem.MolFromSmiles(test_monomer)
+                    if mol is not None:
+                        valid_count += 1
+            
+            return valid_count > 0
+        else:
+            # Single monomer
+            test_smiles = smiles_string
+            test_smiles = re.sub(r'\[\*:\d+\]', '*', test_smiles)
+            
+            mol = Chem.MolFromSmiles(test_smiles)
+            return mol is not None
+    
+    except Exception:
+        return False
+
 def validate_polymer_format_correct(polymer_string):
     """Validate polymer using correct format understanding"""
     if not polymer_string:
@@ -418,61 +580,36 @@ def validate_polymer_format_correct(polymer_string):
     except Exception:
         return False
 
-def validate_smiles_component(smiles_string):
-    """Validate just the SMILES part"""
-    try:
-        from rdkit import Chem
-        
-        if not smiles_string or smiles_string.strip() == '':
-            return False
-        
-        # Handle multiple monomers separated by '.'
-        if '.' in smiles_string:
-            monomers = smiles_string.split('.')
-            valid_count = 0
-            for monomer in monomers:
-                monomer = monomer.strip()
-                if monomer:
-                    # Try parsing with attachment points replaced
-                    test_monomer = monomer
-                    test_monomer = re.sub(r'\[\*:\d+\]', '*', test_monomer)
-                    
-                    mol = Chem.MolFromSmiles(test_monomer)
-                    if mol is not None:
-                        valid_count += 1
-            
-            return valid_count > 0
-        else:
-            # Single monomer
-            test_smiles = smiles_string
-            test_smiles = re.sub(r'\[\*:\d+\]', '*', test_smiles)
-            
-            mol = Chem.MolFromSmiles(test_smiles)
-            return mol is not None
-    
-    except Exception:
-        return False
-
 def enhanced_polymer_processing_correct(pred_string, enforce_homopolymer=False):
-    """Process generated polymer with correct format understanding"""
+    """Enhanced processing with improved SMILES fixing"""
     
-    # Try multiple fixing strategies
-    candidates = [
-        pred_string,  # Original
-        fix_polymer_representation_correct(pred_string),  # Main fix
-    ]
+    # Try multiple fixing strategies in order of preference
+    candidates = []
     
-    # Try extracting just SMILES if format is too broken
+    # Strategy 1: Original string
+    candidates.append(pred_string)
+    
+    # Strategy 2: Main fix with enhanced SMILES handling
+    main_fix = fix_polymer_representation_correct(pred_string)
+    if main_fix:
+        candidates.append(main_fix)
+    
+    # Strategy 3: Extract and fix just the SMILES part if polymer format is broken
     if '|' in pred_string:
         smiles_only = pred_string.split('|')[0]
         smiles_fixed = fix_smiles_component(smiles_only)
         if smiles_fixed:
             candidates.append(f"{smiles_fixed}|1.0|")
     
-    # Remove None candidates
-    candidates = [c for c in candidates if c is not None]
+    # Strategy 4: Try basic cleaning
+    basic_clean = clean_output(pred_string)
+    if basic_clean != pred_string:
+        candidates.append(basic_clean)
     
-    # Find best valid candidate
+    # Remove None and duplicate candidates
+    candidates = list(set([c for c in candidates if c is not None]))
+    
+    # Test each candidate
     for candidate in candidates:
         if validate_polymer_format_correct(candidate):
             if enforce_homopolymer:
@@ -482,7 +619,7 @@ def enhanced_polymer_processing_correct(pred_string, enforce_homopolymer=False):
     return None
 
 # ================================
-# ENHANCED GENERATION FUNCTIONS
+# ENHANCED GENERATION FUNCTION
 # ================================
 
 def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100, max_attempts=500,
@@ -626,7 +763,7 @@ if os.path.isfile(filepath):
     print(f'📝 Results will be saved to: {dir_name}')
 
     # ================================
-    # QUICK TEST OF ENHANCED PROCESSING
+    # TESTING ENHANCED PROCESSING
     # ================================
     
     print("🧪 Testing Enhanced Processing on Sample Data:")
@@ -634,10 +771,10 @@ if os.path.isfile(filepath):
     
     # Test cases based on your error log
     test_cases = [
-        "500|0",  # Should become stoichiometry
-        "O=C(C[*:3])3)[*:4])|0",  # Should fix SMILES and stoichiometry
+        "500|0",  # Should be rejected (pure numbers)
+        "O=C(C[*:3])3)[*:4])|0",  # Should fix complex SMILES corruption
         "O=C([*:1])c1ccc([*:2])cc1|0.5|0.5|",  # Should validate correctly
-        "O=C(O[*:4]",  # Missing parentheses
+        "O=C(O[*:4]",  # Should fix missing parentheses
     ]
     
     for i, test in enumerate(test_cases):
@@ -767,7 +904,7 @@ if os.path.isfile(filepath):
             
             predictions_seed, _, _, z_new, y_new = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
             
-            # Convert predictions to strings and clean up with enhanced processing
+            # Convert predictions to strings with enhanced processing
             prediction_strings = []
             for sample in range(len(predictions_seed)):
                 pred_string = combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization)

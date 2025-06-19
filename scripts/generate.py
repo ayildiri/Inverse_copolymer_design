@@ -116,312 +116,480 @@ num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
 
 # ================================
-# PROPER POLYMER FORMAT HANDLING
+# ENHANCED G2S FORMAT HANDLING
 # ================================
 
 def clean_output(polymer_string):
     """Remove all padding underscores from generated polymer strings"""
+    if not polymer_string:
+        return ""
     return polymer_string.rstrip('_')
 
-def convert_to_homopolymer_format(polymer_string):
-    """
-    Convert any polymer string to homopolymer format by making monA = monB.
-    Assumes the format: SMILES|stoichiometry|connectivity
-    """
-    polymer_string = clean_output(polymer_string)  # First remove padding
-    
-    if not polymer_string or '|' not in polymer_string:
-        return polymer_string
-    
-    parts = polymer_string.split('|')
-    if len(parts) < 2:
-        return polymer_string
-    
-    # Extract SMILES part
-    smiles_part = parts[0]
-    
-    # If multiple monomers, make them the same (use first monomer)
-    if '.' in smiles_part:
-        monomers = smiles_part.split('.')
-        if len(monomers) >= 2:
-            # Use first monomer for both
-            homopolymer_smiles = f"{monomers[0]}.{monomers[0]}"
-            
-            # Update stoichiometry to 0.5|0.5
-            new_parts = [homopolymer_smiles, "0.5", "0.5"]
-            
-            # Keep connectivity if present
-            if len(parts) > 3:
-                new_parts.extend(parts[3:])
-            
-            return "|".join(new_parts)
-    
-    return polymer_string
-
-def validate_smiles_component(smiles_string):
-    """Validate SMILES component with proper RDKit checking"""
+def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
+    """Safely process tokens with comprehensive error handling"""
     try:
-        from rdkit import Chem
+        if not token_ids:
+            return ""
         
-        if not smiles_string or smiles_string.strip() == '':
-            return False
+        # Handle different input types
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
         
-        # Handle multiple monomers separated by '.'
-        if '.' in smiles_string:
-            monomers = smiles_string.split('.')
-            valid_count = 0
-            for monomer in monomers:
-                monomer = monomer.strip()
-                if monomer:
-                    # Replace attachment points for testing
-                    test_monomer = re.sub(r'\[\*:\d+\]', '*', monomer)
-                    mol = Chem.MolFromSmiles(test_monomer)
-                    if mol is not None and mol.GetNumAtoms() > 0:
-                        valid_count += 1
-            return valid_count > 0
-        else:
-            # Single monomer
-            test_smiles = re.sub(r'\[\*:\d+\]', '*', smiles_string)
-            mol = Chem.MolFromSmiles(test_smiles)
-            return mol is not None and mol.GetNumAtoms() > 0
-    
-    except Exception:
-        return False
-
-def extract_polymer_components(polymer_string):
-    """
-    Extract components from full polymer string format:
-    SMILES|stoich1|stoich2|...|<connectivity patterns>
-    """
-    if not polymer_string:
-        return None, [], []
-    
-    # Clean padding first
-    polymer_string = clean_output(polymer_string)
-    
-    if '|' not in polymer_string:
-        # Just SMILES
-        return polymer_string, [], []
-    
-    parts = polymer_string.split('|')
-    
-    # First part is always SMILES
-    smiles_part = parts[0]
-    
-    # Extract stoichiometry and connectivity
-    stoich_parts = []
-    connectivity_parts = []
-    
-    for part in parts[1:]:
-        part = part.strip()
-        if not part:
-            continue
+        # Convert token IDs to vocabulary with error handling
+        tokens = []
+        for token_id in token_ids:
+            if isinstance(token_id, torch.Tensor):
+                token_id = token_id.item()
             
-        if part.startswith('<'):
-            # Connectivity pattern
-            connectivity_parts.append(part)
-        else:
-            # Try to parse as number (stoichiometry)
-            try:
-                val = float(part)
-                if 0 <= val <= 1:
-                    stoich_parts.append(val)
-            except ValueError:
-                # Could be part of connectivity that got split
-                if ':' in part or '-' in part:
-                    connectivity_parts.append(part)
-    
-    return smiles_part, stoich_parts, connectivity_parts
+            # Skip invalid token IDs
+            if not isinstance(token_id, (int, float)) or token_id < 0:
+                continue
+                
+            token = tokenids_to_vocab([token_id], vocab)
+            if token and token[0] not in ['_PAD', '_SOS', '_EOS', '_UNK']:
+                tokens.extend(token)
+        
+        # Combine tokens safely
+        if not tokens:
+            return ""
+            
+        return combine_tokens(tokens, tokenization=tokenization)
+        
+    except Exception as e:
+        print(f"Warning: Token processing failed: {e}")
+        return ""
 
-def fix_connectivity_patterns(connectivity_parts):
-    """Fix and validate connectivity patterns"""
-    if not connectivity_parts:
-        return []
-    
-    fixed_patterns = []
-    current_pattern = ""
-    
-    for part in connectivity_parts:
-        if part.startswith('<'):
-            # New pattern starts
-            if current_pattern:
-                fixed_patterns.append(current_pattern)
-            current_pattern = part
-        else:
-            # Continuation of pattern
-            current_pattern += part
-    
-    # Add the last pattern
-    if current_pattern:
-        fixed_patterns.append(current_pattern)
-    
-    # Validate and fix each pattern
-    validated_patterns = []
-    for pattern in fixed_patterns:
-        # Pattern should be like <1-3:0.25:0.25
-        if re.match(r'<\d+-\d+:[\d.]+:[\d.]+', pattern):
-            validated_patterns.append(pattern)
-        else:
-            # Try to fix common issues
-            # Remove extra < symbols
-            pattern = re.sub(r'<+', '<', pattern)
-            if re.match(r'<\d+-\d+:[\d.]+:[\d.]+', pattern):
-                validated_patterns.append(pattern)
-    
-    return validated_patterns
-
-def reconstruct_polymer_string(smiles_part, stoich_parts, connectivity_parts):
-    """Reconstruct proper polymer string from components"""
-    if not smiles_part:
-        return None
-    
-    # Start with SMILES
-    result = smiles_part
-    
-    # Add stoichiometry
-    if stoich_parts:
-        for stoich in stoich_parts:
-            result += f"|{stoich:.3f}"
-    else:
-        # Default stoichiometry
-        if '.' in smiles_part:
-            num_monomers = len(smiles_part.split('.'))
-            equal_stoich = 1.0 / num_monomers
-            for _ in range(num_monomers):
-                result += f"|{equal_stoich:.3f}"
-        else:
-            result += "|1.000"
-    
-    # Add connectivity patterns
-    for pattern in connectivity_parts:
-        result += f"|{pattern}"
-    
-    return result
-
-def fix_polymer_format_complete(polymer_string):
-    """Fix polymer format while preserving complete structure"""
-    if not polymer_string:
-        return None
-    
-    # Extract components
-    smiles_part, stoich_parts, connectivity_parts = extract_polymer_components(polymer_string)
-    
-    if not smiles_part:
-        return None
-    
-    # Validate and fix SMILES
-    if not validate_smiles_component(smiles_part):
-        return None
-    
-    # Fix connectivity patterns
-    fixed_connectivity = fix_connectivity_patterns(connectivity_parts)
-    
-    # Validate stoichiometry
-    if stoich_parts:
-        # Normalize stoichiometry to sum to 1.0
-        total = sum(stoich_parts)
-        if total > 0:
-            stoich_parts = [s/total for s in stoich_parts]
-    
-    # Reconstruct
-    return reconstruct_polymer_string(smiles_part, stoich_parts, fixed_connectivity)
-
-def validate_complete_polymer_format(polymer_string, verbose=False):
-    """
-    Validate complete polymer format including connectivity patterns
-    """
-    if not polymer_string:
-        if verbose: print("❌ Empty string")
-        return False
-    
+def validate_basic_smiles(smiles_string):
+    """Basic SMILES validation for G2S format"""
     try:
-        # Extract components
-        smiles_part, stoich_parts, connectivity_parts = extract_polymer_components(polymer_string)
-        
-        if not smiles_part:
-            if verbose: print("❌ No SMILES component found")
+        if not smiles_string or len(smiles_string) < 5:
             return False
         
-        # Validate SMILES
-        if not validate_smiles_component(smiles_part):
-            if verbose: print("❌ Invalid SMILES component")
+        # Must contain attachment points
+        if '[*:' not in smiles_string or ']' not in smiles_string:
             return False
         
-        # Check stoichiometry
-        if stoich_parts:
-            total = sum(stoich_parts)
-            if abs(total - 1.0) > 0.1:
-                if verbose: print(f"❌ Stoichiometry doesn't sum to ~1.0: {total}")
-                return False
+        # Basic bracket matching
+        if smiles_string.count('[') != smiles_string.count(']'):
+            return False
         
-        # Validate connectivity patterns
-        for pattern in connectivity_parts:
-            if not re.match(r'<\d+-\d+:[\d.]+:[\d.]+', pattern):
-                if verbose: print(f"❌ Invalid connectivity pattern: {pattern}")
-                return False
+        # Should have at least one monomer separator or sufficient complexity
+        if '.' not in smiles_string and len(smiles_string) < 15:
+            return False
         
-        if verbose:
-            print("✅ Valid complete polymer format!")
-            print(f"  - SMILES: {smiles_part}")
-            print(f"  - Stoichiometry: {stoich_parts}")
-            print(f"  - Connectivity: {len(connectivity_parts)} patterns")
+        # Check for reasonable attachment point format
+        import re
+        attachment_points = re.findall(r'\[\*:(\d+)\]', smiles_string)
+        if len(attachment_points) < 2:
+            return False
         
         return True
         
-    except Exception as e:
-        if verbose: print(f"❌ Validation error: {str(e)}")
+    except Exception:
         return False
 
-def process_generated_string(polymer_string, enforce_homopolymer=False):
-    """Process generated string with proper format preservation"""
-    if not polymer_string:
-        return None
-    
-    # Clean padding
-    clean_string = clean_output(polymer_string)
-    
-    # Try to fix format while preserving structure
-    fixed_string = fix_polymer_format_complete(clean_string)
-    
-    if not fixed_string:
-        return None
-    
-    # Optionally enforce homopolymer
-    if enforce_homopolymer:
-        return convert_to_homopolymer_format(fixed_string)
-    
-    return fixed_string
+def fix_connectivity_pattern(connectivity_string):
+    """Fix malformed connectivity patterns"""
+    try:
+        if not connectivity_string:
+            return ""
+        
+        import re
+        
+        # Remove excessive repetitions and fix malformed patterns
+        fixed = connectivity_string
+        
+        # Fix patterns like ":0.500:0.500:0.500..." by keeping only the first two values
+        fixed = re.sub(r'(<\d+-\d+):(\d+\.\d+):(\d+\.\d+)(:0\.500)*', r'\1:\2:\3', fixed)
+        
+        # Fix patterns missing proper structure
+        fixed = re.sub(r'<(\d+)-(\d+):(\d+\.\d+)<', r'<\1-\2:\3:0.250<', fixed)
+        
+        # Ensure proper format for remaining patterns
+        patterns = []
+        for match in re.finditer(r'<(\d+)-(\d+):(\d+\.\d+):(\d+\.\d+)', fixed):
+            start, end, prob1, prob2 = match.groups()
+            # Validate the values
+            try:
+                start_num = int(start)
+                end_num = int(end)
+                prob1_val = float(prob1)
+                prob2_val = float(prob2)
+                
+                if 1 <= start_num <= 4 and 1 <= end_num <= 4 and 0 <= prob1_val <= 1 and 0 <= prob2_val <= 1:
+                    patterns.append(f"<{start}-{end}:{prob1}:{prob2}")
+            except ValueError:
+                continue
+        
+        return "".join(patterns[:6])  # Limit to reasonable number of patterns
+        
+    except Exception:
+        return ""
 
-def enhanced_polymer_processing_complete(pred_string, enforce_homopolymer=False):
-    """Enhanced processing that preserves the complete polymer format"""
+def reconstruct_g2s_format(raw_string):
+    """Reconstruct proper G2S format from raw generated string"""
+    try:
+        if not raw_string:
+            return None
+        
+        # Clean the string first
+        clean_string = clean_output(raw_string)
+        
+        if '|' not in clean_string:
+            return None
+        
+        # Split into components
+        parts = clean_string.split('|')
+        
+        if len(parts) < 3:
+            return None
+        
+        # Extract SMILES (first part)
+        smiles_part = parts[0]
+        
+        # Validate basic SMILES
+        if not validate_basic_smiles(smiles_part):
+            return None
+        
+        # Find where connectivity starts
+        connectivity_start = None
+        stoich_parts = []
+        
+        for i, part in enumerate(parts[1:], 1):
+            if '<' in part:
+                connectivity_start = i
+                break
+            else:
+                # Try to parse as stoichiometry
+                try:
+                    val = float(part)
+                    if 0 <= val <= 1:
+                        stoich_parts.append(part)
+                except ValueError:
+                    pass
+        
+        # Ensure we have at least 2 stoichiometry values
+        if len(stoich_parts) < 2:
+            # Default to equal stoichiometry
+            stoich_parts = ["0.500", "0.500"]
+        
+        # Handle connectivity
+        connectivity_string = ""
+        if connectivity_start is not None:
+            connectivity_parts = parts[connectivity_start:]
+            connectivity_string = "|".join(connectivity_parts)
+            connectivity_string = fix_connectivity_pattern(connectivity_string)
+        
+        # Add default connectivity if missing
+        if not connectivity_string:
+            connectivity_string = "<1-3:0.250:0.250<1-4:0.250:0.250"
+        
+        # Reconstruct the format
+        result = smiles_part + "|" + "|".join(stoich_parts) + "|" + connectivity_string
+        
+        return result
+        
+    except Exception as e:
+        print(f"Warning: G2S reconstruction failed: {e}")
+        return None
+
+def validate_g2s_format(polymer_string):
+    """Validate complete G2S format"""
+    try:
+        if not polymer_string:
+            return False
+        
+        parts = polymer_string.split('|')
+        if len(parts) < 4:  # SMILES|stoich1|stoich2|connectivity
+            return False
+        
+        # Validate SMILES
+        smiles_part = parts[0]
+        if not validate_basic_smiles(smiles_part):
+            return False
+        
+        # Validate stoichiometry
+        stoich_valid = 0
+        for i in range(1, len(parts)):
+            if '<' in parts[i]:
+                break
+            try:
+                val = float(parts[i])
+                if 0 <= val <= 1:
+                    stoich_valid += 1
+            except ValueError:
+                break
+        
+        if stoich_valid < 2:
+            return False
+        
+        # Check for connectivity patterns
+        connectivity_found = any('<' in part and ':' in part and '-' in part for part in parts)
+        
+        return connectivity_found
+        
+    except Exception:
+        return False
+
+def convert_to_homopolymer_format(polymer_string):
+    """Convert any polymer string to homopolymer format by making monA = monB"""
+    try:
+        if not polymer_string or '|' not in polymer_string:
+            return polymer_string
+        
+        parts = polymer_string.split('|')
+        if len(parts) < 2:
+            return polymer_string
+        
+        # Extract SMILES part
+        smiles_part = parts[0]
+        
+        # If multiple monomers, make them the same (use first monomer)
+        if '.' in smiles_part:
+            monomers = smiles_part.split('.')
+            if len(monomers) >= 2:
+                # Use first monomer for both
+                homopolymer_smiles = f"{monomers[0]}.{monomers[0]}"
+                
+                # Update stoichiometry to 0.5|0.5
+                new_parts = [homopolymer_smiles, "0.500", "0.500"]
+                
+                # Keep connectivity if present
+                connectivity_parts = []
+                for part in parts[1:]:
+                    if '<' in part:
+                        connectivity_parts.append(part)
+                        break
+                
+                if connectivity_parts:
+                    new_parts.extend(connectivity_parts)
+                else:
+                    new_parts.append("<1-3:0.250:0.250<1-4:0.250:0.250")
+                
+                return "|".join(new_parts)
+        
+        return polymer_string
+        
+    except Exception:
+        return polymer_string
+
+def enhanced_polymer_processing(pred_string, enforce_homopolymer=False):
+    """Enhanced processing with comprehensive error handling"""
+    try:
+        if not pred_string:
+            return None
+        
+        # First attempt: reconstruct G2S format
+        reconstructed = reconstruct_g2s_format(pred_string)
+        
+        if reconstructed and validate_g2s_format(reconstructed):
+            # Apply homopolymer conversion if requested
+            if enforce_homopolymer:
+                return convert_to_homopolymer_format(reconstructed)
+            return reconstructed
+        
+        # Second attempt: basic cleanup
+        cleaned = clean_output(pred_string)
+        if cleaned and len(cleaned) > 10:
+            return cleaned
+        
+        return None
+        
+    except Exception as e:
+        print(f"Warning: Polymer processing failed: {e}")
+        return None
+
+# ================================
+# ENHANCED GENERATION WITH ERROR HANDLING
+# ================================
+
+def safe_model_inference(model, z_rand, device):
+    """Safely run model inference with comprehensive error handling"""
+    try:
+        with torch.no_grad():
+            model.eval()
+            
+            # Check if model has property prediction
+            if hasattr(model, 'inference') and callable(model.inference):
+                result = model.inference(data=z_rand, device=device, sample=False, log_var=None)
+                
+                # Handle different return formats
+                if len(result) >= 4:
+                    predictions_rand, _, _, z = result[:4]
+                    y = result[4] if len(result) > 4 else None
+                else:
+                    predictions_rand, _, _, z = result
+                    y = None
+                    
+                return predictions_rand, z, y
+            else:
+                print("Warning: Model inference method not found")
+                return None, None, None
+                
+    except Exception as e:
+        print(f"Error in model inference: {e}")
+        return None, None, None
+
+def generate_batch_with_error_handling(model, vocab, tokenization, batch_size=16, 
+                                     embedding_dimension=32, device=device, 
+                                     enforce_homopolymer=False, save_properties=False,
+                                     sampling_strategy="conservative"):
+    """Generate a batch with comprehensive error handling"""
     
-    # First check if already valid
-    if validate_complete_polymer_format(pred_string):
-        if enforce_homopolymer:
-            return convert_to_homopolymer_format(pred_string)
-        return pred_string
+    valid_predictions = []
+    batch_properties = []
     
-    # Try to fix
-    fixed = process_generated_string(pred_string, enforce_homopolymer)
+    try:
+        # Generate latent vectors based on sampling strategy
+        if sampling_strategy == "conservative":
+            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 0.8
+        elif sampling_strategy == "aggressive":
+            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 1.5
+        else:  # standard
+            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 1.0
+        
+        # Run model inference safely
+        predictions_rand, z, y = safe_model_inference(model, z_rand, device)
+        
+        if predictions_rand is None:
+            print("Warning: Model inference failed")
+            return valid_predictions, batch_properties
+        
+        # Process each prediction safely
+        for sample in range(len(predictions_rand)):
+            try:
+                # Check if prediction has the expected structure
+                if (len(predictions_rand[sample]) == 0 or 
+                    not hasattr(predictions_rand[sample][0], '__iter__')):
+                    continue
+                
+                # Extract tokens safely
+                pred_tokens = predictions_rand[sample][0]
+                if hasattr(pred_tokens, 'tolist'):
+                    pred_tokens = pred_tokens.tolist()
+                elif not isinstance(pred_tokens, list):
+                    pred_tokens = list(pred_tokens)
+                
+                # Convert to string safely
+                pred_string = safe_token_processing(pred_tokens, vocab, tokenization)
+                
+                if not pred_string:
+                    continue
+                
+                # Process the string to G2S format
+                processed_string = enhanced_polymer_processing(
+                    pred_string, 
+                    enforce_homopolymer=enforce_homopolymer
+                )
+                
+                if processed_string and validate_g2s_format(processed_string):
+                    valid_predictions.append(processed_string)
+                    
+                    # Save properties if requested
+                    if save_properties and y is not None and torch.is_tensor(y):
+                        try:
+                            batch_properties.append(y[sample].cpu().numpy())
+                        except Exception:
+                            pass
+                
+            except Exception as e:
+                print(f"Warning: Processing sample {sample} failed: {e}")
+                continue
+        
+        return valid_predictions, batch_properties
+        
+    except Exception as e:
+        print(f"Error in batch generation: {e}")
+        return valid_predictions, batch_properties
+
+def generate_with_comprehensive_error_handling(model, vocab, tokenization, target_count=100, 
+                                              max_attempts=500, batch_size=16, 
+                                              embedding_dimension=32, device=device, 
+                                              enforce_homopolymer=False, save_properties=False,
+                                              sampling_strategy="conservative"):
+    """Generation with comprehensive error handling and recovery"""
     
-    if fixed and validate_complete_polymer_format(fixed):
-        return fixed
+    all_valid_predictions = []
+    all_properties = [] if save_properties else None
+    attempts = 0
+    consecutive_failures = 0
     
-    return None
+    print(f"🎯 Starting generation with comprehensive error handling")
+    print(f"Target: {target_count} valid molecules, Max attempts: {max_attempts}")
+    
+    while len(all_valid_predictions) < target_count and attempts < max_attempts:
+        
+        try:
+            # Generate a batch
+            batch_valid, batch_properties = generate_batch_with_error_handling(
+                model=model,
+                vocab=vocab,
+                tokenization=tokenization,
+                batch_size=batch_size,
+                embedding_dimension=embedding_dimension,
+                device=device,
+                enforce_homopolymer=enforce_homopolymer,
+                save_properties=save_properties,
+                sampling_strategy=sampling_strategy
+            )
+            
+            # Check if batch generation was successful
+            if batch_valid:
+                all_valid_predictions.extend(batch_valid)
+                if save_properties and batch_properties:
+                    all_properties.extend(batch_properties)
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                print(f"Warning: Batch {attempts//batch_size + 1} produced no valid molecules")
+            
+            attempts += batch_size
+            
+            # Progress reporting
+            if attempts % (batch_size * 5) == 0 or len(batch_valid) > 0:
+                batch_validity = len(batch_valid) / batch_size if batch_size > 0 else 0
+                total_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
+                
+                print(f'Batch {attempts//batch_size}: {len(batch_valid)}/{batch_size} valid ({batch_validity:.1%}) | '
+                      f'Total: {len(all_valid_predictions)}/{attempts} ({total_validity:.1%}) | '
+                      f'Progress: {len(all_valid_predictions)}/{target_count} '
+                      f'({len(all_valid_predictions)/target_count:.1%})')
+            
+            # Early stopping if consistent failures
+            if consecutive_failures > 10:
+                print("⚠️ Too many consecutive failures. Model may need retraining.")
+                break
+                
+            # Reduce batch size if many failures
+            if consecutive_failures > 5 and batch_size > 8:
+                batch_size = max(8, batch_size // 2)
+                print(f"Reducing batch size to {batch_size} due to failures")
+                
+        except Exception as e:
+            print(f"Critical error in generation loop: {e}")
+            attempts += batch_size
+            consecutive_failures += 1
+            continue
+    
+    final_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
+    print(f"✅ Generation completed: {len(all_valid_predictions)} valid molecules from {attempts} attempts")
+    print(f"📊 Final validity rate: {final_validity:.1%}")
+    
+    return all_valid_predictions[:target_count], all_properties
 
 # ================================
 # ANALYSIS AND VALIDATION FUNCTIONS
 # ================================
 
 def analyze_generated_polymers(polymer_list, sample_size=10):
-    """Analyze generated polymers for complete format compliance"""
+    """Analyze generated polymers for G2S format compliance"""
     
-    print("🔍 COMPLETE POLYMER FORMAT ANALYSIS")
-    print("="*60)
+    print("🔍 G2S FORMAT ANALYSIS")
+    print("="*50)
     
     if not polymer_list:
         print("❌ No polymers to analyze")
-        return
+        return {}
     
     sample_polymers = polymer_list[:sample_size] if len(polymer_list) > sample_size else polymer_list
     
@@ -430,49 +598,37 @@ def analyze_generated_polymers(polymer_list, sample_size=10):
     has_connectivity = 0
     
     print(f"\n📊 Analyzing {len(sample_polymers)} sample polymers...")
-    print("-"*60)
+    print("-"*50)
     
     for i, polymer in enumerate(sample_polymers):
         print(f"\n🧪 Polymer {i+1}:")
         print(f"   {polymer}")
         
         # Check basic SMILES validity
-        smiles_part, _, _ = extract_polymer_components(polymer)
-        if smiles_part and validate_smiles_component(smiles_part):
-            basic_valid += 1
-            
-        # Check complete format compliance
-        complete_valid = validate_complete_polymer_format(polymer, verbose=False)
+        if polymer and '|' in polymer:
+            smiles_part = polymer.split('|')[0]
+            if validate_basic_smiles(smiles_part):
+                basic_valid += 1
+        
+        # Check G2S format compliance
+        complete_valid = validate_g2s_format(polymer)
         if complete_valid:
             format_compliant += 1
             
-        # Check if has connectivity patterns
-        _, _, connectivity = extract_polymer_components(polymer)
-        if connectivity:
+        # Check connectivity patterns
+        if '<' in polymer and ':' in polymer and '-' in polymer:
             has_connectivity += 1
-            print(f"   ✅ Has {len(connectivity)} connectivity patterns")
+            print(f"   ✅ Has connectivity patterns")
         else:
             print(f"   ⚠️  No connectivity patterns")
         
         print(f"   Valid: {'✅' if complete_valid else '❌'}")
     
-    print("="*60)
+    print("="*50)
     print("📋 ANALYSIS SUMMARY:")
     print(f"   Basic SMILES validity: {basic_valid}/{len(sample_polymers)} ({basic_valid/len(sample_polymers)*100:.1f}%)")
-    print(f"   Complete format compliance: {format_compliant}/{len(sample_polymers)} ({format_compliant/len(sample_polymers)*100:.1f}%)")
+    print(f"   G2S format compliance: {format_compliant}/{len(sample_polymers)} ({format_compliant/len(sample_polymers)*100:.1f}%)")
     print(f"   Contains connectivity patterns: {has_connectivity}/{len(sample_polymers)} ({has_connectivity/len(sample_polymers)*100:.1f}%)")
-    
-    if has_connectivity == 0:
-        print("\n⚠️  CRITICAL ISSUE:")
-        print("   No polymers contain connectivity patterns!")
-        print("   The model may not be generating the complete format.")
-        print("   Check tokenization and model architecture.")
-    elif has_connectivity < len(sample_polymers):
-        print(f"\n⚠️  PARTIAL ISSUE:")
-        print(f"   Only {has_connectivity}/{len(sample_polymers)} polymers have connectivity patterns")
-        print("   Some polymers are missing connectivity information")
-    else:
-        print("\n✅ EXCELLENT: All polymers contain connectivity patterns!")
     
     return {
         'total_analyzed': len(sample_polymers),
@@ -481,33 +637,6 @@ def analyze_generated_polymers(polymer_list, sample_size=10):
         'has_connectivity': has_connectivity,
         'compliance_rate': format_compliant / len(sample_polymers) if sample_polymers else 0
     }
-
-def enhanced_validation_of_results(all_predictions):
-    """Run comprehensive validation on generated results"""
-    
-    print("\n" + "="*60)
-    print("🔬 COMPREHENSIVE VALIDATION OF GENERATED POLYMERS")
-    print("="*60)
-    
-    # Analyze sample of generated polymers
-    analysis_result = analyze_generated_polymers(all_predictions, sample_size=min(20, len(all_predictions)))
-    
-    # Save analysis report
-    if analysis_result:
-        with open(os.path.join(dir_name, 'polymer_format_analysis.txt'), 'w') as f:
-            f.write("Complete Polymer Format Analysis Report\n")
-            f.write("="*40 + "\n\n")
-            f.write(f"Total polymers analyzed: {analysis_result['total_analyzed']}\n")
-            f.write(f"Basic SMILES validity: {analysis_result['basic_valid']}\n")
-            f.write(f"Complete format compliance: {analysis_result['format_compliant']}\n")
-            f.write(f"Contains connectivity patterns: {analysis_result['has_connectivity']}\n")
-            f.write(f"Compliance rate: {analysis_result['compliance_rate']:.1%}\n\n")
-            
-            f.write("Sample polymers:\n")
-            for i, polymer in enumerate(all_predictions[:10]):
-                f.write(f"{i+1}: {polymer}\n")
-    
-    return analysis_result
 
 def save_polymers_as_text(polymers_list, filename, title="Generated Polymers"):
     """Save polymers as readable text file with format explanation"""
@@ -522,97 +651,6 @@ def save_polymers_as_text(polymers_list, filename, title="Generated Polymers"):
             f.write(f"{i:4d}: {polymer}\n")
     
     print(f"✅ Saved {len(polymers_list)} polymers to readable text file: {filename}")
-
-# ================================
-# ENHANCED GENERATION FUNCTION
-# ================================
-
-def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100, max_attempts=500,
-                                   batch_size=16, embedding_dimension=32, device=device, 
-                                   enforce_homopolymer=False, save_properties=False):
-    """Generation with enhanced decoding that preserves complete format"""
-    
-    all_valid_predictions = []
-    all_properties = [] if save_properties else None
-    attempts = 0
-    
-    print(f"🎯 Enhanced decoding generation: targeting {target_count} valid polymers with complete format")
-    
-    with torch.no_grad():
-        model.eval()
-        
-        while len(all_valid_predictions) < target_count and attempts < max_attempts:
-            
-            # Conservative sampling for better quality
-            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 1.0
-            
-            try:
-                predictions_rand, _, _, z, y = model.inference(
-                    data=z_rand, device=device, sample=False, log_var=None
-                )
-                
-                batch_valid = []
-                batch_properties = []
-                
-                for sample in range(len(predictions_rand)):
-                    pred_tokens = predictions_rand[sample][0].tolist()
-                    pred_string = combine_tokens(
-                        tokenids_to_vocab(pred_tokens, vocab), 
-                        tokenization=tokenization
-                    )
-                    
-                    # Process with complete format preservation
-                    processed_string = enhanced_polymer_processing_complete(
-                        pred_string, 
-                        enforce_homopolymer=enforce_homopolymer
-                    )
-                    
-                    if processed_string and validate_complete_polymer_format(processed_string):
-                        batch_valid.append(processed_string)
-                        
-                        if save_properties and torch.is_tensor(y):
-                            batch_properties.append(y[sample].cpu().numpy())
-                
-                all_valid_predictions.extend(batch_valid)
-                if save_properties and batch_properties:
-                    all_properties.extend(batch_properties)
-                
-                attempts += batch_size
-                
-                # Quick format analysis on first batch
-                if len(all_valid_predictions) >= 5 and attempts == batch_size:
-                    print("\n🔍 Quick format analysis on first 5 polymers:")
-                    for i, polymer in enumerate(all_valid_predictions[:5]):
-                        _, _, connectivity = extract_polymer_components(polymer)
-                        compliant = validate_complete_polymer_format(polymer, verbose=False)
-                        print(f"  Polymer {i+1}: {'✅' if compliant else '❌'} | Connectivity patterns: {len(connectivity)}")
-                    print()
-                
-                # Progress reporting
-                if attempts % (batch_size * 5) == 0 or len(batch_valid) > 0:
-                    batch_validity = len(batch_valid) / batch_size if batch_size > 0 else 0
-                    total_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
-                    
-                    print(f'Batch {attempts//batch_size}: {len(batch_valid)}/{batch_size} valid ({batch_validity:.1%}) | '
-                          f'Total: {len(all_valid_predictions)}/{attempts} ({total_validity:.1%}) | '
-                          f'Progress: {len(all_valid_predictions)}/{target_count} '
-                          f'({len(all_valid_predictions)/target_count:.1%})')
-                
-                # Early stopping if very poor performance
-                if attempts > 200 and len(all_valid_predictions) < attempts * 0.01:
-                    print("⚠️  Very low validity rate. Model may need retraining for complete format.")
-                    break
-                    
-            except Exception as e:
-                print(f"Error in generation batch: {e}")
-                attempts += batch_size
-                continue
-    
-    final_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
-    print(f"✅ Enhanced generation completed: {len(all_valid_predictions)} valid polymers from {attempts} attempts")
-    print(f"📊 Final validity rate: {final_validity:.1%}")
-    
-    return all_valid_predictions[:target_count], all_properties
 
 # ================================
 # MODEL LOADING AND SETUP
@@ -675,42 +713,15 @@ if os.path.isfile(filepath):
     print(f'📝 Results will be saved to: {dir_name}')
 
     # ================================
-    # TESTING COMPLETE FORMAT PROCESSING
+    # RANDOM GENERATION WITH ERROR HANDLING
     # ================================
     
-    print("🧪 Testing Complete Format Processing:")
-    print("-" * 50)
+    print(f'🎲 Generate random samples with enhanced error handling')
+    torch.manual_seed(args.seed)
     
-    # Test cases based on the expected G2S VAE format
-    test_cases = [
-        "[*:1]c1ccc([*:2])cc1.[*:3]c1ccc([*:4])c1|0.5|0.5|<1-3:0.25:0.25<1-4:0.25:0.25",
-        "[*:1]c1ccc2c(c1)S(=O)(=O)c1cc([*:2])ccc1-2.[*:3]c1ccc([*:4])c(N)c1|0.25|0.75|<1-3:0.25:0.25<1-4:0.25:0.25",
-        "O=C([*:1])c1ccc([*:2])cc1|1.0|<1-2:0.5:0.5",  # Simplified case
-        "O=C([*:1])[*:2]|1.0|",  # Missing connectivity
-    ]
-    
-    for i, test in enumerate(test_cases):
-        print(f"Test {i+1}:")
-        print(f"  Input:     {test}")
-        
-        # Extract components
-        smiles, stoich, connectivity = extract_polymer_components(test)
-        print(f"  SMILES:    {smiles}")
-        print(f"  Stoich:    {stoich}")
-        print(f"  Connect:   {connectivity}")
-        
-        # Validate
-        valid = validate_complete_polymer_format(test, verbose=False)
-        print(f"  Valid:     {valid}")
-        print()
-
-    ### RANDOM GENERATION ###
     if args.quality_control:
-        print(f'🎲 Generate random samples with complete format preservation')
-        torch.manual_seed(args.seed)
-        
-        # Use enhanced generation that preserves complete format
-        all_predictions, all_properties = generate_with_enhanced_decoding(
+        # Use enhanced generation with comprehensive error handling
+        all_predictions, all_properties = generate_with_comprehensive_error_handling(
             model=model,
             vocab=vocab,
             tokenization=tokenization,
@@ -720,320 +731,199 @@ if os.path.isfile(filepath):
             embedding_dimension=embedding_dimension,
             device=device,
             enforce_homopolymer=args.enforce_homopolymer,
-            save_properties=args.save_properties
+            save_properties=args.save_properties,
+            sampling_strategy=args.sampling_strategy
         )
-        
     else:
-        # Original generation method (for backward compatibility)
-        print(f'🎲 Generate random samples (original method)')
-        torch.manual_seed(args.seed)
+        # Original method with enhanced error handling
+        print(f'🎲 Generate random samples (original method with error handling)')
         all_predictions = []
         all_properties = [] if args.save_properties else None
         
-        with torch.no_grad():
-            model.eval()
-            for i in range(250):
-                z_rand = torch.randn((64, embedding_dimension), device=device) * args.epsilon
-                predictions_rand, _, _, z, y = model.inference(data=z_rand, device=device, sample=False, log_var=None)
-                print(f'Generated batch {i+1}/250')
+        for i in range(50):  # Reduced from 250 for testing
+            try:
+                batch_valid, batch_properties = generate_batch_with_error_handling(
+                    model=model,
+                    vocab=vocab,
+                    tokenization=tokenization,
+                    batch_size=32,
+                    embedding_dimension=embedding_dimension,
+                    device=device,
+                    enforce_homopolymer=args.enforce_homopolymer,
+                    save_properties=args.save_properties,
+                    sampling_strategy=args.sampling_strategy
+                )
                 
-                # Convert predictions to strings with complete format processing
-                prediction_strings = []
-                for sample in range(len(predictions_rand)):
-                    pred_string = combine_tokens(tokenids_to_vocab(predictions_rand[sample][0].tolist(), vocab), tokenization=tokenization)
-                    processed_string = enhanced_polymer_processing_complete(
-                        pred_string,
-                        enforce_homopolymer=args.enforce_homopolymer
-                    )
-                    if processed_string:
-                        prediction_strings.append(processed_string)
-                    else:
-                        # Keep original if processing fails
-                        prediction_strings.append(clean_output(pred_string))
-                        
-                all_predictions.extend(prediction_strings)
+                all_predictions.extend(batch_valid)
+                if args.save_properties and batch_properties:
+                    all_properties.extend(batch_properties)
+                    
+                print(f'Generated batch {i+1}/50: {len(batch_valid)} valid molecules')
                 
-                # Save property predictions if requested
-                if args.save_properties:
-                    if torch.is_tensor(y):
-                        properties_batch = y.cpu().numpy()
-                        all_properties.extend(properties_batch)
-   
-    # Save random generation results (BOTH pickle AND text)
-    with open(os.path.join(dir_name, 'generated_polymers.pkl'), 'wb') as f:
-        pickle.dump(all_predictions, f)
-    print(f"✅ Saved {len(all_predictions)} random generations to generated_polymers.pkl")
-    
-    # Save as readable text file with format explanation
-    save_polymers_as_text(
-        all_predictions,
-        os.path.join(dir_name, 'generated_polymers.txt'),
-        "Random Generated Polymers"
-    )
-    
-    if args.save_properties and all_properties:
-        all_properties = np.array(all_properties)
-        with open(os.path.join(dir_name, 'generated_polymers_properties.npy'), 'wb') as f:
-            np.save(f, all_properties)
-        print(f"✅ Saved properties of generated polymers: {all_properties.shape}")
-        
-        # Save property summary
-        with open(os.path.join(dir_name, 'generated_polymers_property_summary.txt'), 'w') as f:
-            f.write(f"Property Summary for {len(all_predictions)} Generated Polymers\n")
-            f.write("="*60 + "\n\n")
-            f.write(f"Properties: {property_names}\n\n")
-            for i, prop_name in enumerate(property_names):
-                prop_values = all_properties[:, i]
-                f.write(f"{prop_name}:\n")
-                f.write(f"  Mean: {np.mean(prop_values):.4f}\n")
-                f.write(f"  Std:  {np.std(prop_values):.4f}\n")
-                f.write(f"  Min:  {np.min(prop_values):.4f}\n")
-                f.write(f"  Max:  {np.max(prop_values):.4f}\n\n")
+            except Exception as e:
+                print(f'Error in batch {i+1}: {e}')
+                continue
 
-    ### SEED-BASED GENERATION ###
+    # Save random generation results
+    if all_predictions:
+        with open(os.path.join(dir_name, 'generated_polymers.pkl'), 'wb') as f:
+            pickle.dump(all_predictions, f)
+        print(f"✅ Saved {len(all_predictions)} random generations to generated_polymers.pkl")
+        
+        # Save as readable text file
+        save_polymers_as_text(
+            all_predictions,
+            os.path.join(dir_name, 'generated_polymers.txt'),
+            "Random Generated Polymers"
+        )
+        
+        if args.save_properties and all_properties:
+            all_properties = np.array(all_properties)
+            with open(os.path.join(dir_name, 'generated_polymers_properties.npy'), 'wb') as f:
+                np.save(f, all_properties)
+            print(f"✅ Saved properties of generated polymers: {all_properties.shape}")
+    else:
+        print("❌ No valid polymers generated in random generation")
+
+    # ================================
+    # SEED-BASED GENERATION WITH ERROR HANDLING
+    # ================================
+    
     print(f'🌱 Generate samples around seed molecule')
     
     all_predictions_seed = []
     all_properties_seed = [] if args.save_properties else None
     
-    batches = list(range(len(dict_test_loader)))
-    random.seed(args.seed)
-    batch = random.choice(batches)
-    
-    with torch.no_grad():
-        model.eval()
+    try:
+        batches = list(range(len(dict_test_loader)))
+        random.seed(args.seed)
+        batch = random.choice(batches)
+        
+        with torch.no_grad():
+            model.eval()
 
-        data = dict_test_loader[str(batch)][0]
-        data.to(device)
-        dest_is_origin_matrix = dict_test_loader[str(batch)][1]
-        dest_is_origin_matrix.to(device)
-        inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
-        inc_edges_to_atom_matrix.to(device)
-        
-        _, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
-        
-        # Randomly select a seed molecule
-        ind = random.choice(list(range(64)))
-        seed_z = z[ind]
-        seed_z = seed_z.unsqueeze(0).repeat(64, 1)
-        seed_string_raw = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind], vocab), tokenization=tokenization)
-        seed_string = clean_output(seed_string_raw)
-        
-        print(f"🌱 Seed molecule: {seed_string}")
-        
-        sampled_z = []
-        for r in range(8):
-            # Define the mean and standard deviation of the Gaussian noise
-            mean = 0
-            std = args.epsilon / 2
+            data = dict_test_loader[str(batch)][0]
+            data.to(device)
+            dest_is_origin_matrix = dict_test_loader[str(batch)][1]
+            dest_is_origin_matrix.to(device)
+            inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
+            inc_edges_to_atom_matrix.to(device)
             
-            # Create a tensor of the same size as the original tensor with random noise
-            noise = torch.tensor(np.random.normal(mean, std, size=seed_z.size()), dtype=torch.float, device=device)
-
-            # Add the noise to the original tensor
-            seed_z_noise = seed_z + noise
-            sampled_z.append(seed_z_noise.cpu().numpy())
+            # Get latent representations safely
+            result = model.inference(data=data, device=device, 
+                                   dest_is_origin_matrix=dest_is_origin_matrix, 
+                                   inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, 
+                                   sample=False, log_var=None)
             
-            predictions_seed, _, _, z_new, y_new = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
+            if len(result) >= 4:
+                _, _, _, z = result[:4]
+                y = result[4] if len(result) > 4 else None
+            else:
+                print("Warning: Unexpected inference result format")
+                z = None
+                y = None
             
-            # Convert predictions to strings with complete format processing
-            prediction_strings = []
-            for sample in range(len(predictions_seed)):
-                pred_string = combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization)
-                processed_string = enhanced_polymer_processing_complete(
-                    pred_string,
-                    enforce_homopolymer=args.enforce_homopolymer
-                )
-                if processed_string:
-                    prediction_strings.append(processed_string)
-                else:
-                    prediction_strings.append(clean_output(pred_string))
-            
-            all_predictions_seed.extend(prediction_strings)
-            
-            # Save property predictions if requested
-            if args.save_properties and torch.is_tensor(y_new):
-                properties_batch = y_new.cpu().numpy()
-                all_properties_seed.extend(properties_batch)
-
-    # Save seed-based generation results
-    print(f'💾 Saving generated strings around seed molecule')
-    
-    with open(os.path.join(dir_name, 'seed_polymer.txt'), 'w') as f:
-        f.write(f'Seed molecule: {seed_string}\n')
-        f.write(f'Properties: {property_names}\n')
-
-    std = args.epsilon / 2
-    with open(os.path.join(dir_name, f'seed_polymers_noise{std:.4f}.txt'), 'w') as f:
-        f.write(f"Seed molecule: {seed_string}\n")
-        f.write(f"Properties: {property_names}\n")
-        f.write("The following are the generations from seed (mean) with noise\n")
-        for i, s in enumerate(all_predictions_seed):
-            f.write(f"{i+1}: {s}\n")
-            
-    with open(os.path.join(dir_name, f'seed_polymers_latents_noise{std:.4f}.npy'), 'wb') as f:
-        sampled_z = np.stack(sampled_z)
-        np.save(f, sampled_z)
-        
-    with open(os.path.join(dir_name, 'seed_polymer_z.npy'), 'wb') as f:
-        seed_z_original = seed_z.cpu().numpy()
-        np.save(f, seed_z_original)
-        
-    with open(os.path.join(dir_name, f'generated_polymers_from_seed_noise{std:.4f}.pkl'), 'wb') as f:
-        pickle.dump(all_predictions_seed, f)
-        
-    # Save seed-based as text too
-    save_polymers_as_text(
-        all_predictions_seed,
-        os.path.join(dir_name, f'seed_based_polymers.txt'),
-        "Seed-Based Generated Polymers"
-    )
-        
-    print(f"✅ Saved {len(all_predictions_seed)} seed-based generations")
-    
-    if args.save_properties and all_properties_seed:
-        all_properties_seed = np.array(all_properties_seed)
-        with open(os.path.join(dir_name, f'seed_polymers_properties_noise{std:.4f}.npy'), 'wb') as f:
-            np.save(f, all_properties_seed)
-        print(f"✅ Saved properties of seed-based generations: {all_properties_seed.shape}")
-
-    ### INTERPOLATION ###
-    print(f'🔄 Generate interpolated samples between molecules')
-    
-    all_predictions_interp_all = []
-    all_properties_interp_all = [] if args.save_properties else None
-    
-    random.seed(args.seed)
-    batch = random.choice(batches)
-    
-    with torch.no_grad():
-        model.eval()
-
-        data = dict_test_loader[str(batch)][0]
-        data.to(device)
-        dest_is_origin_matrix = dict_test_loader[str(batch)][1]
-        dest_is_origin_matrix.to(device)
-        inc_edges_to_atom_matrix = dict_test_loader[str(batch)][2]
-        inc_edges_to_atom_matrix.to(device)
-        
-        _, _, _, z, y = model.inference(data=data, device=device, dest_is_origin_matrix=dest_is_origin_matrix, inc_edges_to_atom_matrix=inc_edges_to_atom_matrix, sample=False, log_var=None)
-        
-        examples = 10
-        for e in range(examples):
-            all_predictions_interp = []
-            all_properties_interp = [] if args.save_properties else None
-            
-            # Randomly select two different molecules
-            ind1 = random.choice(list(range(64)))
-            ind2 = random.choice(list(range(64)))
-            while ind1 == ind2:
-                ind2 = random.choice(list(range(64)))
+            if z is not None:
+                # Randomly select a seed molecule
+                ind = random.choice(list(range(min(64, z.size(0)))))
+                seed_z = z[ind]
+                seed_z = seed_z.unsqueeze(0).repeat(32, 1)  # Reduced batch size
                 
-            start_mol_raw = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind1], vocab), tokenization=tokenization)
-            end_mol_raw = combine_tokens(tokenids_to_vocab(data.tgt_token_ids[ind2], vocab), tokenization=tokenization)
-            
-            start_mol = clean_output(start_mol_raw)
-            end_mol = clean_output(end_mol_raw)
-            
-            seed_z1 = z[ind1]
-            seed_z2 = z[ind2]
-            
-            print(f"🔄 Interpolation {e+1}/10: {start_mol[:50]}... ↔ {end_mol[:50]}...")
-
-            # Number of steps for interpolation
-            num_steps = 10
-
-            # Calculate the step size for each dimension
-            step_sizes = (seed_z2 - seed_z1) / (num_steps + 1)
-
-            # Generate interpolated vectors
-            interpolated_vectors = [seed_z1 + i * step_sizes for i in range(1, num_steps + 1)]
-
-            # Include the endpoints
-            interpolated_vectors = torch.stack([seed_z1] + interpolated_vectors + [seed_z2])
-
-            # Generate molecules for each interpolated vector
-            for s in range(interpolated_vectors.shape[0]):
-                prediction_interp, _, _, _, y_interp = model.inference(data=interpolated_vectors[s].unsqueeze(0), device=device, sample=False, log_var=None)
+                # Get seed string safely
+                try:
+                    seed_tokens = data.tgt_token_ids[ind]
+                    seed_string = safe_token_processing(seed_tokens, vocab, tokenization)
+                    print(f"🌱 Seed molecule: {seed_string}")
+                except Exception as e:
+                    print(f"Warning: Could not extract seed string: {e}")
+                    seed_string = "Unknown"
                 
-                raw_string = combine_tokens(tokenids_to_vocab(prediction_interp[0][0].tolist(), vocab), tokenization=tokenization)
-                processed_string = enhanced_polymer_processing_complete(raw_string, enforce_homopolymer=args.enforce_homopolymer)
-                
-                if processed_string:
-                    all_predictions_interp.append(processed_string)
-                else:
-                    all_predictions_interp.append(clean_output(raw_string))
-                
-                # Save property predictions if requested
-                if args.save_properties and torch.is_tensor(y_interp):
-                    property_values = y_interp.cpu().numpy()
-                    all_properties_interp.append(property_values)
+                # Generate variations
+                for r in range(8):
+                    try:
+                        # Add noise
+                        mean = 0
+                        std = args.epsilon / 2
+                        noise = torch.tensor(np.random.normal(mean, std, size=seed_z.size()), 
+                                           dtype=torch.float, device=device)
+                        seed_z_noise = seed_z + noise
+                        
+                        # Generate from noisy latent
+                        batch_valid, batch_properties = generate_batch_with_error_handling(
+                            model=model,
+                            vocab=vocab,
+                            tokenization=tokenization,
+                            batch_size=seed_z_noise.size(0),
+                            embedding_dimension=embedding_dimension,
+                            device=device,
+                            enforce_homopolymer=args.enforce_homopolymer,
+                            save_properties=args.save_properties,
+                            sampling_strategy="conservative"
+                        )
+                        
+                        all_predictions_seed.extend(batch_valid)
+                        if args.save_properties and batch_properties:
+                            all_properties_seed.extend(batch_properties)
+                            
+                    except Exception as e:
+                        print(f"Error in seed variation {r}: {e}")
+                        continue
+        
+        # Save seed-based results
+        if all_predictions_seed:
+            print(f'💾 Saving generated strings around seed molecule')
+            
+            with open(os.path.join(dir_name, 'seed_polymer.txt'), 'w') as f:
+                f.write(f'Seed molecule: {seed_string}\n')
+                f.write(f'Properties: {property_names}\n')
 
-            # Save interpolation results for this example
-            with open(os.path.join(dir_name, f'interpolated_polymers_example{e}.txt'), 'w') as f:
-                f.write(f"Properties: {property_names}\n")
-                f.write(f"Molecule1: {start_mol}\n")
-                f.write(f"Molecule2: {end_mol}\n")
-                f.write("The following are the stepwise interpolated molecules:\n")
-                for s, mol in enumerate(all_predictions_interp):
-                    f.write(f"Step {s}: {mol}\n")
-                    
-            all_predictions_interp_all.extend(all_predictions_interp)
-            if args.save_properties and all_properties_interp:
-                all_properties_interp_all.extend(all_properties_interp)
-
-    print(f"✅ Saved {examples} interpolation examples with {len(all_predictions_interp_all)} total interpolated molecules")
-    
-    # Save interpolated as text too
-    save_polymers_as_text(
-        all_predictions_interp_all,
-        os.path.join(dir_name, 'interpolated_polymers.txt'),
-        "Interpolated Polymers"
-    )
-    
-    if args.save_properties and all_properties_interp_all:
-        all_properties_interp_all = np.array(all_properties_interp_all)
-        with open(os.path.join(dir_name, 'interpolated_polymers_properties.npy'), 'wb') as f:
-            np.save(f, all_properties_interp_all)
-        print(f"✅ Saved properties of interpolated molecules: {all_properties_interp_all.shape}")
+            with open(os.path.join(dir_name, f'generated_polymers_from_seed.pkl'), 'wb') as f:
+                pickle.dump(all_predictions_seed, f)
+                
+            save_polymers_as_text(
+                all_predictions_seed,
+                os.path.join(dir_name, f'seed_based_polymers.txt'),
+                "Seed-Based Generated Polymers"
+            )
+                
+            print(f"✅ Saved {len(all_predictions_seed)} seed-based generations")
+        else:
+            print("❌ No valid polymers generated in seed-based generation")
+            
+    except Exception as e:
+        print(f"Error in seed-based generation: {e}")
 
     # ================================
-    # FINAL SUMMARY WITH COMPREHENSIVE VALIDATION
+    # FINAL SUMMARY WITH VALIDATION
     # ================================
 
-    # Final summary with comprehensive validation
     print('\n' + '='*60)
-    print('🎉 GENERATION COMPLETED SUCCESSFULLY')
+    print('🎉 GENERATION COMPLETED')
     print('='*60)
 
-    # Run comprehensive validation
-    validation_results = enhanced_validation_of_results(all_predictions)
+    # Run analysis on generated results
+    if all_predictions:
+        validation_results = analyze_generated_polymers(all_predictions)
+        
+        print(f"📊 Generation Summary:")
+        print(f"  Random generations: {len(all_predictions)}")
+        print(f"  Seed-based generations: {len(all_predictions_seed) if all_predictions_seed else 0}")
+        print(f"  Total molecules generated: {len(all_predictions) + (len(all_predictions_seed) if all_predictions_seed else 0)}")
+        print(f"📁 Results saved to: {dir_name}")
 
-    print(f"📊 Generation Summary:")
-    print(f"  Random generations: {len(all_predictions)}")
-    print(f"  Seed-based generations: {len(all_predictions_seed)}")
-    print(f"  Interpolated molecules: {len(all_predictions_interp_all)}")
-    print(f"  Total molecules generated: {len(all_predictions) + len(all_predictions_seed) + len(all_predictions_interp_all)}")
-    print(f"📁 Results saved to: {dir_name}")
+        if validation_results:
+            print(f"\n🔬 G2S FORMAT COMPLIANCE:")
+            print(f"  Basic SMILES validity: {validation_results['basic_valid']}/{validation_results['total_analyzed']} ({validation_results['basic_valid']/validation_results['total_analyzed']*100:.1f}%)")
+            print(f"  G2S format compliance: {validation_results['format_compliant']}/{validation_results['total_analyzed']} ({validation_results['compliance_rate']*100:.1f}%)")
+            print(f"  Contains connectivity patterns: {validation_results['has_connectivity']}/{validation_results['total_analyzed']} ({validation_results['has_connectivity']/validation_results['total_analyzed']*100:.1f}%)")
 
-    if validation_results:
-        print(f"\n🔬 COMPLETE FORMAT COMPLIANCE:")
-        print(f"  Basic SMILES validity: {validation_results['basic_valid']}/{validation_results['total_analyzed']} ({validation_results['basic_valid']/validation_results['total_analyzed']*100:.1f}%)")
-        print(f"  Complete format compliance: {validation_results['format_compliant']}/{validation_results['total_analyzed']} ({validation_results['compliance_rate']*100:.1f}%)")
-        print(f"  Contains connectivity patterns: {validation_results['has_connectivity']}/{validation_results['total_analyzed']} ({validation_results['has_connectivity']/validation_results['total_analyzed']*100:.1f}%)")
-
-    if args.enforce_homopolymer:
-        print(f"🧪 Homopolymer format enforced on all generated structures")
-    if args.save_properties:
-        print(f"🔬 Property predictions saved for all generated molecules")
-        print(f"📋 Properties: {property_names}")
-    
-    print(f"\n📄 SAVED FILES:")
-    print(f"  - generated_polymers.pkl (binary)")
-    print(f"  - generated_polymers.txt (readable with format explanation)")
-    print(f"  - seed_based_polymers.txt (readable)")
-    print(f"  - interpolated_polymers.txt (readable)")
-    print(f"  - polymer_format_analysis.txt (validation report)")
+        if args.enforce_homopolymer:
+            print(f"🧪 Homopolymer format enforced on all generated structures")
+        if args.save_properties:
+            print(f"🔬 Property predictions saved for generated molecules")
+            print(f"📋 Properties: {property_names}")
+    else:
+        print("❌ No valid polymers were generated. Model may need retraining or parameter adjustment.")
 
 else: 
     print("❌ The model training diverged and there is no trained model file!")

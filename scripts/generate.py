@@ -544,7 +544,7 @@ def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100
         while len(all_valid_predictions) < target_count and attempts < max_attempts:
             
             # Conservative sampling for better quality
-            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 0.5
+            z_rand = torch.randn((batch_size, embedding_dimension), device=device) * 1.0
             
             try:
                 predictions_rand, _, _, z, y = model.inference(

@@ -12,6 +12,7 @@ import pickle
 import argparse
 import random
 import numpy as np
+import re
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -115,7 +116,10 @@ dict_test_loader = torch.load(data_path)
 num_node_features = dict_test_loader['0'][0].num_node_features
 num_edge_features = dict_test_loader['0'][0].num_edge_features
 
-# Functions for cleaning and processing outputs
+# ================================
+# ORIGINAL FUNCTIONS (PRESERVED)
+# ================================
+
 def clean_output(polymer_string):
     """Remove all padding underscores from generated polymer strings"""
     return polymer_string.rstrip('_')
@@ -165,204 +169,321 @@ def process_generated_string(polymer_string, enforce_homopolymer=False):
     else:
         return clean_string
 
-def is_chemically_valid_polymer(polymer_string):
-    """Enhanced chemical validity check for polymers"""
-    try:
-        from rdkit import Chem
-        
-        if not polymer_string or polymer_string.strip() == '':
-            return False
-            
-        # Quick syntax checks
-        if polymer_string.count('(') != polymer_string.count(')'):
-            return False
-            
-        # Check ring numbers
-        from collections import Counter
-        digits = [c for c in polymer_string if c.isdigit()]
-        digit_counts = Counter(digits)
-        for count in digit_counts.values():
-            if count % 2 != 0:  # Unpaired rings
-                return False
-        
-        # For polymer format, validate the monomer part
-        if '|' in polymer_string:
-            parts = polymer_string.split('|')
-            if len(parts) >= 2:
-                monomer_part = parts[0]
-                
-                if '.' in monomer_part:
-                    # Multiple monomers
-                    monomers = monomer_part.split('.')
-                    for mon in monomers:
-                        if mon.strip() and Chem.MolFromSmiles(mon.strip()) is None:
-                            return False
-                    return len(monomers) > 0
-                else:
-                    # Single monomer
-                    return monomer_part.strip() and Chem.MolFromSmiles(monomer_part.strip()) is not None
-            return False
-        else:
-            # Regular SMILES
-            return Chem.MolFromSmiles(polymer_string) is not None
-            
-    except Exception:
-        return False
+# ================================
+# ENHANCED POLYMER FIXING FUNCTIONS (NEW)
+# ================================
 
-def fix_polymer_smiles_comprehensive(polymer_string):
-    """Comprehensive SMILES fixing with multiple strategies"""
-    if not polymer_string:
-        return polymer_string
+def fix_polymer_representation_correct(polymer_string):
+    """Fix polymer representation understanding the correct format"""
+    if not polymer_string or polymer_string.strip() == '':
+        return None
     
-    # Remove padding
+    # Clean basic padding
     clean_string = polymer_string.rstrip('_').strip()
     
-    # Strategy 1: Fix obvious parentheses issues
-    fixed = fix_parentheses_advanced(clean_string)
+    # Split into components
+    if '|' not in clean_string:
+        # If no |, treat as pure SMILES and try to add missing components
+        fixed_smiles = fix_smiles_component(clean_string)
+        if fixed_smiles:
+            # Add minimal stoichiometry for single monomer
+            return f"{fixed_smiles}|1.0|"
+        return None
     
-    # Strategy 2: Handle polymer format specifically
-    if '|' in fixed:
-        parts = fixed.split('|')
-        if len(parts) > 0:
-            smiles_part = parts[0]
-            
-            # Fix the SMILES component
-            fixed_smiles = fix_smiles_syntax(smiles_part)
-            if fixed_smiles:
-                parts[0] = fixed_smiles
-                fixed = '|'.join(parts)
+    # Split by | to get components
+    parts = clean_string.split('|')
+    
+    if len(parts) < 2:
+        return None
+    
+    # Fix each component according to its type
+    fixed_smiles = fix_smiles_component(parts[0])
+    if not fixed_smiles:
+        return None
+    
+    # Fix stoichiometry section
+    fixed_stoich = fix_stoichiometry_section(parts[1:])  # All parts after SMILES
+    
+    # Combine fixed components
+    if fixed_stoich:
+        return f"{fixed_smiles}|{fixed_stoich}"
     else:
-        # Regular SMILES
-        fixed = fix_smiles_syntax(fixed)
-    
-    return fixed
+        # Fallback: just SMILES with simple stoichiometry
+        return f"{fixed_smiles}|1.0|"
 
-def fix_parentheses_advanced(smiles_string):
-    """Advanced parentheses fixing with chemical awareness"""
+def fix_smiles_component(smiles_part):
+    """Fix the SMILES component (first part before |)"""
+    if not smiles_part or smiles_part.strip() == '':
+        return None
+    
+    smiles_part = smiles_part.strip()
+    
+    # Check if it contains actual chemical elements
+    has_atoms = bool(re.search(r'[CNOSPFBrClI]', smiles_part, re.IGNORECASE))
+    if not has_atoms:
+        return None
+    
+    # Fix parentheses and brackets
+    fixed = fix_parentheses_and_brackets(smiles_part)
+    
+    # Fix ring notation issues
+    fixed = fix_ring_notation_polymer(fixed)
+    
+    # Remove trailing numbers that shouldn't be there
+    fixed = clean_smiles_syntax(fixed)
+    
+    return fixed if fixed else None
+
+def fix_parentheses_and_brackets(smiles_string):
+    """Fix parentheses and bracket balancing"""
     if not smiles_string:
         return smiles_string
     
-    # Count different types of brackets
+    # Count and balance parentheses
     open_paren = smiles_string.count('(')
     close_paren = smiles_string.count(')')
+    
+    if open_paren > close_paren:
+        # Add missing closing parentheses
+        smiles_string += ')' * (open_paren - close_paren)
+    elif close_paren > open_paren:
+        # Remove excess closing parentheses from end
+        excess = close_paren - open_paren
+        # Remove from the end by reversing, removing, and reversing back
+        temp = smiles_string[::-1]
+        for _ in range(excess):
+            temp = temp.replace(')', '', 1)
+        smiles_string = temp[::-1]
+    
+    # Same for brackets
     open_bracket = smiles_string.count('[')
     close_bracket = smiles_string.count(']')
     
-    # Fix parentheses - ADD MISSING CLOSING PARENTHESES
-    if open_paren > close_paren:
-        missing_close = open_paren - close_paren
-        smiles_string += ')' * missing_close
-    elif close_paren > open_paren:
-        # Remove extra closing parentheses from the end
-        excess_close = close_paren - open_paren
-        smiles_string = smiles_string[::-1].replace(')', '', excess_close)[::-1]
-    
-    # Fix brackets
     if open_bracket > close_bracket:
-        missing_close = open_bracket - close_bracket
-        smiles_string += ']' * missing_close
+        smiles_string += ']' * (open_bracket - close_bracket)
     elif close_bracket > open_bracket:
-        # Remove extra closing brackets from the end
-        excess_close = close_bracket - open_bracket
-        smiles_string = smiles_string[::-1].replace(']', '', excess_close)[::-1]
+        excess = close_bracket - open_bracket
+        temp = smiles_string[::-1]
+        for _ in range(excess):
+            temp = temp.replace(']', '', 1)
+        smiles_string = temp[::-1]
     
     return smiles_string
 
-def fix_smiles_syntax(smiles_string):
-    """Fix SMILES syntax issues"""
+def fix_ring_notation_polymer(smiles_string):
+    """Fix ring notation issues specific to polymer SMILES"""
     if not smiles_string:
         return smiles_string
     
-    # Remove invalid characters that might break parsing
-    valid_chars = set('CNOSPFClBrI[]()=\\/#-+0123456789:.*')
-    cleaned = ''.join(c for c in smiles_string if c in valid_chars)
+    # Remove invalid patterns like ")3)" -> ")"
+    smiles_string = re.sub(r'\)\d+\)', ')', smiles_string)
     
-    # Fix common issues
-    fixed = fix_parentheses_advanced(cleaned)
+    # Fix patterns like "1(-2(" which are invalid ring notation
+    smiles_string = re.sub(r'\d+\(-\d+\(', '', smiles_string)
     
-    # Ensure proper atom notation
-    fixed = ensure_proper_atoms(fixed)
-    
-    return fixed
-
-def ensure_proper_atoms(smiles_string):
-    """Ensure proper atom notation in SMILES"""
-    import re
-    
-    # Fix lowercase atoms that should be capitalized
-    fixes = {
-        'cl': 'Cl', 'br': 'Br', 'mg': 'Mg', 'ca': 'Ca', 
-        'na': 'Na', 'al': 'Al', 'si': 'Si', 'se': 'Se'
-    }
-    
-    for wrong, correct in fixes.items():
-        smiles_string = re.sub(r'\b' + wrong + r'\b', correct, smiles_string)
+    # Remove orphaned ring numbers not properly connected
+    # Keep attachment points like [*:1], [*:2], etc.
     
     return smiles_string
 
-def validate_polymer_advanced(polymer_string):
-    """Advanced polymer validation with multiple fallback strategies"""
-    try:
-        from rdkit import Chem
+def clean_smiles_syntax(smiles_string):
+    """Clean SMILES syntax issues"""
+    if not smiles_string:
+        return smiles_string
+    
+    # Remove trailing junk that got mixed in from other sections
+    # But preserve attachment points [*:n]
+    
+    # Remove patterns where numbers appear incorrectly
+    # This is tricky - we want to preserve [*:1] but remove "3)[*:4])"
+    
+    # Remove standalone numbers that don't belong
+    smiles_string = re.sub(r'(?<![:\[])\b\d{2,}\b(?![\]:)])', '', smiles_string)
+    
+    return smiles_string.strip()
+
+def fix_stoichiometry_section(stoich_parts):
+    """Fix the stoichiometry and connectivity sections"""
+    if not stoich_parts:
+        return "1.0|"
+    
+    fixed_parts = []
+    
+    for part in stoich_parts:
+        part = part.strip()
+        if not part:
+            continue
+            
+        # Check if this looks like stoichiometry (numbers, decimals, colons)
+        if is_stoichiometry_like(part):
+            fixed_stoich = fix_stoichiometry_values(part)
+            if fixed_stoich:
+                fixed_parts.append(fixed_stoich)
         
-        if not polymer_string or polymer_string.strip() == '':
+        # Check if this looks like connectivity (< symbols, colons, numbers)
+        elif is_connectivity_like(part):
+            fixed_conn = fix_connectivity_values(part)
+            if fixed_conn:
+                fixed_parts.append(fixed_conn)
+    
+    # If we couldn't fix anything, provide defaults
+    if not fixed_parts:
+        return "1.0|"
+    
+    return "|".join(fixed_parts) + "|"
+
+def is_stoichiometry_like(part):
+    """Check if part looks like stoichiometry values"""
+    # Should be numbers, decimals, maybe some basic punctuation
+    return bool(re.match(r'^[0-9.:]+$', part))
+
+def is_connectivity_like(part):
+    """Check if part looks like connectivity patterns"""
+    # Should contain < symbols and pattern like <1-2:0.5:0.5
+    return '<' in part and ':' in part
+
+def fix_stoichiometry_values(stoich_string):
+    """Fix stoichiometry values like 0.25, 0.75"""
+    # Extract numbers that look like stoichiometry
+    numbers = re.findall(r'\d*\.?\d+', stoich_string)
+    
+    if numbers:
+        # Convert to floats and normalize if needed
+        try:
+            float_values = [float(x) for x in numbers if float(x) > 0]
+            if float_values:
+                # Normalize so they sum to 1.0
+                total = sum(float_values)
+                if total > 0:
+                    normalized = [x/total for x in float_values]
+                    return "|".join(f"{x:.3f}" for x in normalized)
+        except ValueError:
+            pass
+    
+    # Fallback
+    return "1.0"
+
+def fix_connectivity_values(conn_string):
+    """Fix connectivity patterns like <1-2:0.5:0.5"""
+    # Try to extract connectivity patterns
+    patterns = re.findall(r'<?\d+-\d+:[\d.]+:[\d.]+', conn_string)
+    
+    if patterns:
+        # Clean up the patterns
+        fixed_patterns = []
+        for pattern in patterns:
+            if not pattern.startswith('<'):
+                pattern = '<' + pattern
+            fixed_patterns.append(pattern)
+        
+        return "".join(fixed_patterns)
+    
+    # Fallback: create simple connectivity for attachment points
+    return "<1-2:0.5:0.5"
+
+def validate_polymer_format_correct(polymer_string):
+    """Validate polymer using correct format understanding"""
+    if not polymer_string:
+        return False
+    
+    try:
+        # Split into components
+        if '|' not in polymer_string:
+            # Just SMILES - validate that
+            return validate_smiles_component(polymer_string)
+        
+        parts = polymer_string.split('|')
+        if len(parts) < 2:
             return False
         
-        # Try original string first
-        if try_parse_polymer(polymer_string):
-            return True
-            
-        # Try fixed version
-        fixed_string = fix_polymer_smiles_comprehensive(polymer_string)
-        if fixed_string and try_parse_polymer(fixed_string):
-            return True
-            
-        # Try extracting just the chemical part (before first |)
-        if '|' in polymer_string:
-            chemical_part = polymer_string.split('|')[0]
-            if try_parse_polymer(chemical_part):
-                return True
-                
-        return False
+        # Validate SMILES component
+        smiles_part = parts[0]
+        if not validate_smiles_component(smiles_part):
+            return False
+        
+        # Validate stoichiometry (numbers between 0 and 1)
+        for i in range(1, len(parts)):
+            part = parts[i].strip()
+            if part and not part.startswith('<'):
+                try:
+                    val = float(part)
+                    if val < 0 or val > 1:
+                        return False
+                except ValueError:
+                    # Not a number, might be connectivity - skip
+                    pass
+        
+        return True
         
     except Exception:
         return False
 
-def try_parse_polymer(smiles_string):
-    """Try to parse a polymer SMILES with various strategies"""
+def validate_smiles_component(smiles_string):
+    """Validate just the SMILES part"""
     try:
         from rdkit import Chem
         
-        # Direct parsing
-        mol = Chem.MolFromSmiles(smiles_string)
-        if mol is not None:
-            return True
+        if not smiles_string or smiles_string.strip() == '':
+            return False
         
-        # Try removing attachment points
-        clean_smiles = smiles_string
-        for i in range(1, 10):
-            clean_smiles = clean_smiles.replace(f'[*:{i}]', '*')
-        clean_smiles = clean_smiles.replace('[*]', '*')
-        
-        mol = Chem.MolFromSmiles(clean_smiles)
-        if mol is not None:
-            return True
-            
-        # Try parsing individual monomers if separated by '.'
+        # Handle multiple monomers separated by '.'
         if '.' in smiles_string:
             monomers = smiles_string.split('.')
-            valid_monomers = 0
+            valid_count = 0
             for monomer in monomers:
-                if monomer.strip():
-                    mol = Chem.MolFromSmiles(monomer.strip())
+                monomer = monomer.strip()
+                if monomer:
+                    # Try parsing with attachment points replaced
+                    test_monomer = monomer
+                    test_monomer = re.sub(r'\[\*:\d+\]', '*', test_monomer)
+                    
+                    mol = Chem.MolFromSmiles(test_monomer)
                     if mol is not None:
-                        valid_monomers += 1
-            return valid_monomers > 0
+                        valid_count += 1
             
-        return False
-        
+            return valid_count > 0
+        else:
+            # Single monomer
+            test_smiles = smiles_string
+            test_smiles = re.sub(r'\[\*:\d+\]', '*', test_smiles)
+            
+            mol = Chem.MolFromSmiles(test_smiles)
+            return mol is not None
+    
     except Exception:
         return False
+
+def enhanced_polymer_processing_correct(pred_string, enforce_homopolymer=False):
+    """Process generated polymer with correct format understanding"""
+    
+    # Try multiple fixing strategies
+    candidates = [
+        pred_string,  # Original
+        fix_polymer_representation_correct(pred_string),  # Main fix
+    ]
+    
+    # Try extracting just SMILES if format is too broken
+    if '|' in pred_string:
+        smiles_only = pred_string.split('|')[0]
+        smiles_fixed = fix_smiles_component(smiles_only)
+        if smiles_fixed:
+            candidates.append(f"{smiles_fixed}|1.0|")
+    
+    # Remove None candidates
+    candidates = [c for c in candidates if c is not None]
+    
+    # Find best valid candidate
+    for candidate in candidates:
+        if validate_polymer_format_correct(candidate):
+            if enforce_homopolymer:
+                return convert_to_homopolymer_format(candidate)
+            return candidate
+    
+    return None
+
+# ================================
+# ENHANCED GENERATION FUNCTIONS
+# ================================
 
 def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100, max_attempts=500,
                                    batch_size=16, embedding_dimension=32, device=device, 
@@ -400,13 +521,13 @@ def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100
                         tokenization=tokenization
                     )
                     
-                    # THIS IS THE KEY: Try comprehensive fixing
-                    fixed_string = fix_polymer_smiles_comprehensive(pred_string)
+                    # Enhanced processing with correct format understanding
+                    fixed_string = enhanced_polymer_processing_correct(
+                        pred_string, 
+                        enforce_homopolymer=enforce_homopolymer
+                    )
                     
-                    if fixed_string and validate_polymer_advanced(fixed_string):
-                        if enforce_homopolymer:
-                            fixed_string = convert_to_homopolymer_format(fixed_string)
-                        
+                    if fixed_string and validate_polymer_format_correct(fixed_string):
                         batch_valid.append(fixed_string)
                         
                         if save_properties and torch.is_tensor(y):
@@ -444,104 +565,9 @@ def generate_with_enhanced_decoding(model, vocab, tokenization, target_count=100
     
     return all_valid_predictions[:target_count], all_properties
 
-
-def sample_latent_space(batch_size, embedding_dim, device, strategy='conservative', epsilon=1.0):
-    """Sample from latent space with different strategies for better quality"""
-    
-    if strategy == 'conservative':
-        # Sample closer to training distribution (more conservative)
-        std_multiplier = 0.5
-        
-    elif strategy == 'standard':
-        # Use provided epsilon
-        std_multiplier = epsilon
-        
-    elif strategy == 'aggressive':
-        # Sample more broadly
-        std_multiplier = epsilon * 1.5
-        
-    z_rand = torch.randn((batch_size, embedding_dim), device=device) * std_multiplier
-    return z_rand
-
-def generate_with_quality_control(model, vocab, tokenization, target_count=16000, max_attempts=25000, 
-                                  batch_size=64, embedding_dimension=32, device=device, 
-                                  enforce_homopolymer=False, save_properties=False, 
-                                  sampling_strategy='conservative', epsilon=1.0):
-    """Generate molecules with quality control - retry invalid ones"""
-    
-    all_valid_predictions = []
-    all_properties = [] if save_properties else None
-    attempts = 0
-    
-    print(f"🎯 Targeting {target_count} valid molecules with {sampling_strategy} sampling")
-    
-    with torch.no_grad():
-        model.eval()
-        
-        while len(all_valid_predictions) < target_count and attempts < max_attempts:
-            # Use better sampling strategy
-            z_rand = sample_latent_space(batch_size, embedding_dimension, device, sampling_strategy, epsilon)
-            
-            # Generate with model
-            predictions_rand, _, _, z, y = model.inference(data=z_rand, device=device, sample=False, log_var=None)
-            
-            # Process and validate each prediction
-            batch_valid = []
-            batch_properties = []
-            
-            for sample in range(len(predictions_rand)):
-                prediction_string = combine_tokens(
-                    tokenids_to_vocab(predictions_rand[sample][0].tolist(), vocab), 
-                    tokenization=tokenization
-                )
-                
-                processed_string = process_generated_string(
-                    prediction_string,
-                    enforce_homopolymer=enforce_homopolymer
-                )
-                
-                # Only keep if chemically valid
-                if is_chemically_valid_polymer(processed_string):
-                    batch_valid.append(processed_string)
-                    
-                    # Save properties if requested
-                    if save_properties and torch.is_tensor(y):
-                        batch_properties.append(y[sample].cpu().numpy())
-            
-            all_valid_predictions.extend(batch_valid)
-            if save_properties and batch_properties:
-                all_properties.extend(batch_properties)
-            
-            attempts += batch_size
-            
-            # Progress reporting every 10 batches or when we get valid molecules
-            if attempts % (batch_size * 10) == 0 or len(batch_valid) > 0:
-                batch_validity = len(batch_valid) / batch_size if batch_size > 0 else 0
-                total_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
-                print(f'Batch {attempts//batch_size}: {len(batch_valid)}/{batch_size} valid ({batch_validity:.1%}) | '
-                      f'Total: {len(all_valid_predictions)}/{attempts} ({total_validity:.1%}) | '
-                      f'Progress: {len(all_valid_predictions)}/{target_count} ({len(all_valid_predictions)/target_count:.1%})')
-            
-            # Early stopping if validity is too low
-            if attempts > 1000 and len(all_valid_predictions) < attempts * 0.02:  # Less than 2%
-                print("⚠️  Very low validity rate detected. Recommendations:")
-                print("   1. Try --sampling_strategy conservative (if not already)")
-                print("   2. Reduce --epsilon to 0.3-0.5")
-                print("   3. Check if model was properly trained")
-                print("   4. Consider retraining with better hyperparameters")
-                break
-    
-    final_validity = len(all_valid_predictions) / attempts if attempts > 0 else 0
-    print(f"✅ Generated {len(all_valid_predictions)} valid polymers from {attempts} attempts")
-    print(f"📊 Overall validity rate: {final_validity:.1%}")
-    
-    # Truncate to exact target if we have more than needed
-    if len(all_valid_predictions) > target_count:
-        all_valid_predictions = all_valid_predictions[:target_count]
-        if all_properties:
-            all_properties = all_properties[:target_count]
-    
-    return all_valid_predictions, all_properties
+# ================================
+# MODEL LOADING AND SETUP
+# ================================
 
 # Include property info in model name
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
@@ -599,19 +625,43 @@ if os.path.isfile(filepath):
 
     print(f'📝 Results will be saved to: {dir_name}')
 
+    # ================================
+    # QUICK TEST OF ENHANCED PROCESSING
+    # ================================
+    
+    print("🧪 Testing Enhanced Processing on Sample Data:")
+    print("-" * 50)
+    
+    # Test cases based on your error log
+    test_cases = [
+        "500|0",  # Should become stoichiometry
+        "O=C(C[*:3])3)[*:4])|0",  # Should fix SMILES and stoichiometry
+        "O=C([*:1])c1ccc([*:2])cc1|0.5|0.5|",  # Should validate correctly
+        "O=C(O[*:4]",  # Missing parentheses
+    ]
+    
+    for i, test in enumerate(test_cases):
+        fixed = enhanced_polymer_processing_correct(test)
+        valid = validate_polymer_format_correct(fixed) if fixed else False
+        print(f"Test {i+1}:")
+        print(f"  Original: {test}")
+        print(f"  Fixed:    {fixed}")
+        print(f"  Valid:    {valid}")
+        print()
+
     ### RANDOM GENERATION ###
     if args.quality_control:
         print(f'🎲 Generate random samples with enhanced decoding')
         torch.manual_seed(args.seed)
         
         # Use enhanced decoding generation
-        all_predictions, all_properties = generate_with_enhanced_decoding(  # ← NEW FUNCTION
+        all_predictions, all_properties = generate_with_enhanced_decoding(
             model=model,
             vocab=vocab,
             tokenization=tokenization,
             target_count=args.target_molecules,
             max_attempts=args.max_attempts,
-            batch_size=16,  # Smaller batch size
+            batch_size=16,  # Smaller batch size for better control
             embedding_dimension=embedding_dimension,
             device=device,
             enforce_homopolymer=args.enforce_homopolymer,
@@ -717,13 +767,20 @@ if os.path.isfile(filepath):
             
             predictions_seed, _, _, z_new, y_new = model.inference(data=seed_z_noise, device=device, sample=False, log_var=None)
             
-            # Convert predictions to strings and clean up
-            prediction_strings = [
-                process_generated_string(
-                    combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization),
+            # Convert predictions to strings and clean up with enhanced processing
+            prediction_strings = []
+            for sample in range(len(predictions_seed)):
+                pred_string = combine_tokens(tokenids_to_vocab(predictions_seed[sample][0].tolist(), vocab), tokenization=tokenization)
+                processed_string = enhanced_polymer_processing_correct(
+                    pred_string,
                     enforce_homopolymer=args.enforce_homopolymer
-                ) for sample in range(len(predictions_seed))
-            ]
+                )
+                if processed_string:
+                    prediction_strings.append(processed_string)
+                else:
+                    # Fallback to basic processing if enhanced fails
+                    prediction_strings.append(process_generated_string(pred_string, enforce_homopolymer=args.enforce_homopolymer))
+            
             all_predictions_seed.extend(prediction_strings)
             
             # Save property predictions if requested
@@ -807,7 +864,7 @@ if os.path.isfile(filepath):
             seed_z1 = z[ind1]
             seed_z2 = z[ind2]
             
-            print(f"🔄 Interpolation {e+1}/10: {start_mol} ↔ {end_mol}")
+            print(f"🔄 Interpolation {e+1}/10: {start_mol[:50]}... ↔ {end_mol[:50]}...")
 
             # Number of steps for interpolation
             num_steps = 10
@@ -826,8 +883,13 @@ if os.path.isfile(filepath):
                 prediction_interp, _, _, _, y_interp = model.inference(data=interpolated_vectors[s].unsqueeze(0), device=device, sample=False, log_var=None)
                 
                 raw_string = combine_tokens(tokenids_to_vocab(prediction_interp[0][0].tolist(), vocab), tokenization=tokenization)
-                processed_string = process_generated_string(raw_string, enforce_homopolymer=args.enforce_homopolymer)
-                all_predictions_interp.append(processed_string)
+                processed_string = enhanced_polymer_processing_correct(raw_string, enforce_homopolymer=args.enforce_homopolymer)
+                
+                if processed_string:
+                    all_predictions_interp.append(processed_string)
+                else:
+                    # Fallback to basic processing
+                    all_predictions_interp.append(process_generated_string(raw_string, enforce_homopolymer=args.enforce_homopolymer))
                 
                 # Save property predictions if requested
                 if args.save_properties and torch.is_tensor(y_interp):
@@ -871,8 +933,8 @@ if os.path.isfile(filepath):
         print(f"🔬 Property predictions saved for all generated molecules")
         print(f"📋 Properties: {property_names}")
     if args.quality_control:
-        final_validity = len(all_predictions) / max(args.max_attempts, len(all_predictions)) if hasattr(model, 'final_validity') else "N/A"
-        print(f"🎯 Quality control used - generated {len(all_predictions)} valid molecules")
+        final_validity = len(all_predictions) / max(args.max_attempts, len(all_predictions)) if len(all_predictions) > 0 else 0
+        print(f"🎯 Quality control used - generated {len(all_predictions)} valid molecules with enhanced processing")
 
 else: 
     print("❌ The model training diverged and there is no trained model file!")

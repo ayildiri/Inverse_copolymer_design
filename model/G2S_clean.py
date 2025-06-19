@@ -235,7 +235,10 @@ class SequenceDecoder(nn.Module):
         
         self.ndim= model_config['embedding_dim']
         self.config = model_config
-        self.max_n=256 #TODO: this should not be hardcoded
+        
+        # 🔧 FIX: Increase max length for complete polymer format generation
+        self.max_n = 512  # Changed from 256 to accommodate stoichiometry + connectivity
+        
         self.vocab = vocab
         self.inv_vocab = {v: k for k, v in vocab.items()}
         self.beam_size = 1
@@ -305,7 +308,7 @@ class SequenceDecoder(nn.Module):
 
     def validate_length(self, current_length):
         """Check if sequence length is within reasonable bounds"""
-        MAX_POLYMER_LENGTH = 300
+        MAX_POLYMER_LENGTH = 500  # Increased for complete format
         return current_length < MAX_POLYMER_LENGTH
 
     def is_valid_next_token(self, current_smiles_tokens, next_token_id):
@@ -380,6 +383,35 @@ class SequenceDecoder(nn.Module):
         return filtered_log_probs
     # 🔥 END OPTIMIZED VALIDATION METHODS
 
+    def check_sequence_completeness(self, tokens):
+        """Check if generated sequence has complete polymer format"""
+        try:
+            # Convert tokens to string
+            if isinstance(tokens, torch.Tensor):
+                tokens = tokens.tolist()
+            
+            token_strings = []
+            for t in tokens:
+                if isinstance(t, torch.Tensor):
+                    t = t.item()
+                token_str = self.inv_vocab.get(t, '')
+                if token_str not in ['_SOS', '_PAD', '_UNK']:
+                    token_strings.append(token_str)
+            
+            sequence = ''.join(token_strings)
+            
+            # Check for completeness markers
+            has_pipe = '|' in sequence
+            has_numbers = any(c.isdigit() or c == '.' for c in sequence)
+            pipe_count = sequence.count('|')
+            
+            # For complete format, we need at least SMILES|stoichiometry
+            # More complete would have SMILES|stoich1|stoich2|connectivity
+            return has_pipe and has_numbers and pipe_count >= 2
+            
+        except Exception:
+            return False
+
     def forward(self, graph_batch, z, loss_weights=None):
         """Forward pass of decoder
 
@@ -434,7 +466,6 @@ class SequenceDecoder(nn.Module):
         accs = accs * mask
         acc = accs.sum() / mask.sum()
 
-
         return recon_loss, acc, predictions, target
     
 
@@ -474,11 +505,16 @@ class SequenceDecoder(nn.Module):
             beam_size=5,
             start=self.vocab["_SOS"], # can be either bos or eos token
             batch_size=z.size(0),
-            min_length=1,
+            
+            # 🔧 FIX: Increase min_length to force longer generation
+            min_length=150,        # Changed from 1 to force complete format generation
             n_best=1,
             stepwise_penalty=None,
             ratio=0.0,
-            max_length=self.max_n,
+            
+            # 🔧 FIX: Use the increased max_length 
+            max_length=self.max_n,  # Now 512 instead of 256
+            
             block_ngram_repeat=0,
             exclusion_tokens=set(),
             return_attention=False,
@@ -537,9 +573,24 @@ class SequenceDecoder(nn.Module):
             
             any_finished = decode_strategy.is_finished.any()
             if any_finished:
+                # 🔧 FIX: Check sequence completeness before allowing early stopping
+                complete_sequences = 0
+                try:
+                    for i, seq in enumerate(decode_strategy.alive_seq):
+                        if self.check_sequence_completeness(seq):
+                            complete_sequences += 1
+                except:
+                    complete_sequences = 0  # If checking fails, don't allow early stopping
+                
                 decode_strategy.update_finished()
-                if decode_strategy.done:
+                
+                # Only stop if we have complete sequences AND normal stopping conditions
+                if decode_strategy.done and (complete_sequences > 0 or step > 400):
                     break
+                elif step > 500:  # Safety valve - don't generate forever
+                    break
+            elif step > 500:  # Safety valve
+                break
 
             select_indices = decode_strategy.select_indices
 

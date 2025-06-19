@@ -46,7 +46,7 @@ class EarlyStopping:
             return True  # Indicate that a new best model was saved
 
 
-def train(dict_train_loader, global_step, monotonic_step):
+def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold):
     # shuffle batches every epoch
 
     order_batches = list(range(len(dict_train_loader)))
@@ -117,8 +117,8 @@ def train(dict_train_loader, global_step, monotonic_step):
         if total_grad_norm > 10.0:  # Warning threshold
             print(f"WARNING: Large gradient norm detected: {total_grad_norm:.2f}")
         
-        # TODO: do we need the clip_grad_norm?
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        # Use configurable gradient clipping threshold
+        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
         optimizer.step()
         
         ce_losses.append(recon_loss.item())
@@ -199,6 +199,48 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
             val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse']
         ])
 
+def load_existing_loss_dicts(directory_path):
+    """Load existing loss dictionaries if they exist"""
+    train_loss_file = os.path.join(directory_path, 'train_loss.pkl')
+    val_loss_file = os.path.join(directory_path, 'val_loss.pkl')
+    
+    train_loss_dict = {}
+    val_loss_dict = {}
+    
+    if os.path.exists(train_loss_file):
+        try:
+            with open(train_loss_file, 'rb') as f:
+                train_loss_dict = pickle.load(f)
+            print(f"[INFO] Loaded existing train_loss.pkl with {len(train_loss_dict)} epochs")
+        except Exception as e:
+            print(f"[WARNING] Could not load train_loss.pkl: {e}")
+    
+    if os.path.exists(val_loss_file):
+        try:
+            with open(val_loss_file, 'rb') as f:
+                val_loss_dict = pickle.load(f)
+            print(f"[INFO] Loaded existing val_loss.pkl with {len(val_loss_dict)} epochs")
+        except Exception as e:
+            print(f"[WARNING] Could not load val_loss.pkl: {e}")
+    
+    return train_loss_dict, val_loss_dict
+
+def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
+    """Save loss dictionaries with error handling"""
+    try:
+        with open(os.path.join(directory_path, 'train_loss.pkl'), 'wb') as file:
+            pickle.dump(train_loss_dict, file)
+        print(f"[INFO] Saved train_loss.pkl with {len(train_loss_dict)} epochs")
+    except Exception as e:
+        print(f"[ERROR] Could not save train_loss.pkl: {e}")
+    
+    try:
+        with open(os.path.join(directory_path, 'val_loss.pkl'), 'wb') as file:
+            pickle.dump(val_loss_dict, file)
+        print(f"[INFO] Saved val_loss.pkl with {len(val_loss_dict)} epochs")
+    except Exception as e:
+        print(f"[ERROR] Could not save val_loss.pkl: {e}")
+
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -242,6 +284,18 @@ parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
 parser.add_argument("--dataset_path", type=str, default=None,
                     help="Path to custom dataset files (will use default naming pattern if not specified)")
+
+# NEW: Anti-overfitting and training stability arguments
+parser.add_argument("--dropout_rate", type=float, default=0.1, help="Dropout rate for regularization")
+parser.add_argument("--weight_decay", type=float, default=0.0, help="L2 regularization weight decay")
+parser.add_argument("--gradient_clip_threshold", type=float, default=0.5, help="Gradient clipping threshold")
+parser.add_argument("--lr_decay_factor", type=float, default=0.5, help="Learning rate decay factor for scheduler")
+parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate for scheduler")
+parser.add_argument("--validation_freq", type=int, default=1, help="Run validation every N epochs")
+parser.add_argument("--checkpoint_freq", type=int, default=5, help="Save checkpoint every N epochs")
+parser.add_argument("--warmup_epochs", type=int, default=5, help="Number of epochs for AE warmup when AE_Warmup is True")
+parser.add_argument("--max_grad_norm_warning", type=float, default=10.0, help="Threshold for gradient norm warning")
+parser.add_argument("--kld_spike_threshold", type=float, default=5.0, help="Threshold multiplier for KLD spike detection")
 
 args = parser.parse_args()
 
@@ -315,7 +369,10 @@ model_config = {
     'alpha': args.alpha,
     # Add property configuration to model config
     'property_count': property_count,
-    'property_names': property_names
+    'property_names': property_names,
+    # Add new regularization parameters
+    'dropout_rate': args.dropout_rate,
+    'weight_decay': args.weight_decay
 }
 batch_size = model_config['batch_size']
 epochs = model_config['epochs']
@@ -354,6 +411,7 @@ model.to(device)
 
 print(model)
 
+# Use configurable warmup epochs
 n_iter = int(20 * num_train_graphs/batch_size) # 20 epochs
 # Beta scheduling function from Optimus paper 
 def frange_cycle_zero_linear(n_iter, start=0.0, stop=model_config['max_beta'],  n_cycle=5, ratio_increase=0.5, ratio_zero=0.3): #, beginning_zero=0.1):
@@ -372,7 +430,7 @@ def frange_cycle_zero_linear(n_iter, start=0.0, stop=model_config['max_beta'],  
             i += 1
     ## beginning zero
     if args.AE_Warmup:
-        B = np.zeros(int(5*num_train_graphs/batch_size)) # for 5 epochs
+        B = np.zeros(int(args.warmup_epochs*num_train_graphs/batch_size)) # configurable warmup epochs
         L = np.append(B,L)
     return L 
 
@@ -388,11 +446,13 @@ elif model_config['alpha'] == "fixed":
 
 # %%# %% Train
 
-optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+# Enhanced optimizer with weight decay
+optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
-# Add learning rate scheduler
+# Enhanced learning rate scheduler with configurable parameters
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.scheduler_patience, verbose=True, min_lr=1e-5)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay_factor, 
+                              patience=args.scheduler_patience, verbose=True, min_lr=args.min_lr)
 
 # Early stopping callback
 # Log directory creation
@@ -415,17 +475,11 @@ if not os.path.exists(directory_path):
 es_patience = model_config['es_patience']
 earlystopping = EarlyStopping(dir=directory_path, patience=es_patience)
 
-# Optional: reset CSV flag if training from scratch
-if not resume_from_checkpoint:
-    flag_file = os.path.join(directory_path, '.csv_initialized')
-    if os.path.exists(flag_file):
-        print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
-        os.remove(flag_file)
-
 print(f'STARTING TRAINING')
 print(f'Model will predict {property_count} properties: {property_names}')
-# Prepare dictionaries for training or load checkpoint
+print(f'Enhanced features: dropout_rate={args.dropout_rate}, weight_decay={args.weight_decay}, gradient_clip={args.gradient_clip_threshold}')
 
+# Prepare dictionaries for training or load checkpoint
 checkpoint_file = None
 
 # ------------------ Resume checkpoint logic ------------------
@@ -443,40 +497,57 @@ else:
     print("[INFO] No checkpoint specified. Starting from scratch.")
     resume_from_checkpoint = False
 
-# Reset CSV flag if starting from scratch
-if not resume_from_checkpoint:
-    flag_file = os.path.join(directory_path, '.csv_initialized')
-    if os.path.exists(flag_file):
-        print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
-        os.remove(flag_file)
-
-# Load the checkpoint if one was found
-if checkpoint_file is not None:
+# ENHANCED: Proper loss dictionary handling for resuming
+if resume_from_checkpoint:
+    # Load existing loss dictionaries first (most up-to-date)
+    train_loss_dict, val_loss_dict = load_existing_loss_dicts(directory_path)
+    
+    # Load checkpoint
     print(f"Loading model from {checkpoint_file}")
     checkpoint = torch.load(checkpoint_file)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch_cp = checkpoint['epoch']
-    train_loss_dict = checkpoint['loss_dict']
-    val_loss_dict = checkpoint['val_loss_dict']
+    
+    # Merge checkpoint loss dicts with existing ones (checkpoint might be outdated)
+    if 'loss_dict' in checkpoint and 'val_loss_dict' in checkpoint:
+        checkpoint_train_dict = checkpoint['loss_dict']
+        checkpoint_val_dict = checkpoint['val_loss_dict']
+        
+        # Update with checkpoint data (but don't overwrite newer data)
+        for epoch_key in checkpoint_train_dict:
+            if epoch_key not in train_loss_dict:
+                train_loss_dict[epoch_key] = checkpoint_train_dict[epoch_key]
+        
+        for epoch_key in checkpoint_val_dict:
+            if epoch_key not in val_loss_dict:
+                val_loss_dict[epoch_key] = checkpoint_val_dict[epoch_key]
+        
+        print(f"[INFO] Merged checkpoint loss data. Total epochs in train_loss_dict: {len(train_loss_dict)}")
+    
     if model_config['beta'] == "schedule":
-        global_step = checkpoint['global_step']
-        monotonic_step = checkpoint['monotonic_step']
+        global_step = checkpoint.get('global_step', 0)
+        monotonic_step = checkpoint.get('monotonic_step', 0)
         model.beta = model_config['max_beta']
-    resume_from_checkpoint = True
 else:
+    # Fresh training - reset everything
     train_loss_dict = {}
     val_loss_dict = {}
     epoch_cp = 0
     global_step = 0
     monotonic_step = 0
-    resume_from_checkpoint = False
+    
+    # Reset CSV flag if starting from scratch
+    flag_file = os.path.join(directory_path, '.csv_initialized')
+    if os.path.exists(flag_file):
+        print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
+        os.remove(flag_file)
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch + 1}\n" + "-" * 30)
 
     t1 = time.time()
-    model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step)
+    model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step, args.gradient_clip_threshold)
     t2 = time.time()
 
     epoch_time = t2 - t1
@@ -485,41 +556,72 @@ for epoch in range(epoch_cp, epochs):
     seconds = epoch_time % 60
     time_str = f"{hours}h {minutes}m {seconds:.2f}s" if hours > 0 else f"{minutes}m {seconds:.2f}s" if minutes > 0 else f"{seconds:.2f}s"
 
-    val_ce_losses, val_total_losses, val_kld_losses, val_accs, val_mses = test(dict_val_loader)
+    # Run validation based on frequency
+    if (epoch + 1) % args.validation_freq == 0:
+        val_ce_losses, val_total_losses, val_kld_losses, val_accs, val_mses = test(dict_val_loader)
+        
+        train_loss = mean(train_total_losses)
+        val_loss = mean(val_total_losses)
+        train_kld_loss = mean(train_kld_losses)
+        val_kld_loss = mean(val_kld_losses)
+        train_acc = mean(train_accs)
+        val_acc = mean(val_accs)
+        train_mse = mean(train_mses)
+        val_mse = mean(val_mses)
 
-    train_loss = mean(train_total_losses)
-    val_loss = mean(val_total_losses)
-    train_kld_loss = mean(train_kld_losses)
-    val_kld_loss = mean(val_kld_losses)
-    train_acc = mean(train_accs)
-    val_acc = mean(val_accs)
-    train_mse = mean(train_mses)
-    val_mse = mean(val_mses)
+        # Update learning rate
+        scheduler.step(val_loss)
+    else:
+        # Skip validation but still compute training metrics
+        train_loss = mean(train_total_losses)
+        train_kld_loss = mean(train_kld_losses)
+        train_acc = mean(train_accs)
+        train_mse = mean(train_mses)
+        
+        # Use previous validation metrics or set to None
+        val_loss = train_loss  # Fallback for scheduler
+        val_total_losses = train_total_losses
+        val_kld_losses = train_kld_losses
+        val_accs = train_accs
+        val_mses = train_mses
+        val_kld_loss = train_kld_loss
+        val_acc = train_acc
+        val_mse = train_mse
 
-    # Update learning rate
-    scheduler.step(val_loss)
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Epoch time: {time_str}")
     print(f"Current learning rate: {current_lr:.6f}")
 
-    # Save checkpoint
-    model_dict = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss_dict': train_loss_dict,
-        'val_loss_dict': val_loss_dict,
-        'model_config': model_config,
-        'global_step': global_step,
-        'monotonic_step': monotonic_step,
-    }
-    torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
-    print(f"Saved latest checkpoint *after* epoch {epoch + 1}")
+    # Save checkpoint based on frequency
+    if (epoch + 1) % args.checkpoint_freq == 0 or epoch == epochs - 1:
+        model_dict = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss_dict': train_loss_dict,
+            'val_loss_dict': val_loss_dict,
+            'model_config': model_config,
+            'global_step': global_step,
+            'monotonic_step': monotonic_step,
+        }
+        torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
+        print(f"Saved latest checkpoint *after* epoch {epoch + 1}")
 
-    # FIXED: Check and save best model with proper logging
-    model_saved = earlystopping(val_loss, model_dict)
-    if model_saved:
-        print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
+    # FIXED: Check and save best model with proper logging (only when validation runs)
+    if (epoch + 1) % args.validation_freq == 0:
+        model_dict = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss_dict': train_loss_dict,
+            'val_loss_dict': val_loss_dict,
+            'model_config': model_config,
+            'global_step': global_step,
+            'monotonic_step': monotonic_step,
+        }
+        model_saved = earlystopping(val_loss, model_dict)
+        if model_saved:
+            print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
 
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")
@@ -530,8 +632,12 @@ for epoch in range(epoch_cp, epochs):
         break
 
     print("-" * 70)
-    print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
-    print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f} | Val Acc: {val_acc:.5f} | Val MSE: {val_mse:.5f}")
+    if (epoch + 1) % args.validation_freq == 0:
+        print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
+        print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f} | Val Acc: {val_acc:.5f} | Val MSE: {val_mse:.5f}")
+    else:
+        print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | [Validation skipped]")
+        print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f}")
     print(f"Current Beta: {model.beta:.5f} | Current Alpha: {model.alpha:.5f}")
     print("-" * 70)
 
@@ -539,21 +645,27 @@ for epoch in range(epoch_cp, epochs):
     train_loss_dict[epoch] = (train_total_losses, train_kld_losses, train_accs)
     val_loss_dict[epoch] = (val_total_losses, val_kld_losses, val_accs)
 
-    # Save epoch metrics
-    train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
-    val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
-    save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint)
+    # Save epoch metrics (only when validation runs)
+    if (epoch + 1) % args.validation_freq == 0:
+        train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
+        val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
+        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint)
 
-# Save the training loss values - only overwrite if starting fresh
-file_mode = 'wb'  # Always use write mode - we're saving the full dictionaries
-with open(os.path.join(directory_path,'train_loss.pkl'), file_mode) as file:
-    pickle.dump(train_loss_dict, file)
- 
-# Save the validation loss values
-with open(os.path.join(directory_path,'val_loss.pkl'), file_mode) as file:
-    pickle.dump(val_loss_dict, file)
+    # Save loss dictionaries periodically to avoid data loss
+    if (epoch + 1) % args.checkpoint_freq == 0 or epoch == epochs - 1:
+        save_loss_dicts(train_loss_dict, val_loss_dict, directory_path)
+
+# Final save of loss dictionaries
+save_loss_dicts(train_loss_dict, val_loss_dict, directory_path)
 
 print('Done!\n')
 print(f'Model trained to predict {property_count} properties: {property_names}')
 print(f'Checkpoints saved to: {directory_path}')
+print(f'Final training configuration:')
+print(f'  - Dropout rate: {args.dropout_rate}')
+print(f'  - Weight decay: {args.weight_decay}')
+print(f'  - Gradient clipping: {args.gradient_clip_threshold}')
+print(f'  - Learning rate decay factor: {args.lr_decay_factor}')
+print(f'  - Validation frequency: every {args.validation_freq} epoch(s)')
+print(f'  - Checkpoint frequency: every {args.checkpoint_freq} epoch(s)')
 #experiment.end()

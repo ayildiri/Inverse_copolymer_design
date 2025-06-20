@@ -587,26 +587,6 @@ class SequenceDecoder(nn.Module):
                                              length_penalty="avg",
                                              coverage_penalty="none")
 
-        """ decode_strategy = GreedySearch(
-            pad=self.vocab["_PAD"],
-            bos=self.vocab["_SOS"],
-            eos=self.vocab["_EOS"],
-            unk=self.vocab['_UNK'],
-            ban_unk_token = True, # TODO: Check if true 
-            global_scorer=global_scorer,
-            keep_topp=1,
-            beam_size=5,
-            start=self.vocab["_SOS"], # can be either bos or eos token
-            batch_size=z.size(0),
-            min_length=1,
-            max_length=self.max_n,
-            block_ngram_repeat=0,
-            exclusion_tokens=set(),
-            return_attention=False,
-            sampling_temp=0.0,
-            keep_topk=1
-        ) """
-        
         decode_strategy = BeamSearch(
             pad=self.vocab["_PAD"],
             bos=self.vocab["_SOS"],

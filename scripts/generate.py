@@ -125,9 +125,6 @@ def clean_output(polymer_string):
         return ""
     return polymer_string.rstrip('_')
 
-# Add this import at the top of your generate.py file if not already present:
-# import numpy as np
-
 def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
     """Safely process tokens with comprehensive error handling"""
     try:

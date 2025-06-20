@@ -278,6 +278,43 @@ class SequenceDecoder(nn.Module):
                 reduction="none"
             )
 
+    def validate_smiles_during_generation(self, token_ids, vocab):
+        """Validate SMILES during generation to prevent chemical invalidity"""
+        try:
+            # Convert tokens to string
+            tokens = tokenids_to_vocab(token_ids, vocab)
+            if not tokens:
+                return True
+                
+            current_smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+            
+            # Extract SMILES part (before first |)
+            if '|' in current_smiles:
+                smiles_part = current_smiles.split('|')[0]
+            else:
+                smiles_part = current_smiles
+            
+            # Check parentheses balance
+            open_count = smiles_part.count('(')
+            close_count = smiles_part.count(')')
+            
+            # Check ring closure balance
+            ring_numbers = {}
+            for char in smiles_part:
+                if char.isdigit() and char != '0':
+                    ring_numbers[char] = ring_numbers.get(char, 0) + 1
+            
+            # Check if we're in a valid state
+            parentheses_balanced = open_count >= close_count  # Allow temporary imbalance during generation
+            rings_properly_paired = all(count <= 2 for count in ring_numbers.values())
+            
+            return parentheses_balanced and rings_properly_paired
+            
+        except Exception:
+            return True  # If validation fails, allow the token
+
+
+    
     def get_current_tokens_from_predictions(self, predictions):
         """Extract current tokens from beam search predictions"""
         tokens = []
@@ -321,7 +358,7 @@ class SequenceDecoder(nn.Module):
             return False
 
     def is_valid_next_token(self, current_tokens, next_token_id):
-        """Prevent malformed connectivity patterns during generation"""
+        """Enhanced validation to prevent chemical invalidity"""
         try:
             next_token_str = self.inv_vocab.get(next_token_id, '')
             
@@ -330,35 +367,62 @@ class SequenceDecoder(nn.Module):
                 return True
             
             # Allow early generation
-            if len(current_tokens) < 15:
+            if len(current_tokens) < 10:
                 return True
             
             current_sequence = ''.join(current_tokens)
             test_sequence = current_sequence + next_token_str
             
-            # 🔥 CRITICAL: Prevent malformed connectivity patterns
-            # Look for pattern like ":0.500:0.500:0.500" (too many repeated values)
+            # 🔧 ENHANCED: Strict parentheses checking
+            open_parens = test_sequence.count('(')
+            close_parens = test_sequence.count(')')
+            
+            # Never allow more closing than opening parentheses
+            if close_parens > open_parens:
+                return False
+            
+            # 🔧 ENHANCED: Ring closure validation
+            ring_numbers = {}
+            for char in test_sequence:
+                if char.isdigit() and char != '0':  # Ring numbers 1-9
+                    ring_numbers[char] = ring_numbers.get(char, 0) + 1
+            
+            # Each ring number should appear exactly twice (open and close)
+            for ring_num, count in ring_numbers.items():
+                if count > 2:  # More than 2 occurrences is invalid
+                    return False
+            
+            # 🔧 ENHANCED: Bracket validation for attachment points
+            open_brackets = test_sequence.count('[')
+            close_brackets = test_sequence.count(']')
+            
+            # Never allow more closing than opening brackets
+            if close_brackets > open_brackets:
+                return False
+            
+            # Don't allow too many unclosed brackets
+            if open_brackets - close_brackets > 3:
+                return False
+            
+            # 🔧 ENHANCED: G2S connectivity patterns (keep existing logic)
             if ':' in next_token_str and current_sequence.endswith(':0.500'):
-                # Don't allow more than 2 probability values after a connectivity pattern
                 last_pattern_start = current_sequence.rfind('<')
                 if last_pattern_start != -1:
                     pattern_fragment = current_sequence[last_pattern_start:]
                     colon_count = pattern_fragment.count(':')
-                    if colon_count >= 2:  # Already have X-Y:prob1:prob2, don't add more
+                    if colon_count >= 2:
                         return False
             
-            # Prevent repeated connectivity patterns without proper structure
-            if next_token_str == '<' and current_sequence.endswith('<'):
-                return False
-                
-            # Prevent malformed attachment points
-            if next_token_str == '[' and current_sequence.count('[') > current_sequence.count(']') + 5:
+            # 🔧 ENHANCED: Length checking
+            if len(test_sequence) > 300:  # Reasonable SMILES length limit
                 return False
             
-            # Length check
-            if len(test_sequence) > 400:
-                return False
-                
+            # 🔧 ENHANCED: Valid chemistry atoms only
+            if next_token_str and len(next_token_str) == 1:
+                valid_atoms = set('CHONPSFIBrcnofpsibl()[]1234567890=#-+*.:')
+                if next_token_str not in valid_atoms:
+                    return False
+            
             return True
             
         except Exception:
@@ -449,8 +513,22 @@ class SequenceDecoder(nn.Module):
         accs = (predictions == target).float()
         accs = accs * mask
         acc = accs.sum() / mask.sum()
+    
+        # 🔧 ENHANCED: Add chemical validity penalty during training
+        validity_penalty = 0
+        for sample in range(len(predictions)):
+            try:
+                sample_tokens = predictions[sample].cpu().numpy()
+                if not self.validate_smiles_during_generation(sample_tokens, self.vocab):
+                    validity_penalty += 0.05  # Small penalty for invalid chemistry
+            except Exception:
+                pass
+        
+        # Add to reconstruction loss
+        if validity_penalty > 0:
+            recon_loss = recon_loss + validity_penalty
 
-        return recon_loss, acc, predictions, target
+    return recon_loss, acc, predictions, target
     
 
     def inference(self, z):
@@ -484,22 +562,21 @@ class SequenceDecoder(nn.Module):
             bos=self.vocab["_SOS"],
             eos=self.vocab["_EOS"],
             unk=self.vocab['_UNK'],
-            ban_unk_token = True, # TODO: Check if true 
+            ban_unk_token=True,
             global_scorer=global_scorer,
-            beam_size=2,  # Smaller beam for better diversity
-            start=self.vocab["_SOS"], # can be either bos or eos token
+            beam_size=1,  # 🔧 STRICTER: Use greedy search for better validity
+            start=self.vocab["_SOS"],
             batch_size=z.size(0),
             
-            # 🔧 BALANCED: Force complete generation without being too restrictive
-            min_length=120,        # Reduced but still ensures connectivity
+            # 🔧 ENHANCED: Better parameters for chemical validity
+            min_length=50,   # 🔧 STRICTER: Ensure minimum meaningful length
             n_best=1,
             stepwise_penalty=None,
             ratio=0.0,
             
-            # 🔧 FIX: Use the increased max_length 
-            max_length=self.max_n,  # Now 512 instead of 256
+            max_length=self.max_n,
             
-            block_ngram_repeat=0,
+            block_ngram_repeat=3,  # 🔧 ENHANCED: Prevent repetitive patterns
             exclusion_tokens=set(),
             return_attention=False,
         )

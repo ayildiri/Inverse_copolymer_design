@@ -125,20 +125,46 @@ def clean_output(polymer_string):
         return ""
     return polymer_string.rstrip('_')
 
+# Add this import at the top of your generate.py file if not already present:
+# import numpy as np
+
 def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
     """Safely process tokens with comprehensive error handling"""
     try:
-        if not token_ids:
+        # Handle empty check for different data types
+        if token_ids is None:
             return ""
+        
+        # Check for empty arrays/tensors properly
+        if hasattr(token_ids, '__len__'):
+            if len(token_ids) == 0:
+                return ""
+        elif isinstance(token_ids, torch.Tensor):
+            if token_ids.numel() == 0:
+                return ""
+        elif isinstance(token_ids, np.ndarray):
+            if token_ids.size == 0:
+                return ""
         
         # Handle different input types
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
+        elif isinstance(token_ids, np.ndarray):
+            token_ids = token_ids.tolist()
+        
+        # Ensure token_ids is a list
+        if not isinstance(token_ids, list):
+            try:
+                token_ids = list(token_ids)
+            except Exception:
+                return ""
         
         # Convert token IDs to vocabulary with error handling
         tokens = []
         for token_id in token_ids:
             if isinstance(token_id, torch.Tensor):
+                token_id = token_id.item()
+            elif isinstance(token_id, np.ndarray):
                 token_id = token_id.item()
             
             # Skip invalid token IDs
@@ -829,14 +855,31 @@ if os.path.isfile(filepath):
                 seed_z = z[ind]
                 seed_z = seed_z.unsqueeze(0).repeat(32, 1)  # Reduced batch size
                 
-                # Get seed string safely
+                # Get seed string safely with enhanced error handling
                 try:
-                    seed_tokens = data.tgt_token_ids[ind]
-                    seed_string = safe_token_processing(seed_tokens, vocab, tokenization)
-                    print(f"🌱 Seed molecule: {seed_string}")
+                    # Extract seed tokens with proper indexing
+                    if hasattr(data, 'tgt_token_ids') and hasattr(data.tgt_token_ids, '__getitem__'):
+                        seed_tokens = data.tgt_token_ids[ind]
+                        
+                        # Additional safety check for the extracted tokens
+                        if seed_tokens is not None:
+                            seed_string = safe_token_processing(seed_tokens, vocab, tokenization)
+                            if seed_string:
+                                print(f"🌱 Seed molecule: {seed_string}")
+                            else:
+                                print("🌱 Seed molecule: [Could not decode tokens]")
+                                seed_string = "[Could not decode tokens]"
+                        else:
+                            print("🌱 Seed molecule: [No tokens found]")
+                            seed_string = "[No tokens found]"
+                    else:
+                        print("🌱 Seed molecule: [No token data available]")
+                        seed_string = "[No token data available]"
+                        
                 except Exception as e:
                     print(f"Warning: Could not extract seed string: {e}")
-                    seed_string = "Unknown"
+                    print("🌱 Seed molecule: [Extraction failed]")
+                    seed_string = "[Extraction failed]"
                 
                 # Generate variations
                 for r in range(8):

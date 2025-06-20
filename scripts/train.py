@@ -241,24 +241,6 @@ def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
     except Exception as e:
         print(f"[ERROR] Could not save val_loss.pkl: {e}")
 
-# In your train.py file, find this section (around line 180-200):
-
-def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
-    """Save loss dictionaries with error handling"""
-    try:
-        with open(os.path.join(directory_path, 'train_loss.pkl'), 'wb') as file:
-            pickle.dump(train_loss_dict, file)
-        print(f"[INFO] Saved train_loss.pkl with {len(train_loss_dict)} epochs")
-    except Exception as e:
-        print(f"[ERROR] Could not save train_loss.pkl: {e}")
-    
-    try:
-        with open(os.path.join(directory_path, 'val_loss.pkl'), 'wb') as file:
-            pickle.dump(val_loss_dict, file)
-        print(f"[INFO] Saved val_loss.pkl with {len(val_loss_dict)} epochs")
-    except Exception as e:
-        print(f"[ERROR] Could not save val_loss.pkl: {e}")
-
 def validate_generation_quality(model, vocab, device, num_samples=100):
     """Test generation quality during training"""
     model.eval()

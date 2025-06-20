@@ -495,6 +495,17 @@ class SequenceDecoder(nn.Module):
                 continue
         
         return filtered_log_probs
+    
+    def reset_decoder_cache(self):
+        """Reset the decoder cache to prevent size mismatches"""
+        if hasattr(self.Decoder, 'state') and 'cache' in self.Decoder.state:
+            self.Decoder.state['cache'] = None
+        
+        # Reset layer caches in transformer layers
+        if hasattr(self.Decoder, 'transformer_layers'):
+            for layer in self.Decoder.transformer_layers:
+                if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'layer_cache'):
+                    layer.self_attn.layer_cache = (False, {'keys': None, 'values': None})
 
     def forward(self, graph_batch, z, loss_weights=None):
         """Forward pass of decoder
@@ -506,6 +517,9 @@ class SequenceDecoder(nn.Module):
         Returns:
             Tensor, Tensor: Reconstruction loss and accuracy
         """
+        # CRITICAL FIX: Reset decoder cache at the beginning of each forward pass
+        self.reset_decoder_cache()
+        
         z_length = z.size(1)
         src_lengths = torch.ones(z.size(0), device=z.device).long()*z_length # long tensor [b,]
         # prepare target
@@ -582,6 +596,9 @@ class SequenceDecoder(nn.Module):
     
 
     def inference(self, z):
+        # CRITICAL FIX: Reset decoder cache before inference
+        self.reset_decoder_cache()
+        
         global_scorer = GNMTGlobalScorer(alpha=0.5,
                                              beta=0.0,
                                              length_penalty="avg",
@@ -720,7 +737,8 @@ class SequenceDecoder(nn.Module):
                     lambda state, dim: state.index_select(dim, select_indices)
                 )
         
-        #self.reset_layer_cache() # reset layers
+        # Reset layer cache after inference
+        self.reset_layer_cache()
 
         return decode_strategy.predictions
         
@@ -740,8 +758,9 @@ class SequenceDecoder(nn.Module):
     def reset_layer_cache(self):
         """After inference, layer cache needs to be reset"""
         for layer in self.Decoder.transformer_layers:
-            layer.self_attn.layer_cache = (False, {'keys': torch.tensor([]),
-                                    'values': torch.tensor([])})
+            layer.self_attn.layer_cache = (False, {'keys': None,
+                                    'values': None})
+                                    
     def conditional_position_weights(self, batch):
         batch=batch.cpu()
         weights = np.ones_like(batch)    

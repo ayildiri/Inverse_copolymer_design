@@ -7,6 +7,13 @@ import torch
 from torch.distributions import Bernoulli, Categorical
 from torch_geometric.nn import MessagePassing, global_mean_pool
 
+try:
+    from rdkit import Chem
+    RDKIT_AVAILABLE = True
+except ImportError:
+    RDKIT_AVAILABLE = False
+    print("Warning: RDKit not available, chemical validation disabled")
+
 import torch.nn as nn
 from torch.nn import Sequential, ReLU, Linear
 import torch.nn.functional as F
@@ -313,8 +320,37 @@ class SequenceDecoder(nn.Module):
         except Exception:
             return True  # If validation fails, allow the token
 
-
     
+    def validate_basic_chemistry(self, smiles_string):
+        """Validate basic chemical structure of SMILES using RDKit"""
+        try:
+            if not RDKIT_AVAILABLE:
+                return True  # Skip validation if RDKit not available
+                
+            if not smiles_string or len(smiles_string) < 5:
+                return False
+            
+            # Extract SMILES part (before first |)
+            smiles_part = smiles_string.split('|')[0] if '|' in smiles_string else smiles_string
+            
+            # Check chemical validity with RDKit
+            if '.' in smiles_part:
+                # Handle copolymer (multiple monomers)
+                monomers = smiles_part.split('.')
+                for monomer in monomers:
+                    if monomer.strip():
+                        mol = Chem.MolFromSmiles(monomer)
+                        if mol is None:
+                            return False
+                return True
+            else:
+                # Single monomer
+                mol = Chem.MolFromSmiles(smiles_part)
+                return mol is not None
+                
+        except Exception:
+            return False
+            
     def get_current_tokens_from_predictions(self, predictions):
         """Extract current tokens from beam search predictions"""
         tokens = []
@@ -514,21 +550,35 @@ class SequenceDecoder(nn.Module):
         accs = accs * mask
         acc = accs.sum() / mask.sum()
     
-        # 🔧 ENHANCED: Add chemical validity penalty during training
+        # 🔧 ENHANCED: Add chemical validity penalty during training with RDKit
         validity_penalty = 0
-        for sample in range(len(predictions)):
-            try:
-                sample_tokens = predictions[sample].cpu().numpy()
-                if not self.validate_smiles_during_generation(sample_tokens, self.vocab):
-                    validity_penalty += 0.05  # Small penalty for invalid chemistry
-            except Exception:
-                pass
+        if RDKIT_AVAILABLE:
+            for sample in range(len(predictions)):
+                try:
+                    sample_tokens = predictions[sample].cpu().numpy()
+                    # Convert to SMILES and validate with RDKit
+                    tokens = tokenids_to_vocab(sample_tokens, self.vocab)
+                    smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
+                    
+                    if not self.validate_basic_chemistry(smiles_string):
+                        validity_penalty += 0.1  # Stronger penalty for RDKit-invalid chemistry
+                except Exception:
+                    validity_penalty += 0.05  # Penalty for unparseable sequences
+        else:
+            # Fallback to basic validation if RDKit not available
+            for sample in range(len(predictions)):
+                try:
+                    sample_tokens = predictions[sample].cpu().numpy()
+                    if not self.validate_smiles_during_generation(sample_tokens, self.vocab):
+                        validity_penalty += 0.05
+                except Exception:
+                    pass
         
         # Add to reconstruction loss
         if validity_penalty > 0:
             recon_loss = recon_loss + validity_penalty
 
-    return recon_loss, acc, predictions, target
+        return recon_loss, acc, predictions, target
     
 
     def inference(self, z):
@@ -626,6 +676,26 @@ class SequenceDecoder(nn.Module):
                     log_probs = self.filter_invalid_tokens_optimized(decode_strategy, log_probs)
                 except Exception as e:
                     # If validation fails, continue without filtering
+                    pass
+
+            # 🔧 CRITICAL: Add chemical validity checking during beam search
+            if step > 10 and step % 5 == 0 and RDKIT_AVAILABLE:  # Check every 5 steps after step 10
+                try:
+                    # Get current sequences and validate them
+                    if hasattr(decode_strategy, 'alive_seq'):
+                        current_sequences = decode_strategy.alive_seq
+                        for i, seq in enumerate(current_sequences):
+                            # Convert to SMILES and check
+                            tokens = self.get_current_tokens_from_predictions(seq)
+                            current_smiles = ''.join(tokens)
+                            
+                            # If invalid chemistry detected, penalize this path
+                            if not self.validate_basic_chemistry(current_smiles):
+                                # Force this beam to end or heavily penalize
+                                if hasattr(decode_strategy, 'alive_scores') and i < len(decode_strategy.alive_scores):
+                                    decode_strategy.alive_scores[i] -= 5.0  # Heavy penalty
+                                    
+                except Exception:
                     pass
 
             decode_strategy.advance(log_probs, attn)

@@ -241,6 +241,61 @@ def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
     except Exception as e:
         print(f"[ERROR] Could not save val_loss.pkl: {e}")
 
+# In your train.py file, find this section (around line 180-200):
+
+def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
+    """Save loss dictionaries with error handling"""
+    try:
+        with open(os.path.join(directory_path, 'train_loss.pkl'), 'wb') as file:
+            pickle.dump(train_loss_dict, file)
+        print(f"[INFO] Saved train_loss.pkl with {len(train_loss_dict)} epochs")
+    except Exception as e:
+        print(f"[ERROR] Could not save train_loss.pkl: {e}")
+    
+    try:
+        with open(os.path.join(directory_path, 'val_loss.pkl'), 'wb') as file:
+            pickle.dump(val_loss_dict, file)
+        print(f"[INFO] Saved val_loss.pkl with {len(val_loss_dict)} epochs")
+    except Exception as e:
+        print(f"[ERROR] Could not save val_loss.pkl: {e}")
+
+def validate_generation_quality(model, vocab, device, num_samples=100):
+    """Test generation quality during training"""
+    model.eval()
+    valid_count = 0
+    
+    with torch.no_grad():
+        z_random = torch.randn(num_samples, model.embedding_dim, device=device)
+        try:
+            predictions = model.Decoder.inference(z_random)
+            for i in range(len(predictions)):
+                if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
+                    pred_tokens = predictions[i][0]
+                    if hasattr(pred_tokens, 'tolist'):
+                        pred_tokens = pred_tokens.tolist()
+                    
+                    tokens = []
+                    for token_id in pred_tokens:
+                        if isinstance(token_id, torch.Tensor):
+                            token_id = token_id.item()
+                        token = tokenids_to_vocab([token_id], vocab)
+                        if token and token[0] not in ['_PAD', '_SOS', '_EOS', '_UNK']:
+                            tokens.extend(token)
+                    
+                    if tokens:
+                        smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
+                        if (len(smiles_string) > 10 and 
+                            smiles_string.count('(') == smiles_string.count(')') and
+                            smiles_string.count('[') == smiles_string.count(']')):
+                            valid_count += 1
+        except Exception as e:
+            print(f"Generation validation failed: {e}")
+            return 0.0
+    
+    validity_rate = valid_count / num_samples
+    model.train()
+    return validity_rate
+
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -623,6 +678,19 @@ for epoch in range(epoch_cp, epochs):
         if model_saved:
             print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
 
+    # 🔥 ADD THIS SECTION 🔥
+    generation_validity = 0.0
+    if (epoch + 1) % 10 == 0:  # Check every 10 epochs
+        print(f"🧪 Testing generation quality...")
+        generation_validity = validate_generation_quality(model, vocab, device, num_samples=50)
+        print(f"📊 Generation validity: {generation_validity:.1%}")
+        
+        if generation_validity > 0.8 and val_acc > 0.7:
+            print(f"🎯 Excellent generation quality achieved! Validity: {generation_validity:.1%}, Acc: {val_acc:.3f}")
+        elif generation_validity < 0.1 and epoch > 30:
+            print(f"⚠️  Poor generation quality detected. Consider adjusting hyperparameters.")
+    # 🔥 END OF NEW SECTION 🔥
+
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")
         break
@@ -635,6 +703,8 @@ for epoch in range(epoch_cp, epochs):
     if (epoch + 1) % args.validation_freq == 0:
         print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
         print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f} | Val Acc: {val_acc:.5f} | Val MSE: {val_mse:.5f}")
+        if generation_validity > 0:
+            print(f"🧪 Generation Validity: {generation_validity:.1%}")
     else:
         print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | [Validation skipped]")
         print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f}")

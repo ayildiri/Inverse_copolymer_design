@@ -9,6 +9,9 @@ from torch_geometric.nn import MessagePassing, global_mean_pool
 
 try:
     from rdkit import Chem
+    from rdkit import RDLogger
+    # Suppress RDKit warnings/errors
+    RDLogger.DisableLog('rdApp.*')
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False

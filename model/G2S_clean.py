@@ -518,6 +518,30 @@ class SequenceDecoder(nn.Module):
                         # Fallback to CPU if no parameters found
                         empty_tensor = torch.empty(0)
                         layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+    
+    def clear_decoder_state_completely(self):
+        """Completely clear decoder state during training to prevent graph retention"""
+        # Clear main decoder state
+        if hasattr(self.Decoder, 'state'):
+            self.Decoder.state.clear()
+        
+        # Reset all layer caches
+        if hasattr(self.Decoder, 'transformer_layers'):
+            for layer in self.Decoder.transformer_layers:
+                if hasattr(layer, 'self_attn'):
+                    # Clear attention cache
+                    if hasattr(layer.self_attn, 'layer_cache'):
+                        layer.self_attn.layer_cache = None
+                    # Clear any stored attention weights
+                    if hasattr(layer.self_attn, 'attn'):
+                        layer.self_attn.attn = None
+                
+                if hasattr(layer, 'context_attn'):
+                    # Clear context attention cache
+                    if hasattr(layer.context_attn, 'layer_cache'):
+                        layer.context_attn.layer_cache = None
+                    if hasattr(layer.context_attn, 'attn'):
+                        layer.context_attn.attn = None
 
     def forward(self, graph_batch, z, loss_weights=None):
         """Forward pass of decoder
@@ -529,8 +553,12 @@ class SequenceDecoder(nn.Module):
         Returns:
             Tensor, Tensor: Reconstruction loss and accuracy
         """
-        # CRITICAL FIX: Reset decoder cache at the beginning of each forward pass
+        # CRITICAL FIX: Reset decoder cache and detach from any previous graphs
         self.reset_decoder_cache()
+        
+        # Ensure z is detached from any previous computational graphs during training
+        if self.training:
+            z = z.detach().requires_grad_(True)
         
         z_length = z.size(1)
         src_lengths = torch.ones(z.size(0), device=z.device).long()*z_length # long tensor [b,]
@@ -540,12 +568,11 @@ class SequenceDecoder(nn.Module):
         target = m(target)
         target = target.unsqueeze(-1) 
 
-        #TODO Check if this actually works, what happens if target size (max length tokens) is smaller than z hidden dim? --> no padding?
-        # Why the padding? doesn't really need it?
-        #m = torch.nn.ZeroPad2d((0, target.size(1) - z.size(1), 0, 0))
-        #z_padded = m(z)
-        #padded_memory_bank = z_padded.unsqueeze(1).transpose(1,2)
-        # Alternativ
+        # CRITICAL FIX: Clear any existing decoder state to prevent graph retention
+        if hasattr(self.Decoder, 'state'):
+            self.Decoder.state.clear()
+        self.Decoder.state = {}
+        
         enc_output = z.unsqueeze(1)
         self.Decoder.state["src"] = enc_output
     
@@ -878,6 +905,10 @@ class G2S_VAE(nn.Module):
         return eps.mul(std).add_(mean)   
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+        # CRITICAL FIX: Clear decoder state at start of forward pass during training
+        if self.training:
+            self.Decoder.clear_decoder_state_completely()
+            
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
@@ -976,6 +1007,10 @@ class G2S_VAE_PPguided(nn.Module):
         return eps.mul(std).add_(mean)   
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+        # CRITICAL FIX: Clear decoder state at start of forward pass during training
+        if self.training:
+            self.Decoder.clear_decoder_state_completely()
+            
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
@@ -1111,6 +1146,10 @@ class G2S_VAE_PPguideddisabled(nn.Module):
             return mean        
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+        # CRITICAL FIX: Clear decoder state at start of forward pass during training
+        if self.training:
+            self.Decoder.clear_decoder_state_completely()
+            
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:

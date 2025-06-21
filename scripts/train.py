@@ -121,6 +121,13 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
         optimizer.step()
         
+        # NEW: Add gradient monitoring here
+        if i % 50 == 0:  # Only print every 50 batches to avoid spam
+            print("\n📊 Decoder gradient norms:")
+            for name, param in model.named_parameters():
+                if param.grad is not None and 'decoder' in name:
+                    print(f"{name}: grad_norm={param.grad.norm().item():.6f}")
+        
         ce_losses.append(recon_loss.item())
         total_losses.append(loss.item())
         kld_losses.append(kl_loss.item())
@@ -682,18 +689,24 @@ for epoch in range(epoch_cp, epochs):
         if model_saved:
             print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
 
-    # 🔥 ADD THIS SECTION 🔥
     generation_validity = 0.0
     if (epoch + 1) % 10 == 0:  # Check every 10 epochs
         print(f"🧪 Testing generation quality...")
         generation_validity = validate_generation_quality(model, vocab, device, num_samples=50)
         print(f"📊 Generation validity: {generation_validity:.1%}")
         
+        # NEW: Add format-specific validation here
+        print("🧪 Detailed format analysis:")
+        # Check if model is learning each component
+        sample_predictions = model.inference(torch.randn(10, model.embedding_dim, device=device), device)[0]
+        for i, pred in enumerate(sample_predictions[:3]):
+            pred_str = safe_token_processing(pred[0], vocab, "RT_tokenized")
+            print(f"  Sample {i}: {pred_str[:100]}...")  # First 100 chars
+        
         if generation_validity > 0.8 and val_acc > 0.7:
             print(f"🎯 Excellent generation quality achieved! Validity: {generation_validity:.1%}, Acc: {val_acc:.3f}")
         elif generation_validity < 0.1 and epoch > 30:
             print(f"⚠️  Poor generation quality detected. Consider adjusting hyperparameters.")
-    # 🔥 END OF NEW SECTION 🔥
 
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")

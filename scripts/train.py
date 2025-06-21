@@ -18,6 +18,63 @@ import argparse
 import numpy as np
 import csv
 
+def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
+    """Safely process tokens with comprehensive error handling"""
+    try:
+        # Handle empty check for different data types
+        if token_ids is None:
+            return ""
+        
+        # Check for empty arrays/tensors properly
+        if hasattr(token_ids, '__len__'):
+            if len(token_ids) == 0:
+                return ""
+        elif isinstance(token_ids, torch.Tensor):
+            if token_ids.numel() == 0:
+                return ""
+        elif isinstance(token_ids, np.ndarray):
+            if token_ids.size == 0:
+                return ""
+        
+        # Handle different input types
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+        elif isinstance(token_ids, np.ndarray):
+            token_ids = token_ids.tolist()
+        
+        # Ensure token_ids is a list
+        if not isinstance(token_ids, list):
+            try:
+                token_ids = list(token_ids)
+            except Exception:
+                return ""
+        
+        # Convert token IDs to vocabulary with error handling
+        tokens = []
+        for token_id in token_ids:
+            if isinstance(token_id, torch.Tensor):
+                token_id = token_id.item()
+            elif isinstance(token_id, np.ndarray):
+                token_id = token_id.item()
+            
+            # Skip invalid token IDs
+            if not isinstance(token_id, (int, float)) or token_id < 0:
+                continue
+                
+            token = tokenids_to_vocab([token_id], vocab)
+            if token and token[0] not in ['_PAD', '_SOS', '_EOS', '_UNK']:
+                tokens.extend(token)
+        
+        # Combine tokens safely
+        if not tokens:
+            return ""
+            
+        return combine_tokens(tokens, tokenization=tokenization)
+        
+    except Exception as e:
+        print(f"Warning: Token processing failed: {e}")
+        return ""
+        
 class EarlyStopping:
     def __init__(self, dir, patience):
         self.patience = patience

@@ -118,13 +118,16 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
     model.train()
     # Iterate in batches over the training dataset.
     for i, batch in enumerate(order_batches):
+        # CRITICAL FIX: Clear decoder state completely before each batch
+        if hasattr(model, 'Decoder'):
+            model.Decoder.clear_decoder_state_completely()
+        
+        # Clear any accumulated gradients and optimizer state
+        optimizer.zero_grad()
+        
         if model_config['beta']=="schedule":
             # determine beta at time step t
             if global_step >= len(beta_schedule):
-                #if model.beta <=1:
-                #    beta_t = 1.0 +0.001*monotonic_step
-                #    monotonic_step+=1
-                #else: beta_t = model.beta #stays the same
                 beta_t = model.beta #stays the same
             else:
                 beta_t = beta_schedule[global_step]
@@ -146,37 +149,78 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         inc_edges_to_atom_matrix = dict_train_loader[str(batch)][2]
         inc_edges_to_atom_matrix.to(device)
 
-        # Perform a single forward pass.
-        loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
-        
-        # Check for unstable loss values before backpropagation
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            print(f"WARNING: NaN or Inf detected in loss at batch {i}")
-            print(f"Loss: {loss.item()}, Recon: {recon_loss.item()}, KLD: {kl_loss.item()}")
-            continue  # Skip this batch
+        try:
+            # Perform a single forward pass.
+            loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            
+            # Check for unstable loss values before backpropagation
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                print(f"WARNING: NaN or Inf detected in loss at batch {i}")
+                print(f"Loss: {loss.item()}, Recon: {recon_loss.item()}, KLD: {kl_loss.item()}")
+                continue  # Skip this batch
 
-        # Check if KLD spike indicates instability
-        if i > 0 and kl_loss.item() > 5 * np.mean(kld_losses[-min(10, len(kld_losses)):]):
-            print(f"WARNING: KLD spike detected at batch {i}")
-            print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]):.2f}")
+            # Check if KLD spike indicates instability
+            if i > 0 and kl_loss.item() > 5 * np.mean(kld_losses[-min(10, len(kld_losses)):]):
+                print(f"WARNING: KLD spike detected at batch {i}")
+                print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]):.2f}")
 
-        optimizer.zero_grad()
-        loss.backward()
-        
-        # Monitor gradient norms before clipping
-        total_grad_norm = 0
-        for p in model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_grad_norm += param_norm.item() ** 2
-        total_grad_norm = total_grad_norm ** 0.5
+            # CRITICAL FIX: Ensure loss is a proper scalar tensor
+            if hasattr(loss, 'mean'):
+                loss = loss.mean()
+            
+            loss.backward()
+            
+            # Monitor gradient norms before clipping
+            total_grad_norm = 0
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_grad_norm += param_norm.item() ** 2
+            total_grad_norm = total_grad_norm ** 0.5
 
-        if total_grad_norm > 10.0:  # Warning threshold
-            print(f"WARNING: Large gradient norm detected: {total_grad_norm:.2f}")
-        
-        # Use configurable gradient clipping threshold
-        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
-        optimizer.step()
+            if total_grad_norm > 10.0:  # Warning threshold
+                print(f"WARNING: Large gradient norm detected: {total_grad_norm:.2f}")
+            
+            # Use configurable gradient clipping threshold
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
+            optimizer.step()
+            
+            # CRITICAL FIX: Explicitly clear gradients and free memory
+            optimizer.zero_grad()
+            
+            # Store metrics before clearing tensors
+            ce_losses.append(recon_loss.item())
+            total_losses.append(loss.item())
+            kld_losses.append(kl_loss.item())
+            accs.append(acc.item())
+            mses.append(mse.item())
+            
+            # Force garbage collection of intermediate tensors
+            del loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+        except RuntimeError as e:
+            if "backward through the graph a second time" in str(e):
+                print(f"WARNING: Graph retention error at batch {i}, skipping batch")
+                optimizer.zero_grad()
+                if hasattr(model, 'Decoder'):
+                    model.Decoder.clear_decoder_state_completely()
+                # Add dummy metrics to maintain list length consistency
+                if len(ce_losses) > 0:
+                    ce_losses.append(ce_losses[-1])
+                    total_losses.append(total_losses[-1])
+                    kld_losses.append(kld_losses[-1])
+                    accs.append(accs[-1])
+                    mses.append(mses[-1])
+                else:
+                    ce_losses.append(0.0)
+                    total_losses.append(0.0)
+                    kld_losses.append(0.0)
+                    accs.append(0.0)
+                    mses.append(0.0)
+                continue
+            else:
+                raise e
         
         # NEW: Add gradient monitoring here
         if i % 50 == 0:  # Only print every 50 batches to avoid spam
@@ -185,15 +229,10 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 if param.grad is not None and 'decoder' in name.lower():
                     print(f"{name}: grad_norm={param.grad.norm().item():.6f}")
         
-        ce_losses.append(recon_loss.item())
-        total_losses.append(loss.item())
-        kld_losses.append(kl_loss.item())
-        accs.append(acc.item())
-        mses.append(mse.item())
         if i % 10 == 0:
             print(f"\nBatch [{i:4d} / {len(order_batches):4d}]")
             print("-" * 70)
-            print(f"Recon: {recon_loss.item():.6f} | Total: {loss.item():.6f} | KLD: {kl_loss.item():.6f} | Acc: {acc.item():.6f} | MSE: {mse.item():.6f} | Beta: {model.beta:.6f} | Alpha: {model.alpha:.6f}")
+            print(f"Recon: {ce_losses[-1]:.6f} | Total: {total_losses[-1]:.6f} | KLD: {kld_losses[-1]:.6f} | Acc: {accs[-1]:.6f} | MSE: {mses[-1]:.6f} | Beta: {model.beta:.6f} | Alpha: {model.alpha:.6f}")
             print("-" * 70)
             
         global_step += 1

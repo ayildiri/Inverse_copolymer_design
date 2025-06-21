@@ -122,7 +122,7 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         if hasattr(model, 'Decoder'):
             model.Decoder.clear_decoder_state_completely()
         
-        # Clear any accumulated gradients and optimizer state
+        # Clear any accumulated gradients
         optimizer.zero_grad()
         
         if model_config['beta']=="schedule":
@@ -164,10 +164,6 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print(f"WARNING: KLD spike detected at batch {i}")
                 print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]):.2f}")
 
-            # CRITICAL FIX: Ensure loss is a proper scalar tensor
-            if hasattr(loss, 'mean'):
-                loss = loss.mean()
-            
             loss.backward()
             
             # Monitor gradient norms before clipping
@@ -185,27 +181,17 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
             optimizer.step()
             
-            # CRITICAL FIX: Explicitly clear gradients and free memory
-            optimizer.zero_grad()
-            
-            # Store metrics before clearing tensors
+            # Store metrics
             ce_losses.append(recon_loss.item())
             total_losses.append(loss.item())
             kld_losses.append(kl_loss.item())
             accs.append(acc.item())
             mses.append(mse.item())
             
-            # Force garbage collection of intermediate tensors
-            del loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
         except RuntimeError as e:
             if "backward through the graph a second time" in str(e):
                 print(f"WARNING: Graph retention error at batch {i}, skipping batch")
-                optimizer.zero_grad()
-                if hasattr(model, 'Decoder'):
-                    model.Decoder.clear_decoder_state_completely()
-                # Add dummy metrics to maintain list length consistency
+                # Add dummy metrics to maintain consistency
                 if len(ce_losses) > 0:
                     ce_losses.append(ce_losses[-1])
                     total_losses.append(total_losses[-1])

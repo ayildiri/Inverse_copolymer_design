@@ -249,32 +249,54 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
     with torch.no_grad():
         z_random = torch.randn(num_samples, model.embedding_dim, device=device)
         try:
-            predictions = model.Decoder.inference(z_random)
+            # Fix: Call inference on the full model, not just the decoder
+            result = model.inference(data=z_random, device=device, sample=False, log_var=None)
+            
+            # Handle the return values properly
+            if len(result) >= 4:
+                predictions, _, _, _ = result[:4]
+            else:
+                predictions = result[0] if result else None
+            
+            if predictions is None:
+                print("Warning: No predictions returned from model inference")
+                return 0.0
+            
+            # Process predictions
             for i in range(len(predictions)):
-                if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
-                    pred_tokens = predictions[i][0]
-                    if hasattr(pred_tokens, 'tolist'):
-                        pred_tokens = pred_tokens.tolist()
+                try:
+                    if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
+                        pred_tokens = predictions[i][0]
+                        if hasattr(pred_tokens, 'tolist'):
+                            pred_tokens = pred_tokens.tolist()
+                        
+                        tokens = []
+                        for token_id in pred_tokens:
+                            if isinstance(token_id, torch.Tensor):
+                                token_id = token_id.item()
+                            token = tokenids_to_vocab([token_id], vocab)
+                            if token and token[0] not in ['_PAD', '_SOS', '_EOS', '_UNK']:
+                                tokens.extend(token)
+                        
+                        if tokens:
+                            smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
+                            # Check for basic G2S format validity
+                            if (len(smiles_string) > 10 and 
+                                '|' in smiles_string and  # Must have pipe separators
+                                '[*:' in smiles_string and  # Must have attachment points
+                                smiles_string.count('(') == smiles_string.count(')') and
+                                smiles_string.count('[') == smiles_string.count(']')):
+                                valid_count += 1
+                except Exception as e:
+                    continue
                     
-                    tokens = []
-                    for token_id in pred_tokens:
-                        if isinstance(token_id, torch.Tensor):
-                            token_id = token_id.item()
-                        token = tokenids_to_vocab([token_id], vocab)
-                        if token and token[0] not in ['_PAD', '_SOS', '_EOS', '_UNK']:
-                            tokens.extend(token)
-                    
-                    if tokens:
-                        smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
-                        if (len(smiles_string) > 10 and 
-                            smiles_string.count('(') == smiles_string.count(')') and
-                            smiles_string.count('[') == smiles_string.count(']')):
-                            valid_count += 1
         except Exception as e:
             print(f"Generation validation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return 0.0
     
-    validity_rate = valid_count / num_samples
+    validity_rate = valid_count / num_samples if num_samples > 0 else 0.0
     model.train()
     return validity_rate
 

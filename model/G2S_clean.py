@@ -525,21 +525,35 @@ class SequenceDecoder(nn.Module):
         if hasattr(self.Decoder, 'state'):
             self.Decoder.state.clear()
         
-        # Reset all layer caches
+        # Reset all layer caches with proper structure
         if hasattr(self.Decoder, 'transformer_layers'):
             for layer in self.Decoder.transformer_layers:
                 if hasattr(layer, 'self_attn'):
-                    # Clear attention cache
+                    # Initialize attention cache with proper structure
                     if hasattr(layer.self_attn, 'layer_cache'):
-                        layer.self_attn.layer_cache = None
+                        try:
+                            device = next(iter(layer.parameters())).device
+                            empty_tensor = torch.empty(0, device=device)
+                            layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+                        except (StopIteration, AttributeError):
+                            empty_tensor = torch.empty(0)
+                            layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+                    
                     # Clear any stored attention weights
                     if hasattr(layer.self_attn, 'attn'):
                         layer.self_attn.attn = None
                 
                 if hasattr(layer, 'context_attn'):
-                    # Clear context attention cache
+                    # Initialize context attention cache with proper structure
                     if hasattr(layer.context_attn, 'layer_cache'):
-                        layer.context_attn.layer_cache = None
+                        try:
+                            device = next(iter(layer.parameters())).device
+                            empty_tensor = torch.empty(0, device=device)
+                            layer.context_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+                        except (StopIteration, AttributeError):
+                            empty_tensor = torch.empty(0)
+                            layer.context_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+                    
                     if hasattr(layer.context_attn, 'attn'):
                         layer.context_attn.attn = None
 

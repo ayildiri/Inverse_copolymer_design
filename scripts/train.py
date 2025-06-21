@@ -417,7 +417,7 @@ parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Pa
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
 
 # Add flexible property arguments (same as BO and GA scripts)
-parser.add_argument("--property_names", type=str, nargs='+', default=["EA", "IP"],
+parser.add_argument("--property_names", type=str, nargs='+', default=["bandgap"],
                     help="Names of the properties to train the model to predict")
 parser.add_argument("--property_count", type=int, default=None,
                     help="Number of properties (auto-detected from property_names if not specified)")
@@ -438,16 +438,23 @@ parser.add_argument("--kld_spike_threshold", type=float, default=5.0, help="Thre
 
 args = parser.parse_args()
 
-# Handle property configuration
-property_names = args.property_names
-if args.property_count is not None:
-    property_count = args.property_count
+# Handle property configuration for basic VAE
+if not args.ppguided:
+    # Force no properties for basic VAE
+    property_names = []
+    property_count = 0
+    print(f"Using basic VAE (no property prediction)")
 else:
-    property_count = len(property_names)
-    
-# Validate that property count matches property names
-if len(property_names) != property_count:
-    raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
+    # Use provided properties for PP-guided VAE
+    property_names = args.property_names
+    if args.property_count is not None:
+        property_count = args.property_count
+    else:
+        property_count = len(property_names)
+        
+    # Validate that property count matches property names
+    if len(property_names) != property_count:
+        raise ValueError(f"Number of property names ({len(property_names)}) must match property count ({property_count})")
 
 print(f"Training model to predict {property_count} properties: {property_names}")
 
@@ -543,7 +550,7 @@ if model_config['loss']=="ce":
 if args.ppguided:
     model_type = G2S_VAE_PPguided
 else:
-    model_type = G2S_VAE_PPguideddisabled
+    model_type = G2S_VAE
 
 model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dim,device,model_config, vocab, seed, loss_weights=class_weights, add_latent=add_latent)
 model.to(device)

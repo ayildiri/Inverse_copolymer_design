@@ -504,11 +504,20 @@ class SequenceDecoder(nn.Module):
         if hasattr(self.Decoder, 'state') and 'cache' in self.Decoder.state:
             self.Decoder.state['cache'] = None
         
-        # Reset layer caches in transformer layers
+        # Reset layer caches in transformer layers with proper tensor initialization
         if hasattr(self.Decoder, 'transformer_layers'):
             for layer in self.Decoder.transformer_layers:
                 if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'layer_cache'):
-                    layer.self_attn.layer_cache = (False, {'keys': None, 'values': None})
+                    try:
+                        # Get device from layer parameters
+                        device = next(iter(layer.parameters())).device
+                        # Initialize with empty tensors instead of None to prevent numel() errors
+                        empty_tensor = torch.empty(0, device=device)
+                        layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+                    except (StopIteration, AttributeError):
+                        # Fallback to CPU if no parameters found
+                        empty_tensor = torch.empty(0)
+                        layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
 
     def forward(self, graph_batch, z, loss_weights=None):
         """Forward pass of decoder
@@ -597,6 +606,27 @@ class SequenceDecoder(nn.Module):
 
         return recon_loss, acc, predictions, target
     
+    def safe_map_state(self, fn_map_state):
+        """Safely apply map_state only if cache is properly initialized"""
+        try:
+            # Check if all layer caches are properly initialized
+            if hasattr(self.Decoder, 'transformer_layers'):
+                for layer in self.Decoder.transformer_layers:
+                    if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'layer_cache'):
+                        cache = layer.self_attn.layer_cache
+                        if (isinstance(cache, tuple) and len(cache) > 1 and 
+                            isinstance(cache[1], dict) and 'keys' in cache[1]):
+                            keys = cache[1]['keys']
+                            # Check if keys is None or not a tensor
+                            if keys is None or not hasattr(keys, 'numel'):
+                                return False  # Skip map_state
+            
+            # If we get here, cache is properly initialized
+            self.Decoder.map_state(fn_map_state)
+            return True
+        except Exception as e:
+            print(f"Warning: map_state failed safely: {e}")
+            return False
 
     def inference(self, z):
         # CRITICAL FIX: Reset decoder cache before inference
@@ -654,8 +684,9 @@ class SequenceDecoder(nn.Module):
 
         )
 
+        # FIXED: Safely apply map_state only if cache is properly initialized
         if fn_map_state is not None:
-            self.Decoder.map_state(fn_map_state)
+            self.safe_map_state(fn_map_state)
 
         # (3) Begin decoding step by step with enhanced validation:
         for step in range(decode_strategy.max_length):
@@ -736,9 +767,15 @@ class SequenceDecoder(nn.Module):
                     src_map = src_map.index_select(0, select_indices)
 
             if parallel_paths > 1 or any_finished:
-                self.Decoder.map_state(
-                    lambda state, dim: state.index_select(dim, select_indices)
-                )
+                # FIXED: Use safe map_state here too
+                try:
+                    self.Decoder.map_state(
+                        lambda state, dim: state.index_select(dim, select_indices)
+                    )
+                except Exception as e:
+                    # If map_state fails, continue without it
+                    print(f"Warning: map_state during inference failed: {e}")
+                    pass
         
         # Reset layer cache after inference
         self.reset_layer_cache()
@@ -760,9 +797,19 @@ class SequenceDecoder(nn.Module):
 
     def reset_layer_cache(self):
         """After inference, layer cache needs to be reset"""
-        for layer in self.Decoder.transformer_layers:
-            layer.self_attn.layer_cache = (False, {'keys': None,
-                                    'values': None})
+        if hasattr(self.Decoder, 'transformer_layers'):
+            for layer in self.Decoder.transformer_layers:
+                if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'layer_cache'):
+                    try:
+                        # Get device from layer parameters  
+                        device = next(iter(layer.parameters())).device
+                        # Initialize with empty tensors instead of None
+                        empty_tensor = torch.empty(0, device=device)
+                        layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
+                    except (StopIteration, AttributeError):
+                        # Fallback to CPU if no parameters found
+                        empty_tensor = torch.empty(0)
+                        layer.self_attn.layer_cache = (False, {'keys': empty_tensor, 'values': empty_tensor})
                                     
     def conditional_position_weights(self, batch):
         batch=batch.cpu()

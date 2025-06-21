@@ -706,6 +706,7 @@ class SequenceDecoder(nn.Module):
         # FIXED:
         z_length = 1  # Latent sequence length is always 1
         src_lengths = torch.ones(z.size(0), device=z.device).long()  # All 1s
+        print(f"🔧 DEBUG: z.shape={z.shape}, src_lengths={src_lengths[:5]}")
         enc_output = z.unsqueeze(1)
         self.Decoder.state["src"] = enc_output
         

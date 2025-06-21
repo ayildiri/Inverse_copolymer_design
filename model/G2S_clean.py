@@ -1020,35 +1020,37 @@ class G2S_VAE_PPguided(nn.Module):
             h_G_var = self.lincompress(h_G_var)
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
-
+    
         # Property predictions with flexible number of properties
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]
         pp_hidden = self.dropout(pp_hidden)
         y = self.PP_lin2(pp_hidden) #[b,pp_ffn_hidden] -> [b, property_count]
         
-        # Dynamically handle property targets based on property count
+        # 🔧 FIXED: Dynamically handle property targets based on available properties
         y_true_list = []
+        
+        # Check what properties actually exist in the batch
+        available_properties = []
+        for prop_name in ['y1', 'y2', 'y3', 'y4']:  # Check up to 4 properties
+            if hasattr(batch_list, prop_name):
+                available_properties.append(prop_name)
+        
+        # Build y_true based on available properties
         for i in range(self.property_count):
-            if i == 0:
-                y_prop = torch.unsqueeze(batch_list.y1.float(), 1)
-            elif i == 1:
-                y_prop = torch.unsqueeze(batch_list.y2.float(), 1)
+            if i < len(available_properties):
+                prop_attr = available_properties[i]
+                y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
             else:
-                # For additional properties beyond y1 and y2, check if they exist
-                prop_attr = f'y{i+1}'
-                if hasattr(batch_list, prop_attr):
-                    y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
-                else:
-                    # If property doesn't exist, create NaN tensor
-                    y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
+                # If property doesn't exist, create NaN tensor (will be masked out)
+                y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
             y_true_list.append(y_prop)
         
         y_true = torch.cat(y_true_list, dim=1)
         mse = self.masked_mse(y_true, y)
-
+    
         # decode
         recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
-
+    
         return recon_loss + self.beta*kl_loss + self.alpha*mse, recon_loss, kl_loss, mse, acc, predictions, target, z, y
 
     def masked_mse(self, y_true, y_pred):

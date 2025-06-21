@@ -227,7 +227,9 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         if i % 10 == 0:
             print(f"\nBatch [{i:4d} / {len(order_batches):4d}]")
             print("-" * 70)
-            print(f"Recon: {ce_losses[-1]:.6f} | Total: {total_losses[-1]:.6f} | KLD: {kld_losses[-1]:.6f} | Acc: {accs[-1]:.6f} | MSE: {mses[-1]:.6f} | Beta: {model.beta:.6f} | Alpha: {model.alpha:.6f}")
+            # NEW (FIXED):
+            alpha_str = f"{model.alpha:.6f}" if hasattr(model, 'alpha') else "N/A"
+            print(f"Recon: {ce_losses[-1]:.6f} | Total: {total_losses[-1]:.6f} | KLD: {kld_losses[-1]:.6f} | Acc: {accs[-1]:.6f} | MSE: {mses[-1]:.6f} | Beta: {model.beta:.6f} | Alpha: {alpha_str}")
             print("-" * 70)
             
         global_step += 1
@@ -829,7 +831,8 @@ for epoch in range(epoch_cp, epochs):
     else:
         print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | [Validation skipped]")
         print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f}")
-    print(f"Current Beta: {model.beta:.5f} | Current Alpha: {model.alpha:.5f}")
+    alpha_str = f"{model.alpha:.5f}" if hasattr(model, 'alpha') else "N/A"
+    print(f"Current Beta: {model.beta:.5f} | Current Alpha: {alpha_str}")
     print("-" * 70)
 
     # Store loss dicts

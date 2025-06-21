@@ -150,8 +150,17 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         inc_edges_to_atom_matrix.to(device)
 
         try:
-            # Perform a single forward pass.
-            loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            # FIXED: Handle both basic VAE and PP-guided VAE
+            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+
+            if len(result) == 7:  # Basic G2S_VAE
+                loss, recon_loss, kl_loss, acc, predictions, target, z = result
+                mse = torch.tensor(0.0, device=device)  # Dummy MSE
+                y = torch.tensor(0.0, device=device)    # Dummy property prediction
+            elif len(result) == 9:  # PP-guided VAE
+                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
+            else:
+                raise ValueError(f"Unexpected number of return values from model: {len(result)}")
             
             # Check for unstable loss values before backpropagation
             if torch.isnan(loss).any() or torch.isinf(loss).any():
@@ -246,8 +255,17 @@ def test(dict_loader):
             inc_edges_to_atom_matrix = dict_loader[str(batch)][2]
             inc_edges_to_atom_matrix.to(device)
 
-            # Perform a single forward pass.
-            loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            # FIXED: Handle both basic VAE and PP-guided VAE
+            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+
+            if len(result) == 7:  # Basic G2S_VAE
+                loss, recon_loss, kl_loss, acc, predictions, target, z = result
+                mse = torch.tensor(0.0, device=device)  # Dummy MSE
+                y = torch.tensor(0.0, device=device)    # Dummy property prediction
+            elif len(result) == 9:  # PP-guided VAE
+                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
+            else:
+                raise ValueError(f"Unexpected number of return values from model: {len(result)}")
 
             ce_losses.append(recon_loss.item())
             total_losses.append(loss.item())

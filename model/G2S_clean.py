@@ -567,12 +567,8 @@ class SequenceDecoder(nn.Module):
         Returns:
             Tensor, Tensor: Reconstruction loss and accuracy
         """
-        # CRITICAL FIX: Reset decoder cache and detach from any previous graphs
+        # CRITICAL FIX: Reset decoder cache at the beginning of each forward pass
         self.reset_decoder_cache()
-        
-        # Ensure z is detached from any previous computational graphs during training
-        if self.training:
-            z = z.detach().requires_grad_(True)
         
         z_length = z.size(1)
         src_lengths = torch.ones(z.size(0), device=z.device).long()*z_length # long tensor [b,]
@@ -919,10 +915,6 @@ class G2S_VAE(nn.Module):
         return eps.mul(std).add_(mean)   
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
-        # CRITICAL FIX: Clear decoder state at start of forward pass during training
-        if self.training:
-            self.Decoder.clear_decoder_state_completely()
-            
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
@@ -1021,10 +1013,6 @@ class G2S_VAE_PPguided(nn.Module):
         return eps.mul(std).add_(mean)   
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
-        # CRITICAL FIX: Clear decoder state at start of forward pass during training
-        if self.training:
-            self.Decoder.clear_decoder_state_completely()
-            
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
@@ -1160,10 +1148,6 @@ class G2S_VAE_PPguideddisabled(nn.Module):
             return mean        
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
-        # CRITICAL FIX: Clear decoder state at start of forward pass during training
-        if self.training:
-            self.Decoder.clear_decoder_state_completely()
-            
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:

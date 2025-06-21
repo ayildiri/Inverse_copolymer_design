@@ -182,7 +182,7 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         if i % 50 == 0:  # Only print every 50 batches to avoid spam
             print("\n📊 Decoder gradient norms:")
             for name, param in model.named_parameters():
-                if param.grad is not None and 'decoder' in name:
+                if param.grad is not None and 'decoder' in name.lower():
                     print(f"{name}: grad_norm={param.grad.norm().item():.6f}")
         
         ce_losses.append(recon_loss.item())
@@ -306,20 +306,18 @@ def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
         print(f"[ERROR] Could not save val_loss.pkl: {e}")
 
 def validate_generation_quality(model, vocab, device, num_samples=100):
-    """Test generation quality during training"""
+    """Test generation quality during training with improved error handling"""
     model.eval()
     valid_count = 0
     
     with torch.no_grad():
-        z_random = torch.randn(num_samples, model.embedding_dim, device=device)
         try:
-            # FIX: Reset decoder cache before inference
-            model.Decoder.reset_decoder_cache()
+            z_random = torch.randn(num_samples, model.embedding_dim, device=device)
             
-            # Fix: Call inference on the full model, not just the decoder
+            # Call inference on the full model, not just the decoder
             result = model.inference(data=z_random, device=device, sample=False, log_var=None)
             
-            # Handle the return values properly
+            # Handle the return values properly based on model type
             if len(result) >= 4:
                 predictions, _, _, _ = result[:4]
             else:
@@ -329,38 +327,28 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                 print("Warning: No predictions returned from model inference")
                 return 0.0
             
-            # Process predictions
-            for i in range(len(predictions)):
+            # Process predictions with improved error handling
+            for i in range(min(len(predictions), num_samples)):
                 try:
                     if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
                         pred_tokens = predictions[i][0]
-                        if hasattr(pred_tokens, 'tolist'):
-                            pred_tokens = pred_tokens.tolist()
                         
-                        tokens = []
-                        for token_id in pred_tokens:
-                            if isinstance(token_id, torch.Tensor):
-                                token_id = token_id.item()
-                            token = tokenids_to_vocab([token_id], vocab)
-                            if token and token[0] not in ['_PAD', '_SOS', '_EOS', '_UNK']:
-                                tokens.extend(token)
+                        # Use the safe token processing function
+                        smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
                         
-                        if tokens:
-                            smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
-                            # Check for basic G2S format validity
-                            if (len(smiles_string) > 10 and 
-                                '|' in smiles_string and  # Must have pipe separators
-                                '[*:' in smiles_string and  # Must have attachment points
-                                smiles_string.count('(') == smiles_string.count(')') and
-                                smiles_string.count('[') == smiles_string.count(']')):
-                                valid_count += 1
+                        # Check for basic G2S format validity
+                        if (len(smiles_string) > 10 and 
+                            '|' in smiles_string and  # Must have pipe separators
+                            '[*:' in smiles_string and  # Must have attachment points
+                            smiles_string.count('(') == smiles_string.count(')') and
+                            smiles_string.count('[') == smiles_string.count(']')):
+                            valid_count += 1
                 except Exception as e:
+                    # Skip this sample and continue
                     continue
                     
         except Exception as e:
             print(f"Generation validation failed: {e}")
-            import traceback
-            traceback.print_exc()
             return 0.0
     
     validity_rate = valid_count / num_samples if num_samples > 0 else 0.0
@@ -755,14 +743,19 @@ for epoch in range(epoch_cp, epochs):
         generation_validity = validate_generation_quality(model, vocab, device, num_samples=50)
         print(f"📊 Generation validity: {generation_validity:.1%}")
         
-        # NEW: Add format-specific validation here
+        # FIXED: Improved format-specific validation with better error handling
         print("🧪 Detailed format analysis:")
-        model.Decoder.reset_decoder_cache()
-        # Check if model is learning each component
-        sample_predictions = model.inference(torch.randn(10, model.embedding_dim, device=device), device)[0]
-        for i, pred in enumerate(sample_predictions[:3]):
-            pred_str = safe_token_processing(pred[0], vocab, "RT_tokenized")
-            print(f"  Sample {i}: {pred_str}")
+        try:
+            # Generate sample predictions with safe error handling
+            sample_predictions = model.inference(torch.randn(10, model.embedding_dim, device=device), device)[0]
+            for i, pred in enumerate(sample_predictions[:3]):
+                try:
+                    pred_str = safe_token_processing(pred[0], vocab, "RT_tokenized")
+                    print(f"  Sample {i}: {pred_str[:100]}..." if len(pred_str) > 100 else f"  Sample {i}: {pred_str}")
+                except Exception as e:
+                    print(f"  Sample {i}: [Error processing: {e}]")
+        except Exception as e:
+            print(f"  Error in detailed analysis: {e}")
         
         if generation_validity > 0.8 and val_acc > 0.7:
             print(f"🎯 Excellent generation quality achieved! Validity: {generation_validity:.1%}, Acc: {val_acc:.3f}")

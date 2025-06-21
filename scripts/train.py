@@ -566,6 +566,25 @@ if model_config['loss']=="wce":
 if model_config['loss']=="ce":
     class_weights=None
 
+def reset_context_attention(model):
+    """Reset only the problematic context attention components"""
+    import torch.nn as nn
+    
+    reset_count = 0
+    for layer in model.Decoder.Decoder.transformer_layers:
+        if hasattr(layer, 'context_attn'):
+            # Reset the dead components
+            nn.init.xavier_uniform_(layer.context_attn.linear_keys.weight)
+            nn.init.xavier_uniform_(layer.context_attn.linear_query.weight)
+            if hasattr(layer, 'layer_norm_2'):
+                nn.init.ones_(layer.layer_norm_2.weight)
+                nn.init.zeros_(layer.layer_norm_2.bias)
+            reset_count += 1
+    
+    print(f"🔧 Reset context attention in {reset_count} transformer layers")
+    print("🎯 This should wake up the dead context attention components!")
+    return model
+
 # Initialize model with property count
 if args.ppguided:
     model_type = G2S_VAE_PPguided
@@ -576,7 +595,6 @@ model = model_type(num_node_features,num_edge_features,hidden_dimension,embeddin
 model.to(device)
 
 # 🔧 CRITICAL FIX: Reset dead context attention components
-from model.G2S_clean import reset_context_attention
 model = reset_context_attention(model)
 
 print(model)

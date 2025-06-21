@@ -570,8 +570,8 @@ class SequenceDecoder(nn.Module):
         # CRITICAL FIX: Reset decoder cache at the beginning of each forward pass
         self.reset_decoder_cache()
         
-        z_length = z.size(1)
-        src_lengths = torch.ones(z.size(0), device=z.device).long()*z_length # long tensor [b,]
+        z_length = 1  # Latent sequence length is always 1
+        src_lengths = torch.ones(z.size(0), device=z.device).long()  # All 1s
         # prepare target
         target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)[:, :-1]
         m = nn.ConstantPad1d((1, 0), self.vocab["_SOS"]) #pads SOS token left side (beginning of sequences)

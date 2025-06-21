@@ -703,8 +703,9 @@ class SequenceDecoder(nn.Module):
         parallel_paths = decode_strategy.parallel_paths  # beam_size
         
         # (1) Encoder output.
-        z_length = z.size(1)
-        src_lengths = torch.ones(z.size(0), device=z.device).long()*z_length # long tensor [b,]
+        # FIXED:
+        z_length = 1  # Latent sequence length is always 1
+        src_lengths = torch.ones(z.size(0), device=z.device).long()  # All 1s
         enc_output = z.unsqueeze(1)
         self.Decoder.state["src"] = enc_output
         
@@ -890,6 +891,7 @@ class G2S_VAE(nn.Module):
             self.beta=1.0
         self.config = model_config
         self.vocab = vocab
+        self.alpha = 0.0
         #self.max_n=data_config['max_num_nodes']
         #if model_config['pooling']=='custom':
         #    self.Encoder = GraphEncoder_GMT(node_dim, edge_dim, hidden_dim, device, model_config)

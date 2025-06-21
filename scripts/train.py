@@ -2,6 +2,9 @@ import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
 
+sys.path.append(os.path.join(main_dir_path, 'scripts'))
+from generate import safe_token_processing
+
 import time
 from datetime import datetime
 import random

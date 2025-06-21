@@ -575,6 +575,10 @@ else:
 model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dim,device,model_config, vocab, seed, loss_weights=class_weights, add_latent=add_latent)
 model.to(device)
 
+# 🔧 CRITICAL FIX: Reset dead context attention components
+from model.G2S_clean import reset_context_attention
+model = reset_context_attention(model)
+
 print(model)
 
 # Use configurable warmup epochs

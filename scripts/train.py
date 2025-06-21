@@ -313,6 +313,9 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
     with torch.no_grad():
         z_random = torch.randn(num_samples, model.embedding_dim, device=device)
         try:
+            # FIX: Reset decoder cache before inference
+            model.Decoder.reset_decoder_cache()
+            
             # Fix: Call inference on the full model, not just the decoder
             result = model.inference(data=z_random, device=device, sample=False, log_var=None)
             
@@ -754,11 +757,12 @@ for epoch in range(epoch_cp, epochs):
         
         # NEW: Add format-specific validation here
         print("🧪 Detailed format analysis:")
+        model.Decoder.reset_decoder_cache()
         # Check if model is learning each component
         sample_predictions = model.inference(torch.randn(10, model.embedding_dim, device=device), device)[0]
         for i, pred in enumerate(sample_predictions[:3]):
             pred_str = safe_token_processing(pred[0], vocab, "RT_tokenized")
-            print(f"  Sample {i}: {pred_str[:100]}...")  # First 100 chars
+            print(f"  Sample {i}: {pred_str}")
         
         if generation_validity > 0.8 and val_acc > 0.7:
             print(f"🎯 Excellent generation quality achieved! Validity: {generation_validity:.1%}, Acc: {val_acc:.3f}")

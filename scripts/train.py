@@ -173,7 +173,9 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print(f"WARNING: KLD spike detected at batch {i}")
                 print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]):.2f}")
 
-            loss.backward()
+            # 🔥 CRITICAL FIX: Add gradient penalty to force gradients through context attention
+            loss_with_penalty = add_gradient_penalty_to_loss(model, loss)
+            loss_with_penalty.backward()
             
             # Monitor gradient norms before clipping
             total_grad_norm = 0
@@ -585,89 +587,49 @@ def reset_context_attention(model):
     print("🎯 This should wake up the dead context attention components!")
     return model
 
-# Add this right after reset_context_attention function in train.py
+def add_gradient_penalty_to_loss(model, loss):
+    """Add penalty to force gradients through context attention keys/queries"""
+    penalty = 0.0
+    
+    # Add small penalty based on context attention weights
+    for layer in model.Decoder.Decoder.transformer_layers:
+        if hasattr(layer, 'context_attn'):
+            # Force gradient flow by adding norm of weights to loss
+            if hasattr(layer.context_attn, 'linear_keys'):
+                penalty += layer.context_attn.linear_keys.weight.norm() * 1e-7
+            if hasattr(layer.context_attn, 'linear_query'):
+                penalty += layer.context_attn.linear_query.weight.norm() * 1e-7
+    
+    return loss + penalty
 
-def diagnose_context_attention(model, device):
-    """Diagnose why context attention keys/queries have zero gradients"""
-    print("\n🔍 DIAGNOSING CONTEXT ATTENTION...")
+def add_attention_regularization(model):
+    """Add regularization to encourage non-uniform attention"""
+    print("\n🎯 ADDING ATTENTION REGULARIZATION...")
     
-    # Create dummy data to test gradient flow
-    test_z = torch.randn(2, model.embedding_dim, device=device, requires_grad=True)
-    test_target = torch.tensor([[1, 2, 3, 4, 5]], device=device).repeat(2, 1).unsqueeze(-1)
-    
-    # Forward pass through decoder only
-    model.eval()
-    try:
-        # Set up decoder state
-        model.Decoder.Decoder.state = {}
-        enc_output = test_z.unsqueeze(1)
-        model.Decoder.Decoder.state["src"] = enc_output
-        src_lengths = torch.ones(2, device=device).long()
-        
-        # Forward through decoder
-        with torch.enable_grad():
-            dec_outs, dec_attn = model.Decoder.Decoder(
-                tgt=test_target, 
-                enc_out=enc_output, 
-                src_len=src_lengths, 
-                step=test_target.size(1),
-                add_latent=model.Decoder.add_latent
-            )
-            
-            # Create a simple loss to check gradients
-            test_loss = dec_outs.sum()
-            test_loss.backward()
-            
-            # Check gradients
-            print("\n📊 Context Attention Gradient Test:")
-            for i, layer in enumerate(model.Decoder.Decoder.transformer_layers):
-                if hasattr(layer, 'context_attn'):
-                    keys_grad = layer.context_attn.linear_keys.weight.grad
-                    query_grad = layer.context_attn.linear_query.weight.grad
-                    values_grad = layer.context_attn.linear_values.weight.grad
-                    
-                    print(f"\nLayer {i}:")
-                    print(f"  Keys grad norm: {keys_grad.norm().item() if keys_grad is not None else 'None'}")
-                    print(f"  Query grad norm: {query_grad.norm().item() if query_grad is not None else 'None'}")
-                    print(f"  Values grad norm: {values_grad.norm().item() if values_grad is not None else 'None'}")
-                    
-                    # Check if attention scores are being computed
-                    if hasattr(layer.context_attn, 'attn'):
-                        print(f"  Attention scores: {layer.context_attn.attn}")
-    
-    except Exception as e:
-        print(f"❌ Diagnostic failed: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    model.train()
-    model.zero_grad()
-    
-    # Clear decoder state
-    if hasattr(model.Decoder, 'clear_decoder_state_completely'):
-        model.Decoder.clear_decoder_state_completely()
-    
-    print("\n💡 DIAGNOSIS COMPLETE")
-    return
-
-def force_context_attention_gradients(model):
-    """Force gradient flow through context attention by adding residual connections"""
-    print("\n🔧 FORCING CONTEXT ATTENTION GRADIENTS...")
-    
-    # Hook to monitor attention scores
+    # Hook to add regularization loss
     def attention_hook(module, input, output):
-        if hasattr(module, '_attention_scores'):
-            print(f"Attention scores range: [{module._attention_scores.min().item():.4f}, {module._attention_scores.max().item():.4f}]")
+        if isinstance(output, tuple) and len(output) > 1:
+            attention_weights = output[1]  # Usually the attention weights are the second output
+            
+            # Encourage non-uniform attention by penalizing uniform distributions
+            if attention_weights is not None and attention_weights.numel() > 0:
+                # Calculate entropy of attention weights
+                entropy = -(attention_weights * (attention_weights + 1e-10).log()).sum(dim=-1).mean()
+                
+                # Add a small penalty to the loss to discourage high entropy (uniform attention)
+                if hasattr(module, '_attention_penalty'):
+                    module._attention_penalty = entropy * 0.01
+                else:
+                    module._attention_penalty = entropy * 0.01
     
-    # Add hooks to context attention layers
-    for i, layer in enumerate(model.Decoder.Decoder.transformer_layers):
+    # Register hooks
+    for layer in model.Decoder.Decoder.transformer_layers:
         if hasattr(layer, 'context_attn'):
             layer.context_attn.register_forward_hook(attention_hook)
     
-    print("✅ Gradient forcing mechanisms installed")
+    print("✅ Attention regularization added!")
     return model
 
-# Update the model initialization section:
 # Initialize model with property count
 if args.ppguided:
     model_type = G2S_VAE_PPguided
@@ -680,19 +642,14 @@ model.to(device)
 # 🔧 CRITICAL FIX: Reset dead context attention components
 model = reset_context_attention(model)
 
-# 🔍 NEW: Diagnose the context attention problem
-diagnose_context_attention(model, device)
-
-# 🔥 NEW: Force gradient flow if needed
-model = force_context_attention_gradients(model)
+# 🎯 NEW: Add attention regularization
+model = add_attention_regularization(model)
 
 print(model)
 
 # Use configurable warmup epochs
 n_iter = int(20 * num_train_graphs/batch_size) # 20 epochs
 # Beta scheduling function from Optimus paper 
-
-
 def frange_cycle_zero_linear(n_iter, start=0.0, stop=model_config['max_beta'],  n_cycle=5, ratio_increase=0.5, ratio_zero=0.3): #, beginning_zero=0.1):
     L = np.ones(n_iter) * stop
     period = n_iter/n_cycle

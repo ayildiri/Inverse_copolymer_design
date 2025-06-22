@@ -1262,4 +1262,3 @@ class FocalLoss(nn.CrossEntropyLoss):
         elif self.reduction == 'sum':
             loss = torch.sum(loss)
         return loss
-

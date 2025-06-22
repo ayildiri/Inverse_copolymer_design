@@ -175,6 +175,11 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
 
             # 🔥 CRITICAL FIX: Add gradient penalty to force gradients through context attention
             loss_with_penalty = add_gradient_penalty_to_loss(model, loss)
+            # Add this debug print:
+            if i == 0:  # First batch only
+                print(f"🔍 DEBUG: Original loss: {loss.item():.6f}")
+                print(f"🔍 DEBUG: Loss with penalty: {loss_with_penalty.item():.6f}")
+                print(f"🔍 DEBUG: Penalty amount: {(loss_with_penalty - loss).item():.9f}")
             loss_with_penalty.backward()
             
             # Monitor gradient norms before clipping

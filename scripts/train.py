@@ -812,6 +812,39 @@ for epoch in range(epoch_cp, epochs):
 
         # Update learning rate
         scheduler.step(val_loss)
+        # 📊 Property Prediction Diagnostic (only for PP-guided VAE)
+        if args.ppguided and epoch % 10 == 0 and val_mse > 0:
+            model.eval()
+            with torch.no_grad():
+                # Get a small batch for inspection
+                sample_batch_key = '0'  # First batch
+                if sample_batch_key in dict_val_loader:
+                    sample_data = dict_val_loader[sample_batch_key][0]
+                    sample_data.to(device)
+                    sample_dest = dict_val_loader[sample_batch_key][1]
+                    sample_dest.to(device)
+                    sample_inc = dict_val_loader[sample_batch_key][2]
+                    sample_inc.to(device)
+                    
+                    # Get predictions
+                    result = model(sample_data, sample_dest, sample_inc, device)
+                    
+                    if len(result) == 9:  # PP-guided VAE
+                        _, _, _, _, _, _, _, _, y_pred = result
+                        
+                        # Get true values
+                        y_true = sample_data.y1.float() if hasattr(sample_data, 'y1') else None
+                        
+                        if y_pred is not None and y_true is not None:
+                            print(f"\n📊 Property Prediction Check (Epoch {epoch + 1}):")
+                            print(f"Predicted values (first 10): {y_pred[:10].squeeze().tolist()}")
+                            print(f"True values (first 10): {y_true[:10].tolist()}")
+                            print(f"Prediction std: {y_pred.std().item():.4f}")
+                            print(f"Prediction mean: {y_pred.mean().item():.4f}")
+                            print(f"True value std: {y_true.std().item():.4f}")
+                            print(f"True value mean: {y_true.mean().item():.4f}")
+            model.train()
+            
     else:
         # Skip validation but still compute training metrics
         train_loss = mean(train_total_losses)

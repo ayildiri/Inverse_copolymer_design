@@ -284,7 +284,7 @@ def test(dict_loader):
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
-def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False):
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False, generation_validity=None):
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
     
@@ -306,13 +306,14 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
         if mode == 'w' or not os.path.exists(csv_file):
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
-                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean'
+                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 'generation_validity'
             ])
         # Always write the data row
         writer.writerow([
             epoch,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],
-            val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse']
+            val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse'],
+            generation_validity if generation_validity is not None else 0.0
         ])
 
 def load_existing_loss_dicts(directory_path):
@@ -896,13 +897,25 @@ for epoch in range(epoch_cp, epochs):
         model_saved = earlystopping(val_loss, model_dict)
         if model_saved:
             print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
-
+    
+    # Test generation validity every epoch (or at least when validation runs)
     generation_validity = 0.0
-    if (epoch + 1) % 10 == 0:  # Check every 10 epochs
+    if (epoch + 1) % args.validation_freq == 0:  # Test when validation runs
         print(f"🧪 Testing generation quality...")
         generation_validity = validate_generation_quality(model, vocab, device, num_samples=50)
         print(f"📊 Generation validity: {generation_validity:.1%}")
-        
+        # Only show detailed analysis every 10 epochs to reduce clutter
+        if (epoch + 1) % 10 == 0:
+            # FIXED: Improved format-specific validation with better error handling
+            print("🧪 Detailed format analysis:")
+            try:
+                # ... existing detailed analysis code ...
+            except Exception as e:
+                print(f"  Error in detailed analysis: {e}")
+            else:
+                # Optional: Quick summary on non-10 epochs
+                print(f"  (Detailed analysis shown every 10 epochs)")
+                
         # FIXED: Improved format-specific validation with better error handling
         print("🧪 Detailed format analysis:")
         try:
@@ -914,6 +927,7 @@ for epoch in range(epoch_cp, epochs):
                     print(f"  Sample {i}: {pred_str[:100]}..." if len(pred_str) > 100 else f"  Sample {i}: {pred_str}")
                 except Exception as e:
                     print(f"  Sample {i}: [Error processing: {e}]")
+        
         except Exception as e:
             print(f"  Error in detailed analysis: {e}")
         
@@ -951,7 +965,7 @@ for epoch in range(epoch_cp, epochs):
     if (epoch + 1) % args.validation_freq == 0:
         train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
         val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
-        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint)
+        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint, generation_validity)
 
     # Save loss dictionaries periodically to avoid data loss
     if (epoch + 1) % args.checkpoint_freq == 0 or epoch == epochs - 1:

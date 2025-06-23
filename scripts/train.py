@@ -904,32 +904,25 @@ for epoch in range(epoch_cp, epochs):
         print(f"🧪 Testing generation quality...")
         generation_validity = validate_generation_quality(model, vocab, device, num_samples=50)
         print(f"📊 Generation validity: {generation_validity:.1%}")
+        
         # Only show detailed analysis every 10 epochs to reduce clutter
         if (epoch + 1) % 10 == 0:
             # FIXED: Improved format-specific validation with better error handling
             print("🧪 Detailed format analysis:")
             try:
-                # ... existing detailed analysis code ...
+                # Generate sample predictions with safe error handling
+                sample_predictions = model.inference(torch.randn(10, model.embedding_dim, device=device), device)[0]
+                for i, pred in enumerate(sample_predictions[:3]):
+                    try:
+                        pred_str = safe_token_processing(pred[0], vocab, "RT_tokenized")
+                        print(f"  Sample {i}: {pred_str[:100]}..." if len(pred_str) > 100 else f"  Sample {i}: {pred_str}")
+                    except Exception as e:
+                        print(f"  Sample {i}: [Error processing: {e}]")
             except Exception as e:
                 print(f"  Error in detailed analysis: {e}")
         else:
             # Optional: Quick summary on non-10 epochs
             print(f"  (Detailed analysis shown every 10 epochs)")
-                
-        # FIXED: Improved format-specific validation with better error handling
-        print("🧪 Detailed format analysis:")
-        try:
-            # Generate sample predictions with safe error handling
-            sample_predictions = model.inference(torch.randn(10, model.embedding_dim, device=device), device)[0]
-            for i, pred in enumerate(sample_predictions[:3]):
-                try:
-                    pred_str = safe_token_processing(pred[0], vocab, "RT_tokenized")
-                    print(f"  Sample {i}: {pred_str[:100]}..." if len(pred_str) > 100 else f"  Sample {i}: {pred_str}")
-                except Exception as e:
-                    print(f"  Sample {i}: [Error processing: {e}]")
-        
-        except Exception as e:
-            print(f"  Error in detailed analysis: {e}")
         
         if generation_validity > 0.8 and val_acc > 0.7:
             print(f"🎯 Excellent generation quality achieved! Validity: {generation_validity:.1%}, Acc: {val_acc:.3f}")

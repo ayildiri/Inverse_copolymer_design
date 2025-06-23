@@ -912,9 +912,9 @@ for epoch in range(epoch_cp, epochs):
                 # ... existing detailed analysis code ...
             except Exception as e:
                 print(f"  Error in detailed analysis: {e}")
-            else:
-                # Optional: Quick summary on non-10 epochs
-                print(f"  (Detailed analysis shown every 10 epochs)")
+        else:
+            # Optional: Quick summary on non-10 epochs
+            print(f"  (Detailed analysis shown every 10 epochs)")
                 
         # FIXED: Improved format-specific validation with better error handling
         print("🧪 Detailed format analysis:")

@@ -1238,6 +1238,164 @@ class G2S_VAE_PPguideddisabled(nn.Module):
         return(sum(p.numel() for p in self.parameters() if p.requires_grad))
     
 
+class G2S_VAE_Transfer(nn.Module):
+    """Transfer learning version that can load pretrained components and adapt to new properties"""
+    
+    def __init__(self, node_dim, edge_dim, hidden_dim, embedding_dim, device, model_config, vocab, seed, 
+                 loss_weights=None, add_latent=True, pretrained_model=None, freeze_components=None):
+        super().__init__()
+        
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
+        self.hidden_dim = hidden_dim
+        self.device = device
+        self.seed = seed
+        self.eps = model_config['epsilon']
+        self.embedding_dim = model_config.get('embedding_dim', embedding_dim)
+        self.config = model_config
+        self.vocab = vocab
+        
+        # Property configuration for transfer learning
+        self.source_properties = model_config.get('source_properties', ['EA', 'IP'])
+        self.target_properties = model_config.get('target_properties', ['bandgap'])
+        self.property_count = len(self.target_properties)
+        
+        if freeze_components is None:
+            freeze_components = {'encoder': False, 'decoder': False}
+        
+        # Load pretrained components if provided
+        if pretrained_model is not None:
+            print(f"Loading pretrained components from model trained on {self.source_properties}")
+            self.Encoder = pretrained_model.Encoder
+            self.Decoder = pretrained_model.Decoder
+            
+            # Optionally freeze components
+            if freeze_components['encoder']:
+                print("Freezing encoder weights")
+                for param in self.Encoder.parameters():
+                    param.requires_grad = False
+                    
+            if freeze_components['decoder']:
+                print("Freezing decoder weights")
+                for param in self.Decoder.parameters():
+                    param.requires_grad = False
+        else:
+            # Initialize new components (for stage 1)
+            self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+            self.Decoder = SequenceDecoder(model_config, vocab, loss_weights, add_latent=add_latent)
+        
+        # Always create new property predictor for target properties
+        self.pp_ffn_hidden = 128  # Larger for better transfer
+        self.alpha = model_config['max_alpha'] if model_config['alpha'] == "fixed" else 0.0
+        self.beta = 1.0 if model_config["beta"] != "schedule" else 1.0
+        
+        # Enhanced property predictor for transfer learning
+        self.PP_lin1 = Sequential(
+            Linear(embedding_dim, self.pp_ffn_hidden),
+            nn.LayerNorm(self.pp_ffn_hidden),  # Add normalization
+            ReLU(),
+            nn.Dropout(0.3)
+        ).to(device)
+        
+        self.PP_lin2 = Sequential(
+            Linear(self.pp_ffn_hidden, self.pp_ffn_hidden // 2),
+            nn.LayerNorm(self.pp_ffn_hidden // 2),
+            ReLU(),
+            nn.Dropout(0.2),
+            Linear(self.pp_ffn_hidden // 2, self.property_count)
+        ).to(device)
+        
+        # Compression layer if needed
+        if not self.hidden_dim == self.embedding_dim:
+            self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
+    
+    # Use the same forward, sample, and inference methods as G2S_VAE_PPguided
+    def sample(self, mean, log_var, eps_scale=0.01):
+        if self.training:
+            std = log_var.mul(0.5).exp_()
+            eps = torch.randn_like(std) * eps_scale
+            return eps.mul(std).add_(mean)
+        else:
+            return mean
+    
+    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+        # Encode
+        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        if not self.hidden_dim == self.embedding_dim:
+            h_G_mean = self.lincompress(h_G_mean)
+            h_G_var = self.lincompress(h_G_var)
+        z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
+        kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
+    
+        # Property predictions with better architecture
+        pp_hidden = self.PP_lin1(z)
+        y = self.PP_lin2(pp_hidden)
+        
+        # Get true values for target properties
+        y_true_list = []
+        for i, prop_name in enumerate(self.target_properties):
+            # Map property names to batch attributes
+            prop_attr_map = {
+                'EA': 'y1', 'IP': 'y2', 'bandgap': 'y3',  # Adjust based on your setup
+                # Add more mappings as needed
+            }
+            
+            prop_attr = prop_attr_map.get(prop_name, f'y{i+1}')
+            if hasattr(batch_list, prop_attr):
+                y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
+            else:
+                y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
+            y_true_list.append(y_prop)
+        
+        y_true = torch.cat(y_true_list, dim=1)
+        mse = self.masked_mse(y_true, y)
+    
+        # Decode
+        recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
+    
+        return recon_loss + self.beta*kl_loss + self.alpha*mse, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+    
+    def masked_mse(self, y_true, y_pred):
+        mask = ~torch.isnan(y_true)
+        if mask.any():
+            mse = F.mse_loss(y_pred[mask], y_true[mask], reduction='mean')
+            return mse
+        else:
+            return torch.tensor(0.0, device=y_true.device, requires_grad=True)
+    
+    def inference(self, data, device, dest_is_origin_matrix=None, inc_edges_to_atom_matrix=None, sample=False, log_var=None):
+        # Same as G2S_VAE_PPguided
+        if isinstance(data, torch.Tensor):
+            if data.size(-1) != self.embedding_dim:
+                raise Exception('Size of input is {}, must be {}'.format(data.size(0), self.embedding_dim))
+            if data.dim() == 1:
+                mean = data.unsqueeze(0)
+            else:
+                mean = data
+        elif isinstance(data, Data):
+            mean, log_var = self.Encoder(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            if not self.hidden_dim == self.embedding_dim:
+                mean = self.lincompress(mean)
+                log_var = self.lincompress(log_var)
+        
+        if sample:
+            z = self.sample_inference(mean, log_var, eps_scale=self.eps)
+        else:
+            z = mean
+            log_var = 0
+        
+        pp_hidden = self.PP_lin1(z)
+        y = self.PP_lin2(pp_hidden)
+        
+        predictions = self.Decoder.inference(z)
+        
+        return predictions, mean, log_var, z, y
+    
+    def sample_inference(self, mean, log_var, eps_scale=1):
+        std = log_var.mul(0.5).exp_()
+        eps = torch.randn_like(std) * eps_scale
+        return eps.mul(std).add_(mean)
+
 class FocalLoss(nn.CrossEntropyLoss):
     ''' Focal loss for classification tasks on imbalanced datasets
      from https://gist.github.com/f1recracker/0f564fd48f15a58f4b92b3eb3879149b '''

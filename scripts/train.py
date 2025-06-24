@@ -204,6 +204,21 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             accs.append(acc.item())
             mses.append(mse.item())
             
+            # Log semi-supervised info for first batch of first epoch
+            if args.training_stage == 1 and epoch == epoch_cp and i == 0:
+                print("\n📊 Semi-supervised Stage 1 - First batch analysis:")
+                print(f"   Reconstruction loss applied to: ALL {data.num_graphs} molecules")
+                print(f"   KLD loss applied to: ALL {data.num_graphs} molecules")
+                # Count molecules with valid properties
+                valid_props = 0
+                if hasattr(data, 'y1') and hasattr(data, 'y2'):
+                    for idx in range(data.num_graphs):
+                        if idx < len(data.y1) and idx < len(data.y2):
+                            if not torch.isnan(data.y1[idx]) and not torch.isnan(data.y2[idx]):
+                                valid_props += 1
+                print(f"   Property loss (MSE) applied to: {valid_props} molecules with EA/IP labels")
+                print(f"   Unlabeled molecules in batch: {data.num_graphs - valid_props}")
+            
         except RuntimeError as e:
             if "backward through the graph a second time" in str(e):
                 print(f"WARNING: Graph retention error at batch {i}, skipping batch")

@@ -32,6 +32,8 @@ parser.add_argument("--input_file", type=str, default=None,
                     help="Path to custom input CSV file containing polymer data")
 parser.add_argument("--output_dir", type=str, default=None,
                     help="Directory to save output files (defaults to main_dir_path/data)")
+parser.add_argument("--semi_supervised", action="store_true", default=False,
+                    help="Enable semi-supervised mode for Stage 1 (includes unlabeled data)")
 
 args = parser.parse_args()
 
@@ -80,6 +82,34 @@ else:
 missing_columns = [col for col in property_columns if col not in df.columns]
 if missing_columns:
     raise ValueError(f"Missing property columns in CSV: {missing_columns}")
+
+# Semi-supervised filtering for Stage 1
+if args.semi_supervised and property_names == ['EA', 'IP']:
+    print("\n🔄 SEMI-SUPERVISED MODE ENABLED FOR STAGE 1")
+    print("="*60)
+    
+    original_size = len(df)
+    
+    # Create masks for different data types
+    has_ea_ip = df['EA (eV)'].notna() & df['IP (eV)'].notna()
+    has_bandgap_only = df['bandgap_eV'].notna() & df['EA (eV)'].isna() & df['IP (eV)'].isna()
+    is_unlabeled = df['EA (eV)'].isna() & df['IP (eV)'].isna() & df['bandgap_eV'].isna()
+    
+    # Stage 1 includes: EA/IP labeled + completely unlabeled
+    # Excludes: bandgap-only molecules
+    stage1_mask = has_ea_ip | is_unlabeled
+    
+    # Apply the mask
+    df = df[stage1_mask].copy()
+    
+    print(f"📊 Data composition for Stage 1:")
+    print(f"   Original dataset size: {original_size:,}")
+    print(f"   With EA/IP labels: {has_ea_ip.sum():,}")
+    print(f"   Completely unlabeled: {is_unlabeled.sum():,}")
+    print(f"   Bandgap-only (excluded): {has_bandgap_only.sum():,}")
+    print(f"   ✅ Stage 1 dataset size: {len(df):,}")
+    print("="*60)
+
 
 # %% Lets create PyG data objects
 

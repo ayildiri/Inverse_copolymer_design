@@ -464,6 +464,26 @@ parser.add_argument("--warmup_epochs", type=int, default=5, help="Number of epoc
 parser.add_argument("--max_grad_norm_warning", type=float, default=10.0, help="Threshold for gradient norm warning")
 parser.add_argument("--kld_spike_threshold", type=float, default=5.0, help="Threshold multiplier for KLD spike detection")
 
+
+# Transfer learning arguments
+parser.add_argument("--training_stage", type=int, default=1, choices=[1, 2],
+                    help="Stage 1: Pretrain on all data, Stage 2: Fine-tune on target property")
+parser.add_argument("--pretrained_model_path", type=str, default=None,
+                    help="Path to pretrained model for stage 2")
+parser.add_argument("--source_properties", type=str, nargs='+', default=["EA", "IP"],
+                    help="Properties used in stage 1 pretraining")
+parser.add_argument("--target_properties", type=str, nargs='+', default=["bandgap"],
+                    help="Properties to predict in stage 2")
+parser.add_argument("--freeze_encoder", action="store_true", default=False,
+                    help="Freeze encoder during stage 2")
+parser.add_argument("--freeze_decoder", action="store_true", default=False,
+                    help="Freeze decoder during stage 2")
+parser.add_argument("--stage1_sample_weight", type=float, default=1.0,
+                    help="Weight for sampling data with source properties in stage 1")
+parser.add_argument("--combined_dataset_path", type=str, 
+                    default="/content/drive/MyDrive/X_Materials_Organized_Files_V1/combined_polymer_database_2.csv",
+                    help="Path to combined dataset CSV")
+
 args = parser.parse_args()
 
 # Handle property configuration for basic VAE
@@ -555,9 +575,47 @@ embedding_dim = model_config['embedding_dim']
 loss = model_config['loss']
 
 # %% Call data
-dict_train_loader = torch.load(data_path_prefix.format('train'))
-dict_val_loader = torch.load(data_path_prefix.format('val'))
-dict_test_loader = torch.load(data_path_prefix.format('test'))
+if args.training_stage == 1:
+    # Stage 1: Load all available data
+    print(f"Stage 1: Loading combined dataset for pretraining on {args.source_properties}")
+    
+    # Custom data loading function for transfer learning
+    from data_processing.transfer_data_utils import load_transfer_data
+    
+    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
+        csv_path=args.combined_dataset_path,
+        stage=1,
+        source_properties=args.source_properties,
+        target_properties=args.target_properties,
+        batch_size=batch_size,
+        tokenization=tokenization,
+        vocab=vocab,
+        sample_weight=args.stage1_sample_weight,
+        device=device
+    )
+    
+    # Update property names for stage 1
+    property_names = args.source_properties
+    property_count = len(property_names)
+    
+else:  # Stage 2
+    # Stage 2: Load only target property data
+    print(f"Stage 2: Loading data for fine-tuning on {args.target_properties}")
+    
+    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
+        csv_path=args.combined_dataset_path,
+        stage=2,
+        source_properties=args.source_properties,
+        target_properties=args.target_properties,
+        batch_size=batch_size,
+        tokenization=tokenization,
+        vocab=vocab,
+        device=device
+    )
+    
+    # Update property names for stage 2
+    property_names = args.target_properties
+    property_count = len(property_names)
 
 num_train_graphs = len(list(dict_train_loader.keys())[
     :-2])*batch_size + dict_train_loader[list(dict_train_loader.keys())[-1]][0].num_graphs
@@ -636,13 +694,51 @@ def add_attention_regularization(model):
     print("✅ Attention regularization added!")
     return model
 
-# Initialize model with property count
-if args.ppguided:
-    model_type = G2S_VAE_PPguided
+# %% Create an instance of the G2S model
+if args.training_stage == 1:
+    # Stage 1: Regular training
+    if args.ppguided:
+        model_type = G2S_VAE_PPguided
+    else:
+        model_type = G2S_VAE
+    
+    model = model_type(num_node_features, num_edge_features, hidden_dimension, 
+                      embedding_dim, device, model_config, vocab, seed, 
+                      loss_weights=class_weights, add_latent=add_latent)
 else:
-    model_type = G2S_VAE
+    # Stage 2: Transfer learning
+    print(f"Loading pretrained model from: {args.pretrained_model_path}")
+    
+    # Load pretrained model
+    pretrained_checkpoint = torch.load(args.pretrained_model_path)
+    pretrained_config = pretrained_checkpoint['model_config']
+    
+    # Create pretrained model
+    if args.ppguided:
+        pretrained_model_type = G2S_VAE_PPguided
+    else:
+        pretrained_model_type = G2S_VAE
+    
+    pretrained_model = pretrained_model_type(
+        num_node_features, num_edge_features, hidden_dimension,
+        embedding_dim, device, pretrained_config, vocab, seed,
+        loss_weights=class_weights, add_latent=add_latent
+    )
+    pretrained_model.load_state_dict(pretrained_checkpoint['model_state_dict'])
+    
+    # Update model config for transfer learning
+    model_config['source_properties'] = args.source_properties
+    model_config['target_properties'] = args.target_properties
+    
+    # Create transfer model
+    model = G2S_VAE_Transfer(
+        num_node_features, num_edge_features, hidden_dimension,
+        embedding_dim, device, model_config, vocab, seed,
+        loss_weights=class_weights, add_latent=add_latent,
+        pretrained_model=pretrained_model,
+        freeze_components={'encoder': args.freeze_encoder, 'decoder': args.freeze_decoder}
+    )
 
-model = model_type(num_node_features,num_edge_features,hidden_dimension,embedding_dim,device,model_config, vocab, seed, loss_weights=class_weights, add_latent=add_latent)
 model.to(device)
 
 # 🔧 CRITICAL FIX: Reset dead context attention components
@@ -689,7 +785,24 @@ elif model_config['alpha'] == "fixed":
 # %%# %% Train
 
 # Enhanced optimizer with weight decay
-optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+if args.training_stage == 1:
+    # Stage 1: Normal optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+else:
+    # Stage 2: Different learning rates for different components
+    param_groups = [
+        {'params': model.PP_lin1.parameters(), 'lr': args.learning_rate},
+        {'params': model.PP_lin2.parameters(), 'lr': args.learning_rate}
+    ]
+    
+    if not args.freeze_encoder:
+        param_groups.append({'params': model.Encoder.parameters(), 'lr': args.learning_rate * 0.1})
+    
+    if not args.freeze_decoder:
+        param_groups.append({'params': model.Decoder.parameters(), 'lr': args.learning_rate * 0.01})
+    
+    optimizer = torch.optim.Adam(param_groups, weight_decay=args.weight_decay)
+    print(f"Stage 2 optimizer with differential learning rates created")
 
 # Enhanced learning rate scheduler with configurable parameters
 from torch.optim.lr_scheduler import ReduceLROnPlateau

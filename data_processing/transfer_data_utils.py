@@ -1,157 +1,75 @@
 import pandas as pd
 import torch
-from torch_geometric.data import Data, Batch
 import numpy as np
-from .data_utils import get_graph_from_polymer_string, get_seq_features_from_line
+import os
 
 def load_transfer_data(csv_path, stage, source_properties, target_properties, 
-                      batch_size, tokenization, vocab, sample_weight=1.0, device='cuda'):
+                      batch_size, tokenization, vocab, sample_weight=1.0, 
+                      device='cuda', dataset_path='/content/renamed_dataset'):
     """
-    Load data for transfer learning based on stage and property availability
-    
-    Stage 1: Use all data with source properties + unlabeled data
-    Stage 2: Use only data with target properties
+    Simplified transfer learning data loading that works with your existing structure
     """
     
-    # Load the combined dataset
-    df = pd.read_csv(csv_path)
-    print(f"Loaded combined dataset with {len(df)} entries")
-    
-    # Filter based on stage
     if stage == 1:
-        # Stage 1: Use data with source properties OR unlabeled data
-        mask = pd.Series([False] * len(df))
+        # Stage 1: Need to load the original paper's dataset with EA/IP
+        print(f"Stage 1: Loading original dataset with EA/IP properties")
         
-        # Include data with any source property
-        for prop in source_properties:
-            if prop in df.columns:
-                mask |= df[prop].notna()
+        # Try to load the original (non-augmented) dataset that should have EA/IP
+        train_loader_path = os.path.join(dataset_path, f'dict_train_loader_original_{tokenization}.pt')
+        val_loader_path = os.path.join(dataset_path, f'dict_val_loader_original_{tokenization}.pt')
+        test_loader_path = os.path.join(dataset_path, f'dict_test_loader_original_{tokenization}.pt')
         
-        # Include unlabeled data (no properties)
-        all_props = source_properties + target_properties
-        unlabeled_mask = pd.Series([True] * len(df))
-        for prop in all_props:
-            if prop in df.columns:
-                unlabeled_mask &= df[prop].isna()
+        # If original dataset doesn't exist, we need to create it from the paper's data
+        if not os.path.exists(train_loader_path):
+            print("WARNING: Original dataset with EA/IP not found.")
+            print("For now, using augmented dataset. You'll need to prepare the EA/IP dataset.")
+            
+            # Fallback to augmented dataset
+            train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
+            val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}.pt')
+            test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}.pt')
         
-        mask |= unlabeled_mask
+        dict_train_loader = torch.load(train_loader_path)
+        dict_val_loader = torch.load(val_loader_path)
+        dict_test_loader = torch.load(test_loader_path)
         
-        # Weighted sampling if specified
-        if sample_weight != 1.0:
-            # Oversample data with source properties
-            labeled_indices = df[mask & df[source_properties[0]].notna()].index
-            unlabeled_indices = df[mask & df[source_properties[0]].isna()].index
-            
-            # Sample with weights
-            n_labeled = int(len(labeled_indices) * sample_weight)
-            n_unlabeled = len(unlabeled_indices)
-            
-            sampled_indices = np.concatenate([
-                np.random.choice(labeled_indices, n_labeled, replace=True),
-                unlabeled_indices
-            ])
-            
-            df_filtered = df.loc[sampled_indices]
-        else:
-            df_filtered = df[mask]
-            
-        print(f"Stage 1: Using {len(df_filtered)} samples")
-        print(f"  - With source properties: {df_filtered[source_properties[0]].notna().sum() if source_properties[0] in df_filtered.columns else 0}")
-        print(f"  - Unlabeled: {(df_filtered[all_props].isna().all(axis=1)).sum() if all([p in df_filtered.columns for p in all_props]) else 'N/A'}")
+        # For Stage 1 with EA/IP, we need y1=EA, y2=IP
+        # If using augmented data as fallback, create dummy y2
+        dict_train_loader = prepare_stage1_properties(dict_train_loader, device)
+        dict_val_loader = prepare_stage1_properties(dict_val_loader, device)
+        dict_test_loader = prepare_stage1_properties(dict_test_loader, device)
         
     else:  # Stage 2
-        # Stage 2: Use only data with target properties
-        mask = pd.Series([False] * len(df))
+        print(f"Stage 2: Loading augmented dataset with bandgap")
         
-        for prop in target_properties:
-            if prop in df.columns:
-                mask |= df[prop].notna()
+        # Load your current augmented dataset
+        train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
+        val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}.pt')
+        test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}.pt')
         
-        df_filtered = df[mask]
-        print(f"Stage 2: Using {len(df_filtered)} samples with {target_properties}")
+        dict_train_loader = torch.load(train_loader_path)
+        dict_val_loader = torch.load(val_loader_path)
+        dict_test_loader = torch.load(test_loader_path)
+        
+        # For Stage 2, y1 should be bandgap (which it already is)
+        print(f"Stage 2: Loaded {len(dict_train_loader)} training batches")
     
-    # Convert to graph data
-    return create_data_loaders(df_filtered, source_properties, target_properties, 
-                             batch_size, tokenization, vocab, stage, device)
+    return dict_train_loader, dict_val_loader, dict_test_loader
 
-def create_data_loaders(df, source_properties, target_properties, batch_size, 
-                       tokenization, vocab, stage, device):
-    """Convert dataframe to graph data loaders"""
-    
-    # Split data
-    n_samples = len(df)
-    n_train = int(0.8 * n_samples)
-    n_val = int(0.1 * n_samples)
-    
-    indices = np.random.permutation(n_samples)
-    train_indices = indices[:n_train]
-    val_indices = indices[n_train:n_train + n_val]
-    test_indices = indices[n_train + n_val:]
-    
-    # Create data loaders
-    train_loader = create_dict_loader(df.iloc[train_indices], source_properties, 
-                                     target_properties, batch_size, tokenization, 
-                                     vocab, stage, device)
-    val_loader = create_dict_loader(df.iloc[val_indices], source_properties, 
-                                   target_properties, batch_size, tokenization, 
-                                   vocab, stage, device)
-    test_loader = create_dict_loader(df.iloc[test_indices], source_properties, 
-                                    target_properties, batch_size, tokenization, 
-                                    vocab, stage, device)
-    
-    return train_loader, val_loader, test_loader
 
-def create_dict_loader(df, source_properties, target_properties, batch_size, 
-                      tokenization, vocab, stage, device):
-    """Create dictionary-style data loader"""
-    
-    dict_loader = {}
-    n_batches = len(df) // batch_size + (1 if len(df) % batch_size > 0 else 0)
-    
-    for i in range(n_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, len(df))
-        batch_df = df.iloc[start_idx:end_idx]
+def prepare_stage1_properties(dict_loader, device):
+    """
+    Prepare properties for Stage 1 training
+    If we only have y1 (bandgap), create dummy y2 for now
+    """
+    for batch_key in dict_loader:
+        batch_data = dict_loader[batch_key][0]
         
-        # Create batch data
-        batch_graphs = []
-        
-        for _, row in batch_df.iterrows():
-            # Get polymer string (adjust column name as needed)
-            polymer_string = row['poly_chemprop_input']
-            
-            # Create graph
-            graph = get_graph_from_polymer_string(polymer_string)
-            
-            # Add properties based on stage
-            if stage == 1:
-                # Stage 1: Use source properties
-                for j, prop in enumerate(source_properties):
-                    if prop in row and pd.notna(row[prop]):
-                        setattr(graph, f'y{j+1}', torch.tensor([row[prop]], dtype=torch.float))
-                    else:
-                        setattr(graph, f'y{j+1}', torch.tensor([float('nan')], dtype=torch.float))
-            else:
-                # Stage 2: Use target properties
-                for j, prop in enumerate(target_properties):
-                    if prop in row and pd.notna(row[prop]):
-                        setattr(graph, f'y{j+1}', torch.tensor([row[prop]], dtype=torch.float))
-                    else:
-                        setattr(graph, f'y{j+1}', torch.tensor([float('nan')], dtype=torch.float))
-            
-            # Add sequence features
-            seq_features = get_seq_features_from_line(polymer_string, vocab, max_tgt_len=512)
-            graph.tgt_token_ids = seq_features[0]
-            
-            batch_graphs.append(graph)
-        
-        # Create batch
-        batch = Batch.from_data_list(batch_graphs)
-        
-        # Create matrices (you'll need to implement these based on your setup)
-        dest_is_origin_matrix = create_dest_is_origin_matrix(batch)
-        inc_edges_to_atom_matrix = create_inc_edges_to_atom_matrix(batch)
-        
-        dict_loader[str(i)] = [batch, dest_is_origin_matrix, inc_edges_to_atom_matrix]
+        # Check what properties exist
+        if hasattr(batch_data, 'y1') and not hasattr(batch_data, 'y2'):
+            # If only y1 exists, create dummy y2 with NaN values
+            batch_size = batch_data.y1.shape[0]
+            batch_data.y2 = torch.full((batch_size,), float('nan'), device=batch_data.y1.device)
+            print(f"Note: Created dummy y2 for batch {batch_key}")
     
     return dict_loader

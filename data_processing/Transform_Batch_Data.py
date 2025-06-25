@@ -160,8 +160,8 @@ for i in range(len(df)):  # ← CHANGED: use len(df) instead
         # Use the flexible function for all cases
         graphs = poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan)
     
-    if tokenization=="oldtok":
-            target_tokens = tokenize_poly_input(poly_input=poly_input)
+        if tokenization=="oldtok":
+                target_tokens = tokenize_poly_input(poly_input=poly_input)
         elif tokenization=="RT_tokenized":
             target_tokens = tokenize_poly_input_RTlike(poly_input=poly_input)
         
@@ -178,7 +178,6 @@ for i in range(len(df)):  # ← CHANGED: use len(df) instead
             print(f"Too many failures ({failed_molecules}). Stopping.")
             raise
 
-# ← ADD THESE LINES AFTER THE LOOP
 print(f"\n✅ Successfully processed {len(Graphs_list)} molecules")
 print(f"❌ Failed to process {failed_molecules} molecules")
 

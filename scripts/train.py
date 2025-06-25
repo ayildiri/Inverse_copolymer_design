@@ -898,7 +898,10 @@ if not os.path.exists(directory_path):
     os.makedirs(directory_path)
 
 es_patience = model_config['es_patience']
-# Replace EarlyStopping with EarlyStoppingWithValidity
+# Keep BOTH early stopping mechanisms
+# Traditional early stopping for best loss
+earlystopping_loss = EarlyStopping(dir=directory_path, patience=es_patience)
+# Combined early stopping for best combined metric
 earlystopping = EarlyStoppingWithValidity(dir=directory_path, patience=es_patience, validity_weight=0.3)
 
 print(f'STARTING TRAINING')
@@ -1132,11 +1135,17 @@ for epoch in range(epoch_cp, epochs):
             'global_step': global_step,
             'monotonic_step': monotonic_step,
         }
-        # Use the new combined early stopping
-        model_saved = earlystopping(val_loss, model_dict, generation_validity)
-        if model_saved:
-            print(f"🎯 [INFO] New best model saved with combined score")
+        # Save best loss model (traditional)
+        loss_improved = earlystopping_loss(val_loss, model_dict)
+        if loss_improved:
+            print(f"💾 [INFO] New best loss model saved: {val_loss:.5f}")
+        
+        # Save best combined model (loss + validity)
+        combined_improved = earlystopping(val_loss, model_dict, generation_validity)
+        if combined_improved:
+            print(f"🎯 [INFO] New best combined model saved")
 
+    # Use combined metric for actual early stopping
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")
         break
@@ -1178,6 +1187,11 @@ save_loss_dicts(train_loss_dict, val_loss_dict, directory_path)
 print('Done!\n')
 print(f'Model trained to predict {property_count} properties: {property_names}')
 print(f'Checkpoints saved to: {directory_path}')
+print(f'Model files saved:')
+print(f'  - model_best_loss.pt (traditional best validation loss)')
+print(f'  - model_best_combined.pt (best combined loss + generation quality)')
+print(f'  - model_latest.pt (most recent checkpoint)')
+print(f'  - model_validity_*.pt (validity-based checkpoints)')
 print(f'Final training configuration:')
 print(f'  - Dropout rate: {args.dropout_rate}')
 print(f'  - Weight decay: {args.weight_decay}')

@@ -6,10 +6,19 @@ import os
 
 def load_transfer_data(csv_path, stage, source_properties, target_properties, 
                       batch_size, tokenization, vocab, sample_weight=1.0, 
-                      device='cuda', dataset_path='/content/renamed_dataset'):
+                      device='cuda', dataset_path=None):
     """
     Transfer learning data loading that works with stage-specific directories
     """
+    
+    # ADD THIS BLOCK HERE (between lines 11-12)
+    if dataset_path is None:
+        # Default paths based on stage
+        base_path = "/content/drive/MyDrive/X_Materials_Organized_Files_V1/2_Inverse_Design/Transfer_Learning"
+        if stage == 1:
+            dataset_path = os.path.join(base_path, "Stage1_Data")
+        else:
+            dataset_path = os.path.join(base_path, "Stage2_Data")
     
     if stage == 1:
         print(f"Stage 1: Loading dataset with {source_properties}")

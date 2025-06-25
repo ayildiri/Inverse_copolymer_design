@@ -65,8 +65,8 @@ if args.input_file:
     # Use the custom input file path
     df = pd.read_csv(args.input_file)
     print(f"Loading custom dataset from: {args.input_file}")
-    # Override the augment value to ensure correct file naming
-    file_prefix = os.path.basename(args.input_file).split('.')[0]
+    # Use augment value for consistency in file naming
+    file_prefix = augment  # ← CHANGED THIS LINE
     print(f"Using file prefix for outputs: {file_prefix}")
 else:
     # Use the default paths based on augment value
@@ -76,7 +76,6 @@ else:
     elif augment == "augmented":
         df = pd.read_csv(os.path.join(main_dir_path, 'data', 'dataset-combined-poly_chemprop.csv'))
         file_prefix = "augmented"
-    print(f"Loading default dataset based on augment={augment}")
 
 # Verify that all property columns exist in the dataframe
 missing_columns = [col for col in property_columns if col not in df.columns]
@@ -110,6 +109,24 @@ if args.semi_supervised and property_names == ['EA', 'IP']:
     print(f"   ✅ Stage 1 dataset size: {len(df):,}")
     print("="*60)
 
+# Stage 2 filtering - for bandgap, exclude unlabeled molecules
+if property_names == ['bandgap'] and not args.semi_supervised:
+    print("\n🎯 STAGE 2 MODE: Filtering for bandgap-labeled molecules only")
+    print("="*60)
+    
+    original_size = len(df)
+    
+    # For Stage 2, only include molecules with bandgap labels
+    has_bandgap = df['bandgap_eV'].notna()
+    
+    # Apply the mask
+    df = df[has_bandgap].copy()
+    
+    print(f"📊 Data composition for Stage 2:")
+    print(f"   Original dataset size: {original_size:,}")
+    print(f"   With bandgap labels: {has_bandgap.sum():,}")
+    print(f"   ✅ Stage 2 dataset size: {len(df):,}")
+    print("="*60)
 
 # %% Lets create PyG data objects
 
@@ -121,36 +138,52 @@ Graphs_list = []
 target_tokens_list = []
 target_tokens_ids_list = []
 target_tokens_lens_list = []
-for i in range(len(df.loc[:, 'poly_chemprop_input'])):
-    poly_input = df.loc[i, 'poly_chemprop_input']
-    try: poly_input_nocan = df.loc[i, 'poly_chemprop_input_nocan']
-    except: poly_input_nocan=None
+failed_molecules = 0  # ← ADD THIS
+
+for i in range(len(df)):  # ← CHANGED: use len(df) instead
+    try:  # ← ADD TRY BLOCK
+        poly_input = df.iloc[i]['poly_chemprop_input']  # ← CHANGED to iloc
+        try: 
+            poly_input_nocan = df.iloc[i]['poly_chemprop_input_nocan']  # ← CHANGED to iloc
+        except: 
+            poly_input_nocan = None
+        
+        # Extract property values dynamically based on property_columns
+        property_values = []
+        for prop_col in property_columns:
+            prop_value = df.iloc[i][prop_col]  # ← CHANGED to iloc
+            property_values.append(prop_value)
+        
+        # Import the flexible function if not already imported
+        from data_processing.Function_Featurization_Own import poly_smiles_to_graph_flexible
+        
+        # Use the flexible function for all cases
+        graphs = poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan)
     
-    # Extract property values dynamically based on property_columns
-    property_values = []
-    for prop_col in property_columns:
-        prop_value = df.loc[i, prop_col]
-        property_values.append(prop_value)
-    
-    # Create graph with flexible property values using the updated Function_Featurization_Own.py
-    # Import the flexible function if not already imported
-    from data_processing.Function_Featurization_Own import poly_smiles_to_graph_flexible
-    
-    # Use the flexible function for all cases
-    graphs = poly_smiles_to_graph_flexible(poly_input, property_values, poly_input_nocan)
-    
-    #if string_format == "gbigsmileslike":
-    #    poly_input_gbigsmileslike = df.loc[i, 'poly_chemprop_input_GbigSMILESlike']
-    #    target_tokens = tokenize_poly_input_new(poly_input=poly_input_gbigsmileslike, tokenization=tokenization)
-    #elif string_format=="poly_chemprop":
     if tokenization=="oldtok":
-        target_tokens = tokenize_poly_input(poly_input=poly_input)
-    elif tokenization=="RT_tokenized":
-        target_tokens = tokenize_poly_input_RTlike(poly_input=poly_input)
-    Graphs_list.append(graphs)
-    target_tokens_list.append(target_tokens)
-    if i % 100 == 0:
-        print(f"[{i} / {len(df.loc[:, 'poly_chemprop_input'])}]")
+            target_tokens = tokenize_poly_input(poly_input=poly_input)
+        elif tokenization=="RT_tokenized":
+            target_tokens = tokenize_poly_input_RTlike(poly_input=poly_input)
+        
+        Graphs_list.append(graphs)
+        target_tokens_list.append(target_tokens)
+        
+        if i % 100 == 0:
+            print(f"[{i} / {len(df)}] - Successfully processed")  # ← CHANGED message
+            
+    except Exception as e:  # ← ADD EXCEPTION HANDLING
+        failed_molecules += 1
+        print(f"ERROR processing molecule {i}: {str(e)}")
+        if failed_molecules > 10:  # Stop if too many failures
+            print(f"Too many failures ({failed_molecules}). Stopping.")
+            raise
+
+# ← ADD THESE LINES AFTER THE LOOP
+print(f"\n✅ Successfully processed {len(Graphs_list)} molecules")
+print(f"❌ Failed to process {failed_molecules} molecules")
+
+if len(Graphs_list) == 0:
+    raise ValueError("No molecules were successfully processed!")
 
 # Create flexible file names that include property information
 property_suffix = "_".join(property_names)
@@ -174,8 +207,18 @@ for sample_idx, g in enumerate(Graphs_list):
     g.tgt_token_ids = target_tokens_ids_list[sample_idx]
     g.tgt_token_lens = target_tokens_lens_list[sample_idx]
 
+
 # Save graphs (and tgt token) data with property suffix
-torch.save(Graphs_list, os.path.join(output_dir, graphs_filename))
+graphs_path = os.path.join(output_dir, graphs_filename)
+torch.save(Graphs_list, graphs_path)
+
+# ← ADD THESE VERIFICATION LINES
+# Verify the file was saved
+if os.path.exists(graphs_path):
+    file_size = os.path.getsize(graphs_path) / (1024 * 1024)  # Size in MB
+    print(f"✅ Successfully saved {graphs_filename} ({file_size:.2f} MB)")
+else:
+    raise IOError(f"Failed to save {graphs_filename}")
 
 # Create training, self supervised and test sets
 
@@ -697,13 +740,29 @@ for step, data in enumerate(train_loader):
 
 # %% Create dictionary with bathed graphs and message passing matrices for supervised train set
 
-# Save with property suffix for consistency
 dict_train_loader = MP_Matrix_Creator(train_loader, device)
-torch.save(dict_train_loader, os.path.join(output_dir, f'dict_train_loader_{file_prefix}_{tokenization}_{property_suffix}.pt'))
+train_path = os.path.join(output_dir, f'dict_train_loader_{file_prefix}_{tokenization}_{property_suffix}.pt')
+torch.save(dict_train_loader, train_path)
+if os.path.exists(train_path):  # ← ADD VERIFICATION
+    print(f"✅ Saved training loader: {os.path.basename(train_path)}")
+else:
+    raise IOError(f"Failed to save training loader")
+
 dict_val_loader = MP_Matrix_Creator(val_loader, device)
-torch.save(dict_val_loader, os.path.join(output_dir, f'dict_val_loader_{file_prefix}_{tokenization}_{property_suffix}.pt'))
+val_path = os.path.join(output_dir, f'dict_val_loader_{file_prefix}_{tokenization}_{property_suffix}.pt')
+torch.save(dict_val_loader, val_path)
+if os.path.exists(val_path):  # ← ADD VERIFICATION
+    print(f"✅ Saved validation loader: {os.path.basename(val_path)}")
+else:
+    raise IOError(f"Failed to save validation loader")
+
 dict_test_loader = MP_Matrix_Creator(test_loader, device)
-torch.save(dict_test_loader, os.path.join(output_dir, f'dict_test_loader_{file_prefix}_{tokenization}_{property_suffix}.pt'))
+test_path = os.path.join(output_dir, f'dict_test_loader_{file_prefix}_{tokenization}_{property_suffix}.pt')
+torch.save(dict_test_loader, test_path)
+if os.path.exists(test_path):  # ← ADD VERIFICATION
+    print(f"✅ Saved test loader: {os.path.basename(test_path)}")
+else:
+    raise IOError(f"Failed to save test loader")
 
 print('Done')
 print(f'Saved data files with prefix: {file_prefix} and property suffix: {property_suffix}')

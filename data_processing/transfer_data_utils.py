@@ -22,12 +22,10 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
     if stage == 1:
         print(f"Stage 1: Loading dataset with {source_properties}")
         
-        # For Stage 1, files are named with EA_IP pattern
-        property_str = "_".join(source_properties)  # "EA_IP"
-        
-        train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}_{property_str}.pt')
-        val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}_{property_str}.pt')
-        test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}_{property_str}.pt')
+        # Files have been standardized without property suffixes
+        train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
+        val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}.pt')
+        test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}.pt')
         
         # Check if files exist
         if not os.path.exists(train_loader_path):
@@ -101,12 +99,11 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         print(f"Stage 2: Loading dataset with {target_properties}")
         
         # For Stage 2, files are named with bandgap pattern
-        property_str = "_".join(target_properties)  # "bandgap"
-        
-        train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}_{property_str}.pt')
-        val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}_{property_str}.pt')
-        test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}_{property_str}.pt')
-        
+        # Files have been standardized without property suffixes
+        train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
+        val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}.pt')
+        test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}.pt')
+                
         # Check if files exist
         if not os.path.exists(train_loader_path):
             print(f"ERROR: Could not find {train_loader_path}")

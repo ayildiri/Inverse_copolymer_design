@@ -1,16 +1,35 @@
 import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
-
 import torch
 from rdkit import Chem
 from data_processing.data_utils import *
 import argparse
 
-def validate_training_data(data_path, vocab_path, tokenization="RT_tokenized"):
+def validate_training_data(data_path, vocab_path, tokenization="RT_tokenized", dataset_name=None):
     """Validate that training data contains valid SMILES"""
     
-    print("🔍 Validating training data...")
+    # Extract dataset type from path if not provided
+    if dataset_name is None:
+        if 'train' in data_path:
+            dataset_name = "TRAINING"
+        elif 'val' in data_path:
+            dataset_name = "VALIDATION"
+        elif 'test' in data_path:
+            dataset_name = "TEST"
+        else:
+            dataset_name = "UNKNOWN"
+    
+    # Extract stage from path
+    if 'Stage1' in data_path:
+        stage = "Stage 1"
+    elif 'Stage2' in data_path:
+        stage = "Stage 2"
+    else:
+        stage = "Unknown Stage"
+    
+    print(f"\n🔍 Validating {stage} {dataset_name} data...")
+    print(f"📁 File: {os.path.basename(data_path)}")
     
     # Load data
     dict_train_loader = torch.load(data_path)
@@ -70,14 +89,14 @@ def validate_training_data(data_path, vocab_path, tokenization="RT_tokenized"):
                 
             # Show progress
             if total_polymers % 100 == 0:
-                print(f"Processed {total_polymers} polymers...")
+                print(f"  Processed {total_polymers} polymers...")
     
     validity_rate = valid_polymers / total_polymers * 100
     
-    print(f"\n📊 TRAINING DATA VALIDATION RESULTS:")
-    print(f"Total polymers: {total_polymers}")
-    print(f"Valid polymers: {valid_polymers}")
-    print(f"Validity rate: {validity_rate:.1f}%")
+    print(f"\n📊 {stage} {dataset_name} DATA VALIDATION RESULTS:")
+    print(f"  Total polymers: {total_polymers:,}")
+    print(f"  Valid polymers: {valid_polymers:,}")
+    print(f"  Validity rate: {validity_rate:.1f}%")
     
     if invalid_examples:
         print(f"\n❌ First 5 invalid examples:")
@@ -91,9 +110,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", required=True)
     parser.add_argument("--vocab_path", required=True) 
     parser.add_argument("--tokenization", default="RT_tokenized")
+    parser.add_argument("--dataset_name", default=None, help="Name of dataset (train/val/test)")
     args = parser.parse_args()
     
-    is_valid = validate_training_data(args.data_path, args.vocab_path, args.tokenization)
+    is_valid = validate_training_data(args.data_path, args.vocab_path, args.tokenization, args.dataset_name)
     
     if not is_valid:
         print("\n⚠️ WARNING: Training data has validity issues!")

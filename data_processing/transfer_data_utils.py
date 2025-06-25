@@ -11,7 +11,6 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
     Transfer learning data loading that works with stage-specific directories
     """
     
-    # ADD THIS BLOCK HERE (between lines 11-12)
     if dataset_path is None:
         # Default paths based on stage
         base_path = "/content/drive/MyDrive/X_Materials_Organized_Files_V1/2_Inverse_Design/Transfer_Learning"
@@ -78,6 +77,19 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         else:
             print(f"   ⚠️  No unlabeled data found - running supervised learning only")
         
+        # Apply weighted sampling if requested
+        if sample_weight != 1.0 and unlabeled_count > 0:
+            print(f"\n   🎯 Applying weighted sampling with weight={sample_weight} for labeled data")
+            dict_train_loader = apply_weighted_sampling(dict_train_loader, sample_weight)
+            
+            # Recount after weighted sampling
+            new_labeled, new_unlabeled = check_data_composition(dict_train_loader, 'y1', 'y2')
+            new_total = new_labeled + new_unlabeled
+            print(f"   📊 After weighted sampling:")
+            print(f"      Labeled: {new_labeled:,} ({new_labeled/new_total*100:.1f}%)")
+            print(f"      Unlabeled: {new_unlabeled:,} ({new_unlabeled/new_total*100:.1f}%)")
+            print(f"      Total batches: {len(dict_train_loader)}")
+        
         # Check validation and test set composition too
         val_labeled, val_unlabeled = check_data_composition(dict_val_loader, 'y1', 'y2')
         test_labeled, test_unlabeled = check_data_composition(dict_test_loader, 'y1', 'y2')
@@ -137,6 +149,54 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
             print(f"   ⚠️  Warning: Stage 2 contains unlabeled data - this is unusual")
     
     return dict_train_loader, dict_val_loader, dict_test_loader
+
+def apply_weighted_sampling(dict_loader, sample_weight):
+    """
+    Apply weighted sampling to oversample batches with more labeled data.
+    This duplicates batches that have high labeled content.
+    """
+    # First, analyze each batch
+    batch_info = []
+    for batch_key in dict_loader:
+        batch_data = dict_loader[batch_key][0]
+        labeled_count = 0
+        
+        for i in range(batch_data.num_graphs):
+            if hasattr(batch_data, 'y1') and hasattr(batch_data, 'y2'):
+                y1_val = batch_data.y1[i] if i < len(batch_data.y1) else float('nan')
+                y2_val = batch_data.y2[i] if i < len(batch_data.y2) else float('nan')
+                
+                if not torch.isnan(y1_val) and not torch.isnan(y2_val):
+                    labeled_count += 1
+        
+        labeled_ratio = labeled_count / batch_data.num_graphs
+        batch_info.append((batch_key, labeled_ratio, labeled_count))
+    
+    # Create new dict with weighted sampling
+    new_dict_loader = {}
+    new_batch_idx = 0
+    
+    for batch_key, labeled_ratio, labeled_count in batch_info:
+        # Always include the original batch
+        new_dict_loader[str(new_batch_idx)] = dict_loader[batch_key]
+        new_batch_idx += 1
+        
+        # Duplicate batches with high labeled content
+        if labeled_ratio > 0.5:  # If more than 50% labeled
+            # Number of duplications based on sample_weight
+            n_duplicates = int((sample_weight - 1) * labeled_ratio)
+            for _ in range(n_duplicates):
+                new_dict_loader[str(new_batch_idx)] = dict_loader[batch_key]
+                new_batch_idx += 1
+        elif labeled_ratio > 0:  # Batches with some labeled data
+            # Probabilistically duplicate based on labeled ratio and sample_weight
+            if np.random.random() < (sample_weight - 1) * labeled_ratio:
+                new_dict_loader[str(new_batch_idx)] = dict_loader[batch_key]
+                new_batch_idx += 1
+    
+    print(f"   📈 Expanded from {len(dict_loader)} to {len(new_dict_loader)} batches")
+    
+    return new_dict_loader
 
 def check_data_composition(dict_loader, prop1='y1', prop2=None):
     """

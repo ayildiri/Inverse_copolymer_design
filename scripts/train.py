@@ -102,6 +102,34 @@ class EarlyStopping:
             self.counter = 0
             return True  # Indicate that a new best model was saved
 
+class EarlyStoppingWithValidity:
+    def __init__(self, dir, patience, validity_weight=0.3):
+        self.patience = patience
+        self.counter = 0
+        self.best_score = None
+        self.best_validity = 0
+        self.early_stop = False
+        self.save_dir = dir
+        self.validity_weight = validity_weight
+
+    def __call__(self, val_loss, model_dict, generation_validity=0):
+        # Combine loss and validity into a single score
+        # Lower loss is better, higher validity is better
+        combined_score = val_loss * (1 - self.validity_weight) - generation_validity * self.validity_weight
+        
+        if self.best_score is None or combined_score < self.best_score:
+            self.best_score = combined_score
+            self.best_validity = generation_validity
+            torch.save(model_dict, os.path.join(self.save_dir, "model_best_combined.pt"))
+            print(f"💾 New best model: loss={val_loss:.4f}, validity={generation_validity:.1%}")
+            self.counter = 0
+            return True
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+            return False
+
 
 def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold):
     # shuffle batches every epoch
@@ -374,54 +402,81 @@ def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
         print(f"[ERROR] Could not save val_loss.pkl: {e}")
 
 def validate_generation_quality(model, vocab, device, num_samples=100):
-    """Test generation quality during training with improved error handling"""
+    """Test generation quality with both format and chemical validity"""
     model.eval()
-    valid_count = 0
+    format_valid_count = 0
+    rdkit_valid_count = 0
+    
+    # Import RDKit if available
+    try:
+        from rdkit import Chem
+        rdkit_available = True
+    except ImportError:
+        rdkit_available = False
+        print("Warning: RDKit not available for chemical validation")
     
     with torch.no_grad():
         try:
             z_random = torch.randn(num_samples, model.embedding_dim, device=device)
-            
-            # Call inference on the full model, not just the decoder
             result = model.inference(data=z_random, device=device, sample=False, log_var=None)
             
-            # Handle the return values properly based on model type
             if len(result) >= 4:
                 predictions, _, _, _ = result[:4]
             else:
                 predictions = result[0] if result else None
             
             if predictions is None:
-                print("Warning: No predictions returned from model inference")
-                return 0.0
+                return 0.0, 0.0
             
-            # Process predictions with improved error handling
             for i in range(min(len(predictions), num_samples)):
                 try:
                     if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
                         pred_tokens = predictions[i][0]
-                        
-                        # Use the safe token processing function
                         smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
                         
-                        # Check for basic G2S format validity
+                        # Format validity check
                         if (len(smiles_string) > 10 and 
-                            '|' in smiles_string and  # Must have pipe separators
-                            '[*:' in smiles_string and  # Must have attachment points
+                            '|' in smiles_string and
+                            '[*:' in smiles_string and
                             smiles_string.count('(') == smiles_string.count(')') and
                             smiles_string.count('[') == smiles_string.count(']')):
-                            valid_count += 1
-                except Exception as e:
-                    # Skip this sample and continue
+                            format_valid_count += 1
+                            
+                            # Chemical validity check with RDKit
+                            if rdkit_available and '|' in smiles_string:
+                                smiles_part = smiles_string.split('|')[0]
+                                try:
+                                    if '.' in smiles_part:
+                                        # Copolymer
+                                        monomers = smiles_part.split('.')
+                                        all_valid = True
+                                        for monomer in monomers:
+                                            if monomer.strip():
+                                                mol = Chem.MolFromSmiles(monomer)
+                                                if mol is None:
+                                                    all_valid = False
+                                                    break
+                                        if all_valid:
+                                            rdkit_valid_count += 1
+                                    else:
+                                        # Single monomer
+                                        mol = Chem.MolFromSmiles(smiles_part)
+                                        if mol is not None:
+                                            rdkit_valid_count += 1
+                                except:
+                                    pass
+                except:
                     continue
                     
         except Exception as e:
             print(f"Generation validation failed: {e}")
-            return 0.0
+            return 0.0, 0.0
     
-    validity_rate = valid_count / num_samples if num_samples > 0 else 0.0
+    format_validity = format_valid_count / num_samples if num_samples > 0 else 0.0
+    rdkit_validity = rdkit_valid_count / num_samples if num_samples > 0 else 0.0
+    
     model.train()
-    return validity_rate
+    return format_validity, rdkit_validity
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -843,7 +898,8 @@ if not os.path.exists(directory_path):
     os.makedirs(directory_path)
 
 es_patience = model_config['es_patience']
-earlystopping = EarlyStopping(dir=directory_path, patience=es_patience)
+# Replace EarlyStopping with EarlyStoppingWithValidity
+earlystopping = EarlyStoppingWithValidity(dir=directory_path, patience=es_patience, validity_weight=0.3)
 
 print(f'STARTING TRAINING')
 print(f'Model will predict {property_count} properties: {property_names}')
@@ -925,6 +981,13 @@ for epoch in range(epoch_cp, epochs):
     minutes = int((epoch_time % 3600) // 60)
     seconds = epoch_time % 60
     time_str = f"{hours}h {minutes}m {seconds:.2f}s" if hours > 0 else f"{minutes}m {seconds:.2f}s" if minutes > 0 else f"{seconds:.2f}s"
+
+    # Add beta/alpha cycling monitor
+    if epoch % 5 == 0 and model_config['beta'] == "schedule":
+        print(f"📊 Schedule status:")
+        print(f"   Beta: {model.beta:.6f} (max: {model_config['max_beta']})")
+        print(f"   Alpha: {model.alpha:.6f} (max: {model_config['max_alpha']})")
+        print(f"   Global step: {global_step} / {len(beta_schedule)}")
 
     # Run validation based on frequency
     if (epoch + 1) % args.validation_freq == 0:
@@ -1010,28 +1073,28 @@ for epoch in range(epoch_cp, epochs):
         torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
         print(f"Saved latest checkpoint *after* epoch {epoch + 1}")
 
-    # FIXED: Check and save best model with proper logging (only when validation runs)
-    if (epoch + 1) % args.validation_freq == 0:
-        model_dict = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss_dict': train_loss_dict,
-            'val_loss_dict': val_loss_dict,
-            'model_config': model_config,
-            'global_step': global_step,
-            'monotonic_step': monotonic_step,
-        }
-        model_saved = earlystopping(val_loss, model_dict)
-        if model_saved:
-            print(f"🎯 [INFO] New best model saved with validation loss: {val_loss:.5f}")
-    
     # Test generation validity every epoch (or at least when validation runs)
     generation_validity = 0.0
+    rdkit_validity = 0.0
     if (epoch + 1) % args.validation_freq == 0:  # Test when validation runs
         print(f"🧪 Testing generation quality...")
-        generation_validity = validate_generation_quality(model, vocab, device, num_samples=50)
-        print(f"📊 Generation validity: {generation_validity:.1%}")
+        generation_validity, rdkit_validity = validate_generation_quality(model, vocab, device, num_samples=50)
+        print(f"📊 Format validity: {generation_validity:.1%}, Chemical validity: {rdkit_validity:.1%}")
+        
+        # Add checkpoint saving based on validity
+        if generation_validity > 0.15:  # Save when validity is decent
+            validity_checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss_dict': train_loss_dict,
+                'val_loss_dict': val_loss_dict,
+                'model_config': model_config,
+                'generation_validity': generation_validity,
+                'val_loss': val_loss
+            }
+            torch.save(validity_checkpoint, os.path.join(directory_path, f"model_validity_{generation_validity:.3f}_epoch_{epoch+1}.pt"))
+            print(f"💾 Saved validity checkpoint: {generation_validity:.1%} at epoch {epoch+1}")
         
         # Only show detailed analysis every 10 epochs to reduce clutter
         if (epoch + 1) % 10 == 0:
@@ -1057,6 +1120,23 @@ for epoch in range(epoch_cp, epochs):
         elif generation_validity < 0.1 and epoch > 30:
             print(f"⚠️  Poor generation quality detected. Consider adjusting hyperparameters.")
 
+    # FIXED: Check and save best model with proper logging (only when validation runs)
+    if (epoch + 1) % args.validation_freq == 0:
+        model_dict = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss_dict': train_loss_dict,
+            'val_loss_dict': val_loss_dict,
+            'model_config': model_config,
+            'global_step': global_step,
+            'monotonic_step': monotonic_step,
+        }
+        # Use the new combined early stopping
+        model_saved = earlystopping(val_loss, model_dict, generation_validity)
+        if model_saved:
+            print(f"🎯 [INFO] New best model saved with combined score")
+
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")
         break
@@ -1070,7 +1150,7 @@ for epoch in range(epoch_cp, epochs):
         print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | Val Loss: {val_loss:.5f} | Val KLD: {val_kld_loss:.5f}")
         print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f} | Val Acc: {val_acc:.5f} | Val MSE: {val_mse:.5f}")
         if generation_validity > 0:
-            print(f"🧪 Generation Validity: {generation_validity:.1%}")
+            print(f"🧪 Format Validity: {generation_validity:.1%} | Chemical Validity: {rdkit_validity:.1%}")
     else:
         print(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.5f} | Train KLD: {train_kld_loss:.5f} | [Validation skipped]")
         print(f"Train Acc: {train_acc:.5f} | Train MSE: {train_mse:.5f}")

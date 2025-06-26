@@ -518,6 +518,8 @@ parser.add_argument("--max_alpha", type=float, default=0.1)
 parser.add_argument("--epsilon", type=float, default=1)
 parser.add_argument("--epochs", type=int, default=100, help="number of training epochs")
 parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+parser.add_argument("--validation_samples", type=int, default=100, 
+                    help="Number of samples to generate for validity checking")
 parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume training from")
 parser.add_argument("--save_dir", type=str, default=None, help="Custom directory to save model checkpoints")
 
@@ -1089,7 +1091,7 @@ for epoch in range(epoch_cp, epochs):
     rdkit_validity = 0.0
     if (epoch + 1) % args.validation_freq == 0:  # Test when validation runs
         print(f"🧪 Testing generation quality...")
-        generation_validity, rdkit_validity = validate_generation_quality(model, vocab, device, num_samples=50)
+        generation_validity, rdkit_validity = validate_generation_quality(model, vocab, device, num_samples=args.validation_samples)
         print(f"📊 Format validity: {generation_validity:.1%}, Chemical validity: {rdkit_validity:.1%}")
         
         # Add checkpoint saving based on validity

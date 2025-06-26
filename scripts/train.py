@@ -901,8 +901,9 @@ if args.save_dir is not None:
 else:
     directory_path = os.path.join(main_dir_path,'Checkpoints/', model_name)
 
-if not os.path.exists(directory_path):
-    os.makedirs(directory_path)
+# Create directory with all parent directories
+os.makedirs(directory_path, exist_ok=True)
+print(f"✅ Checkpoint directory created/verified: {directory_path}")
 
 es_patience = model_config['es_patience']
 # Keep BOTH early stopping mechanisms

@@ -412,6 +412,7 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
     # Import RDKit if available
     try:
         from rdkit import Chem
+        import re
         rdkit_available = True
     except ImportError:
         rdkit_available = False
@@ -454,7 +455,9 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                                         all_valid = True
                                         for monomer in monomers:
                                             if monomer.strip():
-                                                mol = Chem.MolFromSmiles(monomer)
+                                                # CRITICAL FIX: Replace [*:n] with * for RDKit
+                                                monomer_clean = re.sub(r'\[\*:\d+\]', '*', monomer)
+                                                mol = Chem.MolFromSmiles(monomer_clean)
                                                 if mol is None:
                                                     all_valid = False
                                                     break
@@ -462,7 +465,9 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                                             rdkit_valid_count += 1
                                     else:
                                         # Single monomer
-                                        mol = Chem.MolFromSmiles(smiles_part)
+                                        # CRITICAL FIX: Replace [*:n] with * for RDKit
+                                        smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                        mol = Chem.MolFromSmiles(smiles_clean)
                                         if mol is not None:
                                             rdkit_valid_count += 1
                                 except:
@@ -703,13 +708,6 @@ if model_config['loss']=="wce":
     class_weights = torch.FloatTensor(class_weights)
 if model_config['loss']=="ce":
     class_weights=None
-
-def preprocess_polymer_smiles_for_rdkit(smiles):
-    """Replace polymer attachment points with RDKit-compatible wildcards"""
-    # Replace [*:n] with * (RDKit wildcard)
-    import re
-    cleaned = re.sub(r'\[\*:\d+\]', '*', smiles)
-    return cleaned
 
 def reset_context_attention(model):
     """Reset only the problematic context attention components"""

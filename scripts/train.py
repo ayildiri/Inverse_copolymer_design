@@ -327,7 +327,7 @@ def test(dict_loader):
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
-def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False, generation_validity=None):
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False, generation_validity=None, rdkit_validity=None):
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
     
@@ -349,14 +349,16 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
         if mode == 'w' or not os.path.exists(csv_file):
             writer.writerow([
                 'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
-                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 'generation_validity'
+                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 
+                'generation_validity', 'rdkit_validity'  # Added rdkit_validity
             ])
         # Always write the data row
         writer.writerow([
             epoch,
             train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],
             val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse'],
-            generation_validity if generation_validity is not None else 0.0
+            generation_validity if generation_validity is not None else 0.0,
+            rdkit_validity if rdkit_validity is not None else 0.0  # Added
         ])
 
 def load_existing_loss_dicts(directory_path):
@@ -701,6 +703,13 @@ if model_config['loss']=="wce":
     class_weights = torch.FloatTensor(class_weights)
 if model_config['loss']=="ce":
     class_weights=None
+
+def preprocess_polymer_smiles_for_rdkit(smiles):
+    """Replace polymer attachment points with RDKit-compatible wildcards"""
+    # Replace [*:n] with * (RDKit wildcard)
+    import re
+    cleaned = re.sub(r'\[\*:\d+\]', '*', smiles)
+    return cleaned
 
 def reset_context_attention(model):
     """Reset only the problematic context attention components"""
@@ -1175,7 +1184,7 @@ for epoch in range(epoch_cp, epochs):
     if (epoch + 1) % args.validation_freq == 0:
         train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
         val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
-        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint, generation_validity)
+        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint, generation_validity, rdkit_validity)
 
     # Save loss dictionaries periodically to avoid data loss
     if (epoch + 1) % args.checkpoint_freq == 0 or epoch == epochs - 1:

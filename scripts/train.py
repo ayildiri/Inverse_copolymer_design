@@ -235,7 +235,7 @@ def debug_elementwise_error(model, vocab, dict_train_loader):
                 if hasattr(first_batch, 'tgt_token_ids'):
                     sample = first_batch.tgt_token_ids[0][:5]
                     # CRITICAL FIX: Don't unsqueeze - check actual input shape
-                    test_input = torch.tensor([sample], device=device)  # Shape: [1, 5]
+                    test_input = torch.tensor([sample], device=device).unsqueeze(-1)  # Shape: [1, 5, 1]
                     print(f"   Actual input dimensions: {test_input.ndim}")
                     print(f"   Input shape: {test_input.shape}")
                     

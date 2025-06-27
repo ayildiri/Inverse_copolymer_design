@@ -1064,7 +1064,7 @@ for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch + 1}\n" + "-" * 30)
 
     t1 = time.time()
-    model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step, args.gradient_clip_threshold)
+    model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step, args.gradient_clip_threshold, epoch, epochs)
     t2 = time.time()
 
     epoch_time = t2 - t1

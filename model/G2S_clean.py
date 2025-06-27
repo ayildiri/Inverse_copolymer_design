@@ -255,10 +255,18 @@ class SequenceDecoder(nn.Module):
 
         self.decoder_embeddings = Embeddings(
             word_vec_size=model_config['embedding_dim'],
-            word_vocab_size=len(self.vocab),  # <-- FIXED: Removed +1
+            word_vocab_size=len(self.vocab),
             word_padding_idx=self.vocab["_PAD"],
             position_encoding=True,
-            dropout=0.3
+            position_encoding_type="SinusoidalInterleaved",
+            feat_merge="concat",
+            feat_vec_exponent=0.7,
+            feat_vec_size=-1,
+            feat_padding_idx=[],          # ← CRITICAL: Empty list
+            feat_vocab_sizes=[],          # ← CRITICAL: Empty list - no feature embeddings
+            dropout=0.3,
+            sparse=False,
+            freeze_word_vecs=False
         )
         if self.add_latent: 
             d_model=model_config['embedding_dim']*2

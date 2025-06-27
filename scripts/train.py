@@ -44,7 +44,7 @@ def debug_vocab_and_embeddings(vocab_file_path, dataset_path=None):
         raise
 
 def validate_model_configuration(model, vocab, dict_train_loader):
-    """Comprehensive validation of model configuration - FIXED"""
+    """Simplified validation since embeddings are now validated in model"""
     
     print("🔧 VALIDATING MODEL CONFIGURATION...")
     
@@ -56,43 +56,7 @@ def validate_model_configuration(model, vocab, dict_train_loader):
         f"Output layer size mismatch! Model has {decoder_vocab_size} but vocab has {actual_vocab_size}"
     print(f"✅ Vocabulary size validated: {actual_vocab_size}")
     
-    # 2. Embedding configuration validation - FIXED
-    embeddings = model.Decoder.decoder_embeddings
-    print(f"✅ Embedding configuration:")
-    print(f"   Word vec size: {embeddings.word_vec_size}")
-    
-    # FIXED: Safely access embedding information
-    try:
-        if hasattr(embeddings, 'make_embedding'):
-            if hasattr(embeddings.make_embedding, '__len__') and len(embeddings.make_embedding) > 0:
-                # Try to get the first embedding layer
-                first_emb = embeddings.make_embedding[0]
-                if hasattr(first_emb, 'num_embeddings'):
-                    print(f"   Word vocab size: {first_emb.num_embeddings}")
-                elif hasattr(first_emb, '__len__'):
-                    print(f"   Embedding modules: {len(first_emb)} modules")
-                else:
-                    print(f"   Embedding type: {type(first_emb).__name__}")
-            else:
-                print(f"   Make embedding type: {type(embeddings.make_embedding).__name__}")
-        
-        print(f"   Position encoding: {embeddings.position_encoding}")
-        
-        # Check for feature embeddings safely
-        if hasattr(embeddings, 'make_embedding'):
-            try:
-                emb_len = len(embeddings.make_embedding) if hasattr(embeddings.make_embedding, '__len__') else 1
-                if emb_len > 1:
-                    print(f"   Feature embeddings detected: {emb_len - 1} feature types")
-                else:
-                    print(f"   Feature embeddings: None (word-only)")
-            except:
-                print(f"   Feature embeddings: Could not determine structure")
-    except Exception as e:
-        print(f"   ⚠️ Could not fully analyze embedding structure: {e}")
-        print(f"   Embedding type: {type(embeddings).__name__}")
-    
-    # 3. Test forward pass with sample data - ENHANCED
+    # 2. Test forward pass with sample data
     print("🧪 Testing forward pass...")
     
     try:
@@ -107,141 +71,23 @@ def validate_model_configuration(model, vocab, dict_train_loader):
         test_dest.to(device)
         test_inc.to(device)
         
-        # ENHANCED: Check data structure first
         print(f"   Test batch info:")
         print(f"     Num graphs: {test_data.num_graphs}")
         print(f"     Node features: {test_data.num_node_features}")
         print(f"     Edge features: {test_data.num_edge_features}")
         
-        if hasattr(test_data, 'tgt_token_ids'):
-            print(f"     Target sequences: {len(test_data.tgt_token_ids)}")
-            if len(test_data.tgt_token_ids) > 0:
-                sample_seq = test_data.tgt_token_ids[0]
-                if isinstance(sample_seq, torch.Tensor):
-                    sample_tokens = sample_seq.tolist()
-                else:
-                    sample_tokens = list(sample_seq)
-                print(f"     Sample sequence length: {len(sample_tokens)}")
-                print(f"     Sample token range: [{min(sample_tokens)}, {max(sample_tokens)}]")
-        
-        # Test encoding
+        # Test encoding only (simpler test)
         with torch.no_grad():
             if hasattr(model, 'Encoder'):
                 mu, logvar = model.Encoder(test_data, test_dest, test_inc, device)
                 print(f"✅ Encoder output shapes: mu={mu.shape}, logvar={logvar.shape}")
-                
-                # Test sample from latent space
-                z = model.sample(mu, logvar, eps_scale=model.eps)
-                print(f"✅ Latent sample shape: {z.shape}")
-                
-                # Test decoder embeddings specifically - ENHANCED
-                if hasattr(test_data, 'tgt_token_ids') and len(test_data.tgt_token_ids) > 0:
-                    # Use first 5 tokens from first sequence for testing
-                    sample_tokens = test_data.tgt_token_ids[0][:5]  
-                    target = torch.tensor([sample_tokens], device=device).unsqueeze(-1)
-                    
-                    print(f"   Testing embedding with shape: {target.shape}")
-                    print(f"   Token range in test: [{target.min().item()}, {target.max().item()}]")
-                    
-                    try:
-                        emb_output = model.Decoder.decoder_embeddings(target)
-                        print(f"✅ Embedding output shape: {emb_output.shape}")
-                        print(f"✅ Embedding dimension: {emb_output.size(-1)}")
-                    except Exception as emb_error:
-                        print(f"❌ EMBEDDING ERROR: {emb_error}")
-                        print(f"   Target shape: {target.shape}")
-                        print(f"   Target dtype: {target.dtype}")
-                        print(f"   Target range: [{target.min().item()}, {target.max().item()}]")
-                        print(f"   Vocab size: {len(vocab)}")
-                        
-                        # CRITICAL DEBUG: Check if this is the Elementwise error
-                        if "assert len(self) == len(emb_)" in str(emb_error):
-                            print(f"\n🔥 FOUND THE ROOT CAUSE!")
-                            print(f"   This is the Elementwise dimension mismatch error!")
-                            print(f"   The embeddings module expects different input dimensions")
-                            print(f"   Target last dimension: {target.size(-1)}")
-                            print(f"   Expected by Elementwise: different size")
-                            
-                            # Check embedding configuration
-                            print(f"   Debugging embedding configuration...")
-                            if hasattr(embeddings, 'make_embedding'):
-                                print(f"   make_embedding type: {type(embeddings.make_embedding)}")
-                                if hasattr(embeddings.make_embedding, '__len__'):
-                                    print(f"   make_embedding length: {len(embeddings.make_embedding)}")
-                        
-                        raise
-                else:
-                    print(f"   ⚠️ No target token IDs found for embedding test")
-                        
+        
         print("✅ Forward pass validation completed successfully!")
         
     except Exception as e:
         print(f"❌ VALIDATION FAILED: {e}")
         print("🔧 This indicates a configuration mismatch.")
-        
-        # Enhanced error diagnosis
-        if "Elementwise" in str(e):
-            print(f"\n🔥 ELEMENTWISE ERROR DETECTED!")
-            print(f"This means the embeddings are configured with feature dimensions")
-            print(f"but the input data doesn't match those dimensions.")
-            print(f"\n🔧 POSSIBLE SOLUTIONS:")
-            print(f"1. Regenerate embeddings with feat_vocab_sizes=[]")
-            print(f"2. Ensure input data has correct feature dimensions")
-            print(f"3. Check if data preprocessing matches model expectations")
-        
         raise
-
-def debug_elementwise_error(model, vocab, dict_train_loader):
-    """
-    Specific debugging for the Elementwise error
-    """
-    print(f"\n🔍 DEBUGGING ELEMENTWISE ERROR...")
-    
-    embeddings = model.Decoder.decoder_embeddings
-    
-    print(f"📊 Embeddings configuration:")
-    print(f"   Type: {type(embeddings)}")
-    print(f"   Word vec size: {embeddings.word_vec_size}")
-    
-    if hasattr(embeddings, 'make_embedding'):
-        make_emb = embeddings.make_embedding
-        print(f"   make_embedding type: {type(make_emb)}")
-        
-        if hasattr(make_emb, '__len__'):
-            print(f"   make_embedding length: {len(make_emb)}")
-            
-            for i, layer in enumerate(make_emb):
-                print(f"   Layer {i}: {type(layer)} - {layer}")
-                if hasattr(layer, 'num_embeddings'):
-                    print(f"     Vocab size: {layer.num_embeddings}")
-                if hasattr(layer, 'embedding_dim'):
-                    print(f"     Embedding dim: {layer.embedding_dim}")
-        
-        # Check if this is an Elementwise container
-        if "Elementwise" in str(type(make_emb)):
-            print(f"   🔍 Found Elementwise container!")
-            print(f"   This means multiple embedding tables are expected")
-            
-            # Get expected input dimensions
-            if hasattr(make_emb, '__len__'):
-                expected_dims = len(make_emb)
-                print(f"   Expected input dimensions: {expected_dims}")
-                
-                # Check sample data
-                first_batch = dict_train_loader[list(dict_train_loader.keys())[0]][0]
-                if hasattr(first_batch, 'tgt_token_ids'):
-                    sample = first_batch.tgt_token_ids[0][:5]
-                    test_input = torch.tensor([sample], device=device).unsqueeze(-1)
-                    print(f"   Actual input dimensions: {test_input.size(-1)}")
-                    print(f"   Input shape: {test_input.shape}")
-                    
-                    if test_input.size(-1) != expected_dims:
-                        print(f"   ❌ DIMENSION MISMATCH!")
-                        print(f"   Expected: {expected_dims}, Got: {test_input.size(-1)}")
-                        print(f"   \n🔧 SOLUTION: Modify embedding configuration")
-                        print(f"   Set feat_vocab_sizes=[] in SequenceDecoder initialization")
-    
-    return embeddings
 
 def safe_model_creation(model_class, *args, **kwargs):
     """Safely create model with better error reporting"""
@@ -265,67 +111,6 @@ def safe_model_creation(model_class, *args, **kwargs):
             print("2. Feature embedding configuration")
             print("3. Data preprocessing consistency")
         
-        raise
-
-def load_transfer_data_safely(csv_path, stage, source_properties, target_properties, 
-                              batch_size, tokenization, vocab, device, **kwargs):
-    """Safely load transfer learning data with vocabulary validation"""
-    
-    print(f"🔄 Loading transfer learning data for stage {stage}")
-    print(f"Source properties: {source_properties}")
-    print(f"Target properties: {target_properties}")
-    
-    try:
-        # Import your transfer data loading function
-        from data_processing.transfer_data_utils import load_transfer_data
-        
-        dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
-            csv_path=csv_path,
-            stage=stage,
-            source_properties=source_properties,
-            target_properties=target_properties,
-            batch_size=batch_size,
-            tokenization=tokenization,
-            vocab=vocab,
-            device=device,
-            **kwargs
-        )
-        
-        # Validate data consistency
-        print("🔍 Validating loaded data...")
-        
-        # Check first batch
-        first_key = list(dict_train_loader.keys())[0]
-        first_batch = dict_train_loader[first_key][0]
-        
-        if hasattr(first_batch, 'tgt_token_ids'):
-            max_token = max(max(seq) for seq in first_batch.tgt_token_ids)
-            if max_token >= len(vocab):
-                raise ValueError(f"Token ID {max_token} exceeds vocabulary size {len(vocab)}")
-        
-        print(f"✅ Transfer data loaded successfully")
-        return dict_train_loader, dict_val_loader, dict_test_loader
-        
-    except ImportError:
-        print("❌ transfer_data_utils not found. Using standard data loading...")
-        # Fallback to standard data loading
-        data_path_prefix = os.path.join(os.path.dirname(csv_path), f'dict_{{}}_loader_{tokenization}.pt')
-        try:
-            dict_train_loader = torch.load(data_path_prefix.format('train'))
-            dict_val_loader = torch.load(data_path_prefix.format('val'))
-            dict_test_loader = torch.load(data_path_prefix.format('test'))
-            return dict_train_loader, dict_val_loader, dict_test_loader
-        except Exception as e:
-            print(f"❌ Standard data loading also failed: {e}")
-            raise
-        
-    except Exception as e:
-        print(f"❌ Transfer data loading failed: {e}")
-        print("\n🔧 TROUBLESHOOTING:")
-        print("1. Check if transfer_data_utils.py exists and is correct")
-        print("2. Verify CSV file format and column names")
-        print("3. Ensure vocabulary file matches the tokenization used")
-        print("4. Check if property names match CSV columns")
         raise
 
 def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
@@ -627,8 +412,8 @@ def test(dict_loader):
             inc_edges_to_atom_matrix = dict_loader[str(batch)][2]
             inc_edges_to_atom_matrix.to(device)
 
-            # FIXED: Handle both basic VAE and PP-guided VAE
-            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            # FIXED: Always use teacher_forcing_ratio=1.0 for evaluation
+            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0)
 
             if len(result) == 7:  # Basic G2S_VAE
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
@@ -1072,8 +857,9 @@ elif args.add_latent ==0:
 # Model config and vocab
 if args.dataset_path:
     # Use custom dataset path
-    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}.txt')
-    data_path_prefix = os.path.join(args.dataset_path, f'dict_{{}}_loader_{augment}_{tokenization}.pt')
+    property_suffix = "_".join(property_names) if property_names else "basic"
+    vocab_file_path = os.path.join(args.dataset_path, f'poly_smiles_vocab_{augment}_{tokenization}_{property_suffix}.txt')
+    data_path_prefix = os.path.join(args.dataset_path, f'dict_{{}}_loader_{augment}_{tokenization}_{property_suffix}.pt')
 else:
     # Use default paths
     vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
@@ -1137,46 +923,31 @@ hidden_dimension = model_config['hidden_dimension']
 embedding_dim = model_config['embedding_dim']
 loss = model_config['loss']
 
-# %% Call data
+# %% Call data - SIMPLIFIED VERSION
 if args.training_stage == 1:
-    # Stage 1: Load all available data
-    print(f"Stage 1: Loading combined dataset for pretraining on {args.source_properties}")
+    # Stage 1: Use the data you created with Transform_Batch_Data.py
+    print(f"Stage 1: Loading data from {args.dataset_path}")
     
-    # Use safe data loading
-    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
-        csv_path=args.combined_dataset_path,
-        stage=1,
-        source_properties=args.source_properties,
-        target_properties=args.target_properties,
-        batch_size=batch_size,
-        tokenization=tokenization,
-        vocab=vocab,
-        sample_weight=args.stage1_sample_weight,
-        device=device
-    )
+    # Load Stage 1 data files
+    property_suffix = "_".join(args.property_names) if args.property_names else "basic"
     
-    # Update property names for stage 1
-    property_names = args.source_properties
-    property_count = len(property_names)
+    dict_train_loader = torch.load(os.path.join(args.dataset_path, f'dict_train_loader_{args.augment}_{args.tokenization}_{property_suffix}.pt'))
+    dict_val_loader = torch.load(os.path.join(args.dataset_path, f'dict_val_loader_{args.augment}_{args.tokenization}_{property_suffix}.pt'))
+    dict_test_loader = torch.load(os.path.join(args.dataset_path, f'dict_test_loader_{args.augment}_{args.tokenization}_{property_suffix}.pt'))
+    
+    print(f"✅ Stage 1 data loaded successfully")
     
 else:  # Stage 2
-    # Stage 2: Load only target property data
-    print(f"Stage 2: Loading data for fine-tuning on {args.target_properties}")
+    # Stage 2: Use the data you created with Transform_Batch_Data.py
+    print(f"Stage 2: Loading data from {args.dataset_path}")
     
-    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
-        csv_path=args.combined_dataset_path,
-        stage=2,
-        source_properties=args.source_properties,
-        target_properties=args.target_properties,
-        batch_size=batch_size,
-        tokenization=tokenization,
-        vocab=vocab,
-        device=device
-    )
+    property_suffix = "_".join(args.property_names) if args.property_names else "basic"
     
-    # Update property names for stage 2
-    property_names = args.target_properties
-    property_count = len(property_names)
+    dict_train_loader = torch.load(os.path.join(args.dataset_path, f'dict_train_loader_{args.augment}_{args.tokenization}_{property_suffix}.pt'))
+    dict_val_loader = torch.load(os.path.join(args.dataset_path, f'dict_val_loader_{args.augment}_{args.tokenization}_{property_suffix}.pt'))
+    dict_test_loader = torch.load(os.path.join(args.dataset_path, f'dict_test_loader_{args.augment}_{args.tokenization}_{property_suffix}.pt'))
+    
+    print(f"✅ Stage 2 data loaded successfully")
 
 # CRITICAL FIX: Verify data/vocab consistency AFTER loading data
 try:
@@ -1323,10 +1094,6 @@ try:
     validate_model_configuration(model, vocab, dict_train_loader)
 except Exception as e:
     print(f"❌ Model validation failed: {e}")
-    
-    # Run specific debugging for Elementwise errors
-    print(f"\n🔧 Running specialized Elementwise debugging...")
-    debug_elementwise_error(model, vocab, dict_train_loader)
     
     # Stop here so we can fix the issue
     raise

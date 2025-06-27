@@ -557,27 +557,30 @@ class SequenceDecoder(nn.Module):
                     if hasattr(layer.context_attn, 'attn'):
                         layer.context_attn.attn = None
 
-    def forward(self, graph_batch, z, loss_weights=None):
-        """Forward pass of decoder
-
+    def forward(self, graph_batch, z, loss_weights=None, teacher_forcing_ratio=1.0):
+        """Forward pass of decoder with scheduled teacher forcing
+    
         Args:
-            z (Tensor): Latent space embedding [b, h]
             graph_batch (Data): Data of correct graphs
-
+            z (Tensor): Latent space embedding [b, h]
+            loss_weights: Optional loss weights
+            teacher_forcing_ratio (float): Probability of using teacher forcing (1.0 = always use ground truth)
+    
         Returns:
-            Tensor, Tensor: Reconstruction loss and accuracy
+            Tensor, Tensor, Tensor, Tensor: Reconstruction loss, accuracy, predictions, target
         """
         # CRITICAL FIX: Reset decoder cache at the beginning of each forward pass
         self.reset_decoder_cache()
         
         z_length = 1  # Latent sequence length is always 1
         src_lengths = torch.ones(z.size(0), device=z.device).long()  # All 1s
+        
         # prepare target
         target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)[:, :-1]
         m = nn.ConstantPad1d((1, 0), self.vocab["_SOS"]) #pads SOS token left side (beginning of sequences)
         target = m(target)
         target = target.unsqueeze(-1) 
-
+    
         # CRITICAL FIX: Clear any existing decoder state to prevent graph retention
         if hasattr(self.Decoder, 'state'):
             self.Decoder.state.clear()
@@ -585,27 +588,64 @@ class SequenceDecoder(nn.Module):
         
         enc_output = z.unsqueeze(1)
         self.Decoder.state["src"] = enc_output
+        
+        # Implement scheduled sampling
+        use_teacher_forcing = torch.rand(1).item() < teacher_forcing_ratio
+        
+        if use_teacher_forcing or not self.training:
+            # Normal teacher forcing (use ground truth as input)
+            dec_outs, _ = self.Decoder(
+                tgt=target, 
+                enc_out=enc_output, 
+                src_len=src_lengths, 
+                step=target.size(1), 
+                add_latent=self.add_latent
+            )
+            dec_outs = self.output_layer(dec_outs)                                  # [t, b, h] => [t, b, v]
+            dec_outs = dec_outs.permute(0, 2, 1)                                    # [t, b, v] => [b, v, t]
+        else:
+            # Use model's own predictions (scheduled sampling)
+            batch_size = z.size(0)
+            max_len = target.size(1)
+            vocab_size = len(self.vocab)
+            
+            # Initialize output tensor
+            dec_outs = torch.zeros(batch_size, vocab_size, max_len, device=z.device)
+            
+            # Start with SOS token
+            current_input = target[:, :1, :]  # [b, 1, 1]
+            
+            for t in range(max_len):
+                # Decode one step
+                dec_out, _ = self.Decoder(
+                    tgt=current_input, 
+                    enc_out=enc_output, 
+                    src_len=src_lengths, 
+                    step=t+1, 
+                    add_latent=self.add_latent
+                )
+                
+                # Get logits for current step
+                logits = self.output_layer(dec_out)  # [1, b, vocab_size]
+                dec_outs[:, :, t] = logits.squeeze(0)  # Store in output tensor
+                
+                # Get prediction for next input
+                pred = torch.argmax(logits.squeeze(0), dim=-1)  # [b]
+                current_input = pred.unsqueeze(0).unsqueeze(-1)  # [1, b, 1]
+                
+                # Optionally mix with ground truth (curriculum learning)
+                if t < max_len - 1:
+                    # Random sampling per batch element
+                    use_gt = torch.rand(batch_size, 1, 1, device=z.device) < teacher_forcing_ratio
+                    ground_truth = target[:, t+1:t+2, :]  # Next ground truth token
+                    current_input = torch.where(use_gt.transpose(0, 1), ground_truth, current_input)
     
-        # decode
-        dec_outs, _ = self.Decoder(tgt=target, enc_out=enc_output, src_len=src_lengths, step=target.size(1), add_latent=self.add_latent)
-        #dec_outs, _ = self.Decoder(tgt=target, memory_bank=z.unsqueeze(2).repeat([1,1,56]).transpose(1,0), memory_lengths=memory_lens)
-        dec_outs = self.output_layer(dec_outs)                                  # [t, b, h] => [t, b, v]
-        dec_outs = dec_outs.permute(0, 2, 1)                                    # [t, b, v] => [b, v, t]
-
         # evaluate
-        # reproducible on GPU requires reduction none in CE loss in order to use torch.use_deterministic_algorithms(True), mean afterwards
-        # https://discuss.pytorch.org/t/pytorchs-non-deterministic-cross-entropy-loss-and-the-problem-of-reproducibility/172180/8
         target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)
         recon_loss = self.criterion(
             input=dec_outs, 
             target=target.long()
         )
-        # custom: assign more weight to predictions of critical decisions in string (stoichiometry and connectivity)
-        #positional_weights = self.conditional_position_weights(torch.tensor(graph_batch.tgt_token_ids, device=z.device))
-        #positional_weights = torch.from_numpy(positional_weights).to(z.device)
-
-        #recon_loss = recon_loss * positional_weights
-        #recon_loss = recon_loss.mean()
         
         predictions = torch.argmax(dec_outs.transpose(1,0), dim=0)                             # [b, t]
         mask = (target != self.vocab["_PAD"]).long()
@@ -615,8 +655,8 @@ class SequenceDecoder(nn.Module):
     
         # 🔧 ENHANCED: Add chemical validity penalty during training with RDKit
         validity_penalty = 0
-        if RDKIT_AVAILABLE:
-            for sample in range(len(predictions)):
+        if RDKIT_AVAILABLE and self.training:
+            for sample in range(min(len(predictions), 10)):  # Check subset for efficiency
                 try:
                     sample_tokens = predictions[sample].cpu().numpy()
                     # Convert to SMILES and validate with RDKit
@@ -629,7 +669,7 @@ class SequenceDecoder(nn.Module):
                     validity_penalty += 0.05  # Penalty for unparseable sequences
         else:
             # Fallback to basic validation if RDKit not available
-            for sample in range(len(predictions)):
+            for sample in range(min(len(predictions), 10)):
                 try:
                     sample_tokens = predictions[sample].cpu().numpy()
                     if not self.validate_smiles_during_generation(sample_tokens, self.vocab):
@@ -637,10 +677,11 @@ class SequenceDecoder(nn.Module):
                 except Exception:
                     pass
         
-        # Add to reconstruction loss
+        # Add validity penalty to loss
         if validity_penalty > 0:
+            validity_penalty = torch.tensor(validity_penalty / len(predictions), device=z.device)
             recon_loss = recon_loss + validity_penalty
-
+    
         return recon_loss, acc, predictions, target
     
     def safe_map_state(self, fn_map_state):
@@ -1053,8 +1094,45 @@ class G2S_VAE_PPguided(nn.Module):
     
         # decode
         recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
+        
+        # ADD: Validity loss
+        validity_penalty = self.compute_validity_loss(predictions)
+        
+        # Modified total loss calculation
+        total_loss = recon_loss + self.beta*kl_loss + self.alpha*mse + 0.01*validity_penalty
     
-        return recon_loss + self.beta*kl_loss + self.alpha*mse, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+        return total_loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+
+    # ADD this new method after the forward method (around line 700):
+    def compute_validity_loss(self, predictions):
+        """Penalize invalid format patterns"""
+        validity_penalty = 0.0
+        batch_size = len(predictions)
+        
+        for pred in predictions:
+            try:
+                # Convert prediction to string
+                pred_tokens = pred[0] if isinstance(pred, tuple) else pred
+                if hasattr(pred_tokens, 'cpu'):
+                    pred_tokens = pred_tokens.cpu().numpy()
+                
+                tokens = tokenids_to_vocab(pred_tokens, self.vocab)
+                if tokens:
+                    smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
+                    
+                    # Penalize missing key components
+                    if '|' not in smiles_string:
+                        validity_penalty += 1.0
+                    if '[*:' not in smiles_string:
+                        validity_penalty += 1.0
+                    if smiles_string.count('(') != smiles_string.count(')'):
+                        validity_penalty += 0.5
+                    if smiles_string.count('[') != smiles_string.count(']'):
+                        validity_penalty += 0.5
+            except:
+                validity_penalty += 0.5
+                
+        return torch.tensor(validity_penalty / batch_size, device=self.device, requires_grad=True)
 
     def masked_mse(self, y_true, y_pred):
         # Create a mask where the true values are not NaN

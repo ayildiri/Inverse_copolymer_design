@@ -1200,7 +1200,7 @@ class G2S_VAE(nn.Module):
         eps = torch.randn_like(std) * eps_scale
         return eps.mul(std).add_(mean)   
 
-    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0):
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
@@ -1208,10 +1208,10 @@ class G2S_VAE(nn.Module):
             h_G_var = self.lincompress(h_G_var)
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
-
-        # decode
-        recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
-
+    
+        # decode with teacher forcing
+        recon_loss, acc, predictions, target = self.Decoder(batch_list, z, teacher_forcing_ratio=teacher_forcing_ratio)
+    
         return recon_loss + self.beta*kl_loss, recon_loss, kl_loss, acc, predictions, target, z
     
 
@@ -1298,7 +1298,7 @@ class G2S_VAE_PPguided(nn.Module):
         eps = torch.randn_like(std) * eps_scale
         return eps.mul(std).add_(mean)   
 
-    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0):
         # encode
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
@@ -1335,7 +1335,7 @@ class G2S_VAE_PPguided(nn.Module):
         mse = self.masked_mse(y_true, y)
     
         # decode
-        recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
+        recon_loss, acc, predictions, target = self.Decoder(batch_list, z, teacher_forcing_ratio=teacher_forcing_ratio)
         
         # ADD: Validity loss
         validity_penalty = self.compute_validity_loss(predictions)
@@ -1343,7 +1343,7 @@ class G2S_VAE_PPguided(nn.Module):
         # Modified total loss calculation
         total_loss = recon_loss + self.beta*kl_loss + self.alpha*mse + 0.01*validity_penalty
     
-        return total_loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+        return recon_loss + self.beta*kl_loss + self.alpha*mse, recon_loss, kl_loss, mse, acc, predictions, target, z, y
 
     # ADD this new method after the forward method (around line 700):
     def compute_validity_loss(self, predictions):

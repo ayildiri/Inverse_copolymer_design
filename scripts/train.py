@@ -403,11 +403,21 @@ def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
     except Exception as e:
         print(f"[ERROR] Could not save val_loss.pkl: {e}")
 
-def validate_generation_quality(model, vocab, device, num_samples=100):
-    """Test generation quality with both format and chemical validity"""
+def enhanced_validate_generation(model, vocab, device, num_samples=200):
+    """Multi-level validation with detailed metrics"""
     model.eval()
-    format_valid_count = 0
-    rdkit_valid_count = 0
+    results = {
+        'format_valid': 0,
+        'chemical_valid': 0,
+        'novel': 0,
+        'unique_count': 0,
+        'complete_g2s': 0,
+        'avg_length': 0,
+        'examples': []
+    }
+    
+    generated_smiles = []
+    unique_smiles = set()
     
     # Import RDKit if available
     try:
@@ -416,74 +426,125 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
         rdkit_available = True
     except ImportError:
         rdkit_available = False
-        print("Warning: RDKit not available for chemical validation")
     
     with torch.no_grad():
         try:
-            z_random = torch.randn(num_samples, model.embedding_dim, device=device)
-            result = model.inference(data=z_random, device=device, sample=False, log_var=None)
-            
-            if len(result) >= 4:
-                predictions, _, _, _ = result[:4]
-            else:
-                predictions = result[0] if result else None
-            
-            if predictions is None:
-                return 0.0, 0.0
-            
-            for i in range(min(len(predictions), num_samples)):
-                try:
-                    if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
-                        pred_tokens = predictions[i][0]
-                        smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
-                        
-                        # Format validity check
-                        if (len(smiles_string) > 10 and 
-                            '|' in smiles_string and
-                            '[*:' in smiles_string and
-                            smiles_string.count('(') == smiles_string.count(')') and
-                            smiles_string.count('[') == smiles_string.count(']')):
-                            format_valid_count += 1
-                            
-                            # Chemical validity check with RDKit
-                            if rdkit_available and '|' in smiles_string:
-                                smiles_part = smiles_string.split('|')[0]
-                                try:
-                                    if '.' in smiles_part:
-                                        # Copolymer
-                                        monomers = smiles_part.split('.')
-                                        all_valid = True
-                                        for monomer in monomers:
-                                            if monomer.strip():
-                                                # CRITICAL FIX: Replace [*:n] with * for RDKit
-                                                monomer_clean = re.sub(r'\[\*:\d+\]', '*', monomer)
-                                                mol = Chem.MolFromSmiles(monomer_clean)
-                                                if mol is None:
-                                                    all_valid = False
-                                                    break
-                                        if all_valid:
-                                            rdkit_valid_count += 1
-                                    else:
-                                        # Single monomer
-                                        # CRITICAL FIX: Replace [*:n] with * for RDKit
-                                        smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
-                                        mol = Chem.MolFromSmiles(smiles_clean)
-                                        if mol is not None:
-                                            rdkit_valid_count += 1
-                                except:
-                                    pass
-                except:
-                    continue
+            # Try different generation strategies
+            for i in range(num_samples):
+                # Vary temperature for diversity
+                temperature = 0.8 if i % 2 == 0 else 1.0
+                
+                # Generate
+                z = torch.randn(1, model.embedding_dim, device=device)
+                
+                # Try constrained beam search for some samples
+                if hasattr(model.Decoder, 'constrained_beam_search') and i % 3 == 0:
+                    predictions = model.Decoder.constrained_beam_search(z, beam_size=3, temperature=temperature)
+                    pred_tokens = predictions[0]
+                else:
+                    result = model.inference(data=z, device=device, sample=(i % 2 == 0))
+                    predictions = result[0]
+                    if predictions and len(predictions) > 0:
+                        pred_tokens = predictions[0][0] if hasattr(predictions[0], '__iter__') else predictions[0]
+                    else:
+                        continue
+                
+                # Process tokens
+                smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
+                
+                # Apply post-generation fixes
+                if hasattr(model.Decoder, 'fix_polymer_format'):
+                    smiles_string = model.Decoder.fix_polymer_format(smiles_string)
+                
+                generated_smiles.append(smiles_string)
+                unique_smiles.add(smiles_string)
+                
+                # Track length
+                results['avg_length'] += len(smiles_string)
+                
+                # Save examples
+                if i < 5:
+                    results['examples'].append(smiles_string)
+                
+                # Check format validity
+                format_checks = [
+                    len(smiles_string) > 20,
+                    '|' in smiles_string,
+                    smiles_string.count('|') >= 3,
+                    '[*:' in smiles_string,
+                    smiles_string.count('(') == smiles_string.count(')'),
+                    smiles_string.count('[') == smiles_string.count(']'),
+                    '<' in smiles_string,  # Has connectivity
+                    ':' in smiles_string.split('|')[-1] if '|' in smiles_string else False
+                ]
+                
+                if all(format_checks):
+                    results['format_valid'] += 1
                     
+                    # Check G2S completeness
+                    if smiles_string.count('|') == 3 and '-' in smiles_string:
+                        results['complete_g2s'] += 1
+                    
+                    # Check chemical validity
+                    if rdkit_available and '|' in smiles_string:
+                        smiles_part = smiles_string.split('|')[0]
+                        try:
+                            if '.' in smiles_part:
+                                # Copolymer
+                                monomers = smiles_part.split('.')
+                                all_valid = True
+                                for monomer in monomers:
+                                    if monomer.strip():
+                                        monomer_clean = re.sub(r'\[\*:\d+\]', '*', monomer)
+                                        mol = Chem.MolFromSmiles(monomer_clean)
+                                        if mol is None:
+                                            all_valid = False
+                                            break
+                                if all_valid:
+                                    results['chemical_valid'] += 1
+                            else:
+                                # Single monomer
+                                smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                mol = Chem.MolFromSmiles(smiles_clean)
+                                if mol is not None:
+                                    results['chemical_valid'] += 1
+                        except:
+                            pass
+            
+            # Calculate final metrics
+            results['unique_count'] = len(unique_smiles)
+            results['avg_length'] = results['avg_length'] / num_samples if num_samples > 0 else 0
+            
+            # Convert counts to rates
+            results['format_valid_rate'] = results['format_valid'] / num_samples
+            results['chemical_valid_rate'] = results['chemical_valid'] / num_samples
+            results['complete_g2s_rate'] = results['complete_g2s'] / num_samples
+            results['uniqueness'] = results['unique_count'] / num_samples
+            
         except Exception as e:
-            print(f"Generation validation failed: {e}")
-            return 0.0, 0.0
-    
-    format_validity = format_valid_count / num_samples if num_samples > 0 else 0.0
-    rdkit_validity = rdkit_valid_count / num_samples if num_samples > 0 else 0.0
+            print(f"Enhanced validation failed: {e}")
+            results['format_valid_rate'] = 0
+            results['chemical_valid_rate'] = 0
     
     model.train()
-    return format_validity, rdkit_validity
+    return results
+
+# Then update the training loop to use enhanced validation:
+# Around line 1095 in train.py:
+if (epoch + 1) % args.validation_freq == 0:
+    print(f"🧪 Testing generation quality...")
+    validation_results = enhanced_validate_generation(model, vocab, device, num_samples=args.validation_samples)
+    
+    print(f"📊 Validation Results:")
+    print(f"   Format validity: {validation_results['format_valid_rate']:.1%}")
+    print(f"   Chemical validity: {validation_results['chemical_valid_rate']:.1%}")
+    print(f"   Complete G2S: {validation_results['complete_g2s_rate']:.1%}")
+    print(f"   Unique molecules: {validation_results['uniqueness']:.1%}")
+    print(f"   Average length: {validation_results['avg_length']:.1f}")
+    
+    # For CSV logging
+    generation_validity = validation_results['format_valid_rate']
+    rdkit_validity = validation_results['chemical_valid_rate']
 
 # setting device on GPU if available, else CPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

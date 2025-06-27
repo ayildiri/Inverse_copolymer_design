@@ -138,7 +138,8 @@ def validate_model_configuration(model, vocab, dict_train_loader):
                 if hasattr(test_data, 'tgt_token_ids') and len(test_data.tgt_token_ids) > 0:
                     # Use first 5 tokens from first sequence for testing
                     sample_tokens = test_data.tgt_token_ids[0][:5]  
-                    target = torch.tensor([sample_tokens], device=device).unsqueeze(-1)
+                    # CRITICAL FIX: Don't unsqueeze - keep shape as [1, seq_len]
+                    target = torch.tensor([sample_tokens], device=device)  # Shape: [1, 5]
                     
                     print(f"   Testing embedding with shape: {target.shape}")
                     print(f"   Token range in test: [{target.min().item()}, {target.max().item()}]")

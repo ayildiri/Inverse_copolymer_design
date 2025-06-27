@@ -1319,7 +1319,17 @@ else:
 model.to(device)
 
 # CRITICAL: Add comprehensive validation after model creation
-validate_model_configuration(model, vocab, dict_train_loader)
+try:
+    validate_model_configuration(model, vocab, dict_train_loader)
+except Exception as e:
+    print(f"❌ Model validation failed: {e}")
+    
+    # Run specific debugging for Elementwise errors
+    print(f"\n🔧 Running specialized Elementwise debugging...")
+    debug_elementwise_error(model, vocab, dict_train_loader)
+    
+    # Stop here so we can fix the issue
+    raise
 
 # Validate vocabulary size matches model
 print(f"\n🔍 Model Validation:")

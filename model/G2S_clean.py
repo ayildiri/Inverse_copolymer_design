@@ -253,6 +253,12 @@ class SequenceDecoder(nn.Module):
         self.beam_size = 1
         self.add_latent = add_latent
 
+        # 🔧 DEBUG: Add debug information before embeddings creation
+        print(f"🔧 DEBUG: Creating embeddings with vocab size: {len(self.vocab)}")
+        print(f"🔧 DEBUG: feat_padding_idx will be: []")
+        print(f"🔧 DEBUG: feat_vocab_sizes will be: []")
+        print(f"🔧 DEBUG: embedding_dim: {model_config['embedding_dim']}")
+
         self.decoder_embeddings = Embeddings(
             word_vec_size=model_config['embedding_dim'],
             word_vocab_size=len(self.vocab),
@@ -268,6 +274,26 @@ class SequenceDecoder(nn.Module):
             sparse=False,
             freeze_word_vecs=False
         )
+
+        # 🔧 VALIDATION: Test embeddings configuration immediately after creation
+        print("🧪 Validating embeddings configuration...")
+        try:
+            test_input = torch.tensor([[self.vocab["_SOS"]]], device='cpu').unsqueeze(-1)
+            test_output = self.decoder_embeddings(test_input)
+            print(f"✅ Embeddings validation passed: input shape {test_input.shape} -> output shape {test_output.shape}")
+        except Exception as e:
+            print(f"❌ Embeddings validation failed: {e}")
+            print(f"   Input shape: {test_input.shape}")
+            print(f"   Input dtype: {test_input.dtype}")
+            print(f"   Input value range: [{test_input.min().item()}, {test_input.max().item()}]")
+            print(f"   Vocab size: {len(self.vocab)}")
+            if hasattr(self.decoder_embeddings, 'make_embedding'):
+                print(f"   make_embedding type: {type(self.decoder_embeddings.make_embedding)}")
+                if hasattr(self.decoder_embeddings.make_embedding, '__len__'):
+                    print(f"   make_embedding length: {len(self.decoder_embeddings.make_embedding)}")
+            print("   This confirms the Elementwise error. Check feat_padding_idx and feat_vocab_sizes parameters.")
+            raise
+
         if self.add_latent: 
             d_model=model_config['embedding_dim']*2
         else: 

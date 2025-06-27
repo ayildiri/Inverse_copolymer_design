@@ -44,7 +44,7 @@ def debug_vocab_and_embeddings(vocab_file_path, dataset_path=None):
         raise
 
 def validate_model_configuration(model, vocab, dict_train_loader):
-    """Comprehensive validation of model configuration"""
+    """Comprehensive validation of model configuration - FIXED"""
     
     print("🔧 VALIDATING MODEL CONFIGURATION...")
     
@@ -56,23 +56,43 @@ def validate_model_configuration(model, vocab, dict_train_loader):
         f"Output layer size mismatch! Model has {decoder_vocab_size} but vocab has {actual_vocab_size}"
     print(f"✅ Vocabulary size validated: {actual_vocab_size}")
     
-    # 2. Embedding configuration validation
+    # 2. Embedding configuration validation - FIXED
     embeddings = model.Decoder.decoder_embeddings
     print(f"✅ Embedding configuration:")
     print(f"   Word vec size: {embeddings.word_vec_size}")
-    print(f"   Word vocab size: {embeddings.make_embedding[0].num_embeddings}")
-    print(f"   Position encoding: {embeddings.position_encoding}")
     
-    # Check if feature embeddings are configured
-    if hasattr(embeddings, 'make_embedding') and len(embeddings.make_embedding) > 1:
-        print(f"   Feature embeddings detected: {len(embeddings.make_embedding) - 1} feature types")
-        for i, emb_layer in enumerate(embeddings.make_embedding):
-            if i > 0:  # Skip word embeddings (index 0)
-                print(f"   Feature {i}: {emb_layer}")
-    else:
-        print(f"   Feature embeddings: None (word-only)")
+    # FIXED: Safely access embedding information
+    try:
+        if hasattr(embeddings, 'make_embedding'):
+            if hasattr(embeddings.make_embedding, '__len__') and len(embeddings.make_embedding) > 0:
+                # Try to get the first embedding layer
+                first_emb = embeddings.make_embedding[0]
+                if hasattr(first_emb, 'num_embeddings'):
+                    print(f"   Word vocab size: {first_emb.num_embeddings}")
+                elif hasattr(first_emb, '__len__'):
+                    print(f"   Embedding modules: {len(first_emb)} modules")
+                else:
+                    print(f"   Embedding type: {type(first_emb).__name__}")
+            else:
+                print(f"   Make embedding type: {type(embeddings.make_embedding).__name__}")
+        
+        print(f"   Position encoding: {embeddings.position_encoding}")
+        
+        # Check for feature embeddings safely
+        if hasattr(embeddings, 'make_embedding'):
+            try:
+                emb_len = len(embeddings.make_embedding) if hasattr(embeddings.make_embedding, '__len__') else 1
+                if emb_len > 1:
+                    print(f"   Feature embeddings detected: {emb_len - 1} feature types")
+                else:
+                    print(f"   Feature embeddings: None (word-only)")
+            except:
+                print(f"   Feature embeddings: Could not determine structure")
+    except Exception as e:
+        print(f"   ⚠️ Could not fully analyze embedding structure: {e}")
+        print(f"   Embedding type: {type(embeddings).__name__}")
     
-    # 3. Test forward pass with sample data
+    # 3. Test forward pass with sample data - ENHANCED
     print("🧪 Testing forward pass...")
     
     try:
@@ -87,6 +107,23 @@ def validate_model_configuration(model, vocab, dict_train_loader):
         test_dest.to(device)
         test_inc.to(device)
         
+        # ENHANCED: Check data structure first
+        print(f"   Test batch info:")
+        print(f"     Num graphs: {test_data.num_graphs}")
+        print(f"     Node features: {test_data.num_node_features}")
+        print(f"     Edge features: {test_data.num_edge_features}")
+        
+        if hasattr(test_data, 'tgt_token_ids'):
+            print(f"     Target sequences: {len(test_data.tgt_token_ids)}")
+            if len(test_data.tgt_token_ids) > 0:
+                sample_seq = test_data.tgt_token_ids[0]
+                if isinstance(sample_seq, torch.Tensor):
+                    sample_tokens = sample_seq.tolist()
+                else:
+                    sample_tokens = list(sample_seq)
+                print(f"     Sample sequence length: {len(sample_tokens)}")
+                print(f"     Sample token range: [{min(sample_tokens)}, {max(sample_tokens)}]")
+        
         # Test encoding
         with torch.no_grad():
             if hasattr(model, 'Encoder'):
@@ -97,27 +134,114 @@ def validate_model_configuration(model, vocab, dict_train_loader):
                 z = model.sample(mu, logvar, eps_scale=model.eps)
                 print(f"✅ Latent sample shape: {z.shape}")
                 
-                # Test decoder embeddings specifically
-                if hasattr(test_data, 'tgt_token_ids'):
-                    sample_tokens = test_data.tgt_token_ids[0:1, :10]  # First sequence, first 10 tokens
-                    target = torch.tensor(sample_tokens, device=device).unsqueeze(-1)
+                # Test decoder embeddings specifically - ENHANCED
+                if hasattr(test_data, 'tgt_token_ids') and len(test_data.tgt_token_ids) > 0:
+                    # Use first 5 tokens from first sequence for testing
+                    sample_tokens = test_data.tgt_token_ids[0][:5]  
+                    target = torch.tensor([sample_tokens], device=device).unsqueeze(-1)
+                    
+                    print(f"   Testing embedding with shape: {target.shape}")
+                    print(f"   Token range in test: [{target.min().item()}, {target.max().item()}]")
                     
                     try:
                         emb_output = model.Decoder.decoder_embeddings(target)
                         print(f"✅ Embedding output shape: {emb_output.shape}")
+                        print(f"✅ Embedding dimension: {emb_output.size(-1)}")
                     except Exception as emb_error:
                         print(f"❌ EMBEDDING ERROR: {emb_error}")
                         print(f"   Target shape: {target.shape}")
                         print(f"   Target dtype: {target.dtype}")
                         print(f"   Target range: [{target.min().item()}, {target.max().item()}]")
+                        print(f"   Vocab size: {len(vocab)}")
+                        
+                        # CRITICAL DEBUG: Check if this is the Elementwise error
+                        if "assert len(self) == len(emb_)" in str(emb_error):
+                            print(f"\n🔥 FOUND THE ROOT CAUSE!")
+                            print(f"   This is the Elementwise dimension mismatch error!")
+                            print(f"   The embeddings module expects different input dimensions")
+                            print(f"   Target last dimension: {target.size(-1)}")
+                            print(f"   Expected by Elementwise: different size")
+                            
+                            # Check embedding configuration
+                            print(f"   Debugging embedding configuration...")
+                            if hasattr(embeddings, 'make_embedding'):
+                                print(f"   make_embedding type: {type(embeddings.make_embedding)}")
+                                if hasattr(embeddings.make_embedding, '__len__'):
+                                    print(f"   make_embedding length: {len(embeddings.make_embedding)}")
+                        
                         raise
+                else:
+                    print(f"   ⚠️ No target token IDs found for embedding test")
                         
         print("✅ Forward pass validation completed successfully!")
         
     except Exception as e:
         print(f"❌ VALIDATION FAILED: {e}")
         print("🔧 This indicates a configuration mismatch.")
+        
+        # Enhanced error diagnosis
+        if "Elementwise" in str(e):
+            print(f"\n🔥 ELEMENTWISE ERROR DETECTED!")
+            print(f"This means the embeddings are configured with feature dimensions")
+            print(f"but the input data doesn't match those dimensions.")
+            print(f"\n🔧 POSSIBLE SOLUTIONS:")
+            print(f"1. Regenerate embeddings with feat_vocab_sizes=[]")
+            print(f"2. Ensure input data has correct feature dimensions")
+            print(f"3. Check if data preprocessing matches model expectations")
+        
         raise
+
+def debug_elementwise_error(model, vocab, dict_train_loader):
+    """
+    Specific debugging for the Elementwise error
+    """
+    print(f"\n🔍 DEBUGGING ELEMENTWISE ERROR...")
+    
+    embeddings = model.Decoder.decoder_embeddings
+    
+    print(f"📊 Embeddings configuration:")
+    print(f"   Type: {type(embeddings)}")
+    print(f"   Word vec size: {embeddings.word_vec_size}")
+    
+    if hasattr(embeddings, 'make_embedding'):
+        make_emb = embeddings.make_embedding
+        print(f"   make_embedding type: {type(make_emb)}")
+        
+        if hasattr(make_emb, '__len__'):
+            print(f"   make_embedding length: {len(make_emb)}")
+            
+            for i, layer in enumerate(make_emb):
+                print(f"   Layer {i}: {type(layer)} - {layer}")
+                if hasattr(layer, 'num_embeddings'):
+                    print(f"     Vocab size: {layer.num_embeddings}")
+                if hasattr(layer, 'embedding_dim'):
+                    print(f"     Embedding dim: {layer.embedding_dim}")
+        
+        # Check if this is an Elementwise container
+        if "Elementwise" in str(type(make_emb)):
+            print(f"   🔍 Found Elementwise container!")
+            print(f"   This means multiple embedding tables are expected")
+            
+            # Get expected input dimensions
+            if hasattr(make_emb, '__len__'):
+                expected_dims = len(make_emb)
+                print(f"   Expected input dimensions: {expected_dims}")
+                
+                # Check sample data
+                first_batch = dict_train_loader[list(dict_train_loader.keys())[0]][0]
+                if hasattr(first_batch, 'tgt_token_ids'):
+                    sample = first_batch.tgt_token_ids[0][:5]
+                    test_input = torch.tensor([sample], device=device).unsqueeze(-1)
+                    print(f"   Actual input dimensions: {test_input.size(-1)}")
+                    print(f"   Input shape: {test_input.shape}")
+                    
+                    if test_input.size(-1) != expected_dims:
+                        print(f"   ❌ DIMENSION MISMATCH!")
+                        print(f"   Expected: {expected_dims}, Got: {test_input.size(-1)}")
+                        print(f"   \n🔧 SOLUTION: Modify embedding configuration")
+                        print(f"   Set feat_vocab_sizes=[] in SequenceDecoder initialization")
+    
+    return embeddings
 
 def safe_model_creation(model_class, *args, **kwargs):
     """Safely create model with better error reporting"""

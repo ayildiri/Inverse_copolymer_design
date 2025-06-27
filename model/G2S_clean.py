@@ -235,7 +235,7 @@ class GraphEncoder(nn.Module):
 class SequenceDecoder(nn.Module):
     def __init__(self, model_config, vocab, loss_weights, add_latent):
         """Implementation of transformer decoder
-
+    
         Args:
             model_config (Dict): model config settings
             data_config (Dict): data config settings
@@ -252,13 +252,13 @@ class SequenceDecoder(nn.Module):
         self.inv_vocab = {v: k for k, v in vocab.items()}
         self.beam_size = 1
         self.add_latent = add_latent
-
+    
         # 🔧 DEBUG: Add debug information before embeddings creation
         print(f"🔧 DEBUG: Creating embeddings with vocab size: {len(self.vocab)}")
         print(f"🔧 DEBUG: feat_padding_idx will be: []")
         print(f"🔧 DEBUG: feat_vocab_sizes will be: []")
         print(f"🔧 DEBUG: embedding_dim: {model_config['embedding_dim']}")
-
+    
         self.decoder_embeddings = Embeddings(
             word_vec_size=model_config['embedding_dim'],
             word_vocab_size=len(self.vocab),
@@ -274,11 +274,12 @@ class SequenceDecoder(nn.Module):
             sparse=False,
             freeze_word_vecs=False
         )
-
+    
         # 🔧 VALIDATION: Test embeddings configuration immediately after creation
         print("🧪 Validating embeddings configuration...")
         try:
-            test_input = torch.tensor([[self.vocab["_SOS"]]], device='cpu').unsqueeze(-1)
+            # CRITICAL FIX: Don't unsqueeze for validation test
+            test_input = torch.tensor([[self.vocab["_SOS"]]], device='cpu')  # Shape: [1, 1]
             test_output = self.decoder_embeddings(test_input)
             print(f"✅ Embeddings validation passed: input shape {test_input.shape} -> output shape {test_output.shape}")
         except Exception as e:
@@ -736,6 +737,8 @@ class SequenceDecoder(nn.Module):
                     if hasattr(layer.context_attn, 'attn'):
                         layer.context_attn.attn = None
 
+    # In G2S_clean.py, modify the forward method of SequenceDecoder (around line 790-800)
+
     def forward(self, graph_batch, z, loss_weights=None, teacher_forcing_ratio=1.0):
         """Forward pass of decoder with scheduled teacher forcing
     
@@ -758,7 +761,11 @@ class SequenceDecoder(nn.Module):
         target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)[:, :-1]
         m = nn.ConstantPad1d((1, 0), self.vocab["_SOS"]) #pads SOS token left side (beginning of sequences)
         target = m(target)
-        target = target.unsqueeze(-1) 
+        
+        # CRITICAL FIX: Don't unsqueeze when no feature embeddings are used
+        # The Elementwise module expects the input dimensions to match the number of embedding modules
+        # Since we have feat_vocab_sizes=[], we should NOT add the extra dimension
+        # target = target.unsqueeze(-1)  # REMOVE THIS LINE
     
         # CRITICAL FIX: Clear any existing decoder state to prevent graph retention
         if hasattr(self.Decoder, 'state'):
@@ -774,7 +781,7 @@ class SequenceDecoder(nn.Module):
         if use_teacher_forcing or not self.training:
             # Normal teacher forcing (use ground truth as input)
             dec_outs, _ = self.Decoder(
-                tgt=target, 
+                tgt=target,  # Now without the extra dimension
                 enc_out=enc_output, 
                 src_len=src_lengths, 
                 step=target.size(1), 
@@ -791,8 +798,8 @@ class SequenceDecoder(nn.Module):
             # Initialize output tensor
             dec_outs = torch.zeros(batch_size, vocab_size, max_len, device=z.device)
             
-            # Start with SOS token
-            current_input = target[:, :1, :]  # [b, 1, 1]
+            # Start with SOS token - WITHOUT extra dimension
+            current_input = target[:, :1]  # [b, 1] - no unsqueeze needed
             
             for t in range(max_len):
                 # Decode one step
@@ -810,14 +817,15 @@ class SequenceDecoder(nn.Module):
                 
                 # Get prediction for next input
                 pred = torch.argmax(logits.squeeze(0), dim=-1)  # [b]
-                current_input = pred.unsqueeze(0).unsqueeze(-1)  # [1, b, 1]
+                current_input = pred.unsqueeze(0)  # [1, b] - correct shape without extra dimension
                 
                 # Optionally mix with ground truth (curriculum learning)
                 if t < max_len - 1:
                     # Random sampling per batch element
-                    use_gt = torch.rand(batch_size, 1, 1, device=z.device) < teacher_forcing_ratio
-                    ground_truth = target[:, t+1:t+2, :]  # Next ground truth token
-                    current_input = torch.where(use_gt.transpose(0, 1), ground_truth, current_input)
+                    use_gt = torch.rand(batch_size, 1, device=z.device) < teacher_forcing_ratio
+                    ground_truth = target[:, t+1:t+2]  # Next ground truth token [b, 1]
+                    # Ensure shapes match for where operation
+                    current_input = torch.where(use_gt.t(), ground_truth.t(), current_input).t()
     
         # evaluate
         target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)
@@ -825,7 +833,7 @@ class SequenceDecoder(nn.Module):
             input=dec_outs, 
             target=target.long()
         )
-        
+                
         predictions = torch.argmax(dec_outs.transpose(1,0), dim=0)                             # [b, t]
         mask = (target != self.vocab["_PAD"]).long()
         accs = (predictions == target).float()
@@ -893,7 +901,7 @@ class SequenceDecoder(nn.Module):
                                              beta=0.0,
                                              length_penalty="avg",
                                              coverage_penalty="none")
-
+    
         decode_strategy = BeamSearch(
             pad=self.vocab["_PAD"],
             bos=self.vocab["_SOS"],
@@ -917,7 +925,7 @@ class SequenceDecoder(nn.Module):
             exclusion_tokens=set(),
             return_attention=False,
         )
-
+    
         # adapted from onmt.translate.translator
         # (0) Prep the components of the search.
         parallel_paths = decode_strategy.parallel_paths  # beam_size
@@ -933,33 +941,42 @@ class SequenceDecoder(nn.Module):
         # (2) prep decode_strategy. Possibly repeat src objects.
         src_map = None
         target_prefix = None
-
+    
         fn_map_state, enc_out, src_len_tiled, src_map = decode_strategy.initialize(
             enc_out=enc_output,
             src_len=src_lengths,
             src_map=src_map,
             target_prefix=target_prefix,
             device=z.device
-
+    
         )
-
+    
         # FIXED: Safely apply map_state only if cache is properly initialized
         if fn_map_state is not None:
             self.safe_map_state(fn_map_state)
-
+    
         # (3) Begin decoding step by step with enhanced validation:
         for step in range(decode_strategy.max_length):
-            #decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
-            decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)
-            dec_outs, dec_attn = self.Decoder(tgt=decoder_input, enc_out=enc_out, src_len=src_len_tiled, step=step, add_latent=self.add_latent)
+            # CRITICAL FIX: Don't add extra dimension for decoder input
+            # The original code had: decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
+            # But we need: decoder_input = decode_strategy.current_predictions.view(-1, 1)
+            decoder_input = decode_strategy.current_predictions.view(-1, 1)  # [batch_size, 1]
+            
+            dec_outs, dec_attn = self.Decoder(
+                tgt=decoder_input, 
+                enc_out=enc_out, 
+                src_len=src_len_tiled, 
+                step=step, 
+                add_latent=self.add_latent
+            )
             if "std" in dec_attn:
                 attn = dec_attn["std"].detach()
             else:
                 attn = None
-
+    
             scores = self.output_layer(dec_outs.squeeze(1))
             log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
-
+    
             # 🔥 CRITICAL: Apply validation to prevent malformed patterns
             if step > 30 and step % 8 == 0:  # Apply validation periodically
                 try:

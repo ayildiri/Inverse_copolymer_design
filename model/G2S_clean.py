@@ -279,7 +279,7 @@ class SequenceDecoder(nn.Module):
         print("🧪 Validating embeddings configuration...")
         try:
             # CRITICAL FIX: Don't unsqueeze for validation test
-            test_input = torch.tensor([[self.vocab["_SOS"]]], device='cpu')  # Shape: [1, 1]
+            test_input = torch.tensor([[self.vocab["_SOS"]]], device='cpu').unsqueeze(-1)  # Shape: [1, 1, 1]
             test_output = self.decoder_embeddings(test_input)
             print(f"✅ Embeddings validation passed: input shape {test_input.shape} -> output shape {test_output.shape}")
         except Exception as e:
@@ -780,8 +780,9 @@ class SequenceDecoder(nn.Module):
         
         if use_teacher_forcing or not self.training:
             # Normal teacher forcing (use ground truth as input)
+            target_3d = target.unsqueeze(-1)  # Add dimension for OpenNMT: [b, t] -> [b, t, 1]
             dec_outs, _ = self.Decoder(
-                tgt=target,  # Now without the extra dimension
+                tgt=target_3d,
                 enc_out=enc_output, 
                 src_len=src_lengths, 
                 step=target.size(1), 
@@ -802,9 +803,10 @@ class SequenceDecoder(nn.Module):
             current_input = target[:, :1]  # [b, 1]
             
             for t in range(max_len):
-                # Decode one step - transpose to [1, b] just for decoder
+                # Decode one step - convert to 3D for OpenNMT
+                current_input_3d = current_input.t().unsqueeze(-1)  # [b, 1] -> [1, b] -> [1, b, 1]
                 dec_out, _ = self.Decoder(
-                    tgt=current_input.t(),  # Transpose here: [b, 1] -> [1, b]
+                    tgt=current_input_3d,
                     enc_out=enc_output, 
                     src_len=src_lengths, 
                     step=t+1, 
@@ -961,7 +963,7 @@ class SequenceDecoder(nn.Module):
             # CRITICAL FIX: Don't add extra dimension for decoder input
             # The original code had: decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
             # But we need: decoder_input = decode_strategy.current_predictions.view(-1, 1)
-            decoder_input = decode_strategy.current_predictions.view(-1, 1)  # [batch_size, 1]
+            decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)  # [batch_size, 1, 1]
             
             dec_outs, dec_attn = self.Decoder(
                 tgt=decoder_input, 

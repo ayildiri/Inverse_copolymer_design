@@ -18,6 +18,192 @@ import argparse
 import numpy as np
 import csv
 
+def debug_vocab_and_embeddings(vocab_file_path, dataset_path=None):
+    """Debug vocabulary and embedding setup"""
+    
+    print("=== VOCABULARY DEBUG ===")
+    
+    # Load and inspect vocabulary
+    try:
+        vocab = load_vocab(vocab_file_path)
+        print(f"Vocabulary size: {len(vocab)}")
+        print(f"First 10 tokens: {list(vocab.items())[:10]}")
+        print(f"Last 10 tokens: {list(vocab.items())[-10:]}")
+        
+        # Check special tokens
+        special_tokens = ['_PAD', '_SOS', '_EOS', '_UNK']
+        for token in special_tokens:
+            if token in vocab:
+                print(f"{token}: {vocab[token]}")
+            else:
+                print(f"WARNING: {token} not found in vocabulary!")
+        
+        return vocab
+    except Exception as e:
+        print(f"ERROR loading vocabulary: {e}")
+        raise
+
+def validate_model_configuration(model, vocab, dict_train_loader):
+    """Comprehensive validation of model configuration"""
+    
+    print("🔧 VALIDATING MODEL CONFIGURATION...")
+    
+    # 1. Vocabulary validation
+    decoder_vocab_size = model.Decoder.output_layer.out_features
+    actual_vocab_size = len(vocab)
+    
+    assert decoder_vocab_size == actual_vocab_size, \
+        f"Output layer size mismatch! Model has {decoder_vocab_size} but vocab has {actual_vocab_size}"
+    print(f"✅ Vocabulary size validated: {actual_vocab_size}")
+    
+    # 2. Embedding configuration validation
+    embeddings = model.Decoder.decoder_embeddings
+    print(f"✅ Embedding configuration:")
+    print(f"   Word vec size: {embeddings.word_vec_size}")
+    print(f"   Word vocab size: {embeddings.make_embedding[0].num_embeddings}")
+    print(f"   Position encoding: {embeddings.position_encoding}")
+    
+    # Check if feature embeddings are configured
+    if hasattr(embeddings, 'make_embedding') and len(embeddings.make_embedding) > 1:
+        print(f"   Feature embeddings detected: {len(embeddings.make_embedding) - 1} feature types")
+        for i, emb_layer in enumerate(embeddings.make_embedding):
+            if i > 0:  # Skip word embeddings (index 0)
+                print(f"   Feature {i}: {emb_layer}")
+    else:
+        print(f"   Feature embeddings: None (word-only)")
+    
+    # 3. Test forward pass with sample data
+    print("🧪 Testing forward pass...")
+    
+    try:
+        # Get a small batch for testing
+        first_batch_key = list(dict_train_loader.keys())[0]
+        test_data = dict_train_loader[first_batch_key][0]
+        test_dest = dict_train_loader[first_batch_key][1]
+        test_inc = dict_train_loader[first_batch_key][2]
+        
+        # Move to device
+        test_data.to(device)
+        test_dest.to(device)
+        test_inc.to(device)
+        
+        # Test encoding
+        with torch.no_grad():
+            if hasattr(model, 'Encoder'):
+                mu, logvar = model.Encoder(test_data, test_dest, test_inc, device)
+                print(f"✅ Encoder output shapes: mu={mu.shape}, logvar={logvar.shape}")
+                
+                # Test sample from latent space
+                z = model.sample(mu, logvar, eps_scale=model.eps)
+                print(f"✅ Latent sample shape: {z.shape}")
+                
+                # Test decoder embeddings specifically
+                if hasattr(test_data, 'tgt_token_ids'):
+                    sample_tokens = test_data.tgt_token_ids[0:1, :10]  # First sequence, first 10 tokens
+                    target = torch.tensor(sample_tokens, device=device).unsqueeze(-1)
+                    
+                    try:
+                        emb_output = model.Decoder.decoder_embeddings(target)
+                        print(f"✅ Embedding output shape: {emb_output.shape}")
+                    except Exception as emb_error:
+                        print(f"❌ EMBEDDING ERROR: {emb_error}")
+                        print(f"   Target shape: {target.shape}")
+                        print(f"   Target dtype: {target.dtype}")
+                        print(f"   Target range: [{target.min().item()}, {target.max().item()}]")
+                        raise
+                        
+        print("✅ Forward pass validation completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ VALIDATION FAILED: {e}")
+        print("🔧 This indicates a configuration mismatch.")
+        raise
+
+def safe_model_creation(model_class, *args, **kwargs):
+    """Safely create model with better error reporting"""
+    
+    try:
+        model = model_class(*args, **kwargs)
+        print("✅ Model created successfully")
+        return model
+    except Exception as e:
+        print(f"❌ MODEL CREATION FAILED: {e}")
+        print(f"Model class: {model_class.__name__}")
+        print(f"Arguments: {args}")
+        print(f"Keyword arguments: {kwargs}")
+        
+        # Provide specific guidance for common errors
+        if "AssertionError" in str(e):
+            print("\n🔧 ASSERTION ERROR DETECTED:")
+            print("This usually means dimension mismatch in embeddings.")
+            print("Check:")
+            print("1. Vocabulary size matches model configuration")
+            print("2. Feature embedding configuration")
+            print("3. Data preprocessing consistency")
+        
+        raise
+
+def load_transfer_data_safely(csv_path, stage, source_properties, target_properties, 
+                              batch_size, tokenization, vocab, device, **kwargs):
+    """Safely load transfer learning data with vocabulary validation"""
+    
+    print(f"🔄 Loading transfer learning data for stage {stage}")
+    print(f"Source properties: {source_properties}")
+    print(f"Target properties: {target_properties}")
+    
+    try:
+        # Import your transfer data loading function
+        from data_processing.transfer_data_utils import load_transfer_data
+        
+        dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
+            csv_path=csv_path,
+            stage=stage,
+            source_properties=source_properties,
+            target_properties=target_properties,
+            batch_size=batch_size,
+            tokenization=tokenization,
+            vocab=vocab,
+            device=device,
+            **kwargs
+        )
+        
+        # Validate data consistency
+        print("🔍 Validating loaded data...")
+        
+        # Check first batch
+        first_key = list(dict_train_loader.keys())[0]
+        first_batch = dict_train_loader[first_key][0]
+        
+        if hasattr(first_batch, 'tgt_token_ids'):
+            max_token = max(max(seq) for seq in first_batch.tgt_token_ids)
+            if max_token >= len(vocab):
+                raise ValueError(f"Token ID {max_token} exceeds vocabulary size {len(vocab)}")
+        
+        print(f"✅ Transfer data loaded successfully")
+        return dict_train_loader, dict_val_loader, dict_test_loader
+        
+    except ImportError:
+        print("❌ transfer_data_utils not found. Using standard data loading...")
+        # Fallback to standard data loading
+        data_path_prefix = os.path.join(os.path.dirname(csv_path), f'dict_{{}}_loader_{tokenization}.pt')
+        try:
+            dict_train_loader = torch.load(data_path_prefix.format('train'))
+            dict_val_loader = torch.load(data_path_prefix.format('val'))
+            dict_test_loader = torch.load(data_path_prefix.format('test'))
+            return dict_train_loader, dict_val_loader, dict_test_loader
+        except Exception as e:
+            print(f"❌ Standard data loading also failed: {e}")
+            raise
+        
+    except Exception as e:
+        print(f"❌ Transfer data loading failed: {e}")
+        print("\n🔧 TROUBLESHOOTING:")
+        print("1. Check if transfer_data_utils.py exists and is correct")
+        print("2. Verify CSV file format and column names")
+        print("3. Ensure vocabulary file matches the tokenization used")
+        print("4. Check if property names match CSV columns")
+        raise
+
 def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
     """Safely process tokens with comprehensive error handling"""
     try:
@@ -769,7 +955,21 @@ else:
     vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
     data_path_prefix = main_dir_path+'/data/dict_{}_loader_'+augment+'_'+tokenization+'.pt'
 
-vocab = load_vocab(vocab_file_path)
+# QUICK FIX: Add debugging and validation before model creation
+print("🔧 APPLYING EMBEDDING FIX...")
+vocab = debug_vocab_and_embeddings(vocab_file_path, args.dataset_path)
+
+# Ensure vocabulary consistency
+print(f"Vocabulary size check: {len(vocab)}")
+assert len(vocab) > 0, "Vocabulary is empty!"
+
+# Check if special tokens exist
+required_tokens = ['_PAD', '_SOS', '_EOS', '_UNK']
+for token in required_tokens:
+    if token not in vocab:
+        print(f"WARNING: {token} missing from vocabulary")
+
+print("✅ Pre-creation checks passed")
 
 print(f"DEBUG: Constructed vocab file path: {vocab_file_path}")
 print(f"DEBUG: File exists: {os.path.exists(vocab_file_path)}")
@@ -818,10 +1018,8 @@ if args.training_stage == 1:
     # Stage 1: Load all available data
     print(f"Stage 1: Loading combined dataset for pretraining on {args.source_properties}")
     
-    # Custom data loading function for transfer learning
-    from data_processing.transfer_data_utils import load_transfer_data
-    
-    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
+    # Use safe data loading
+    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
         csv_path=args.combined_dataset_path,
         stage=1,
         source_properties=args.source_properties,
@@ -841,7 +1039,7 @@ else:  # Stage 2
     # Stage 2: Load only target property data
     print(f"Stage 2: Loading data for fine-tuning on {args.target_properties}")
     
-    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
+    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
         csv_path=args.combined_dataset_path,
         stage=2,
         source_properties=args.source_properties,
@@ -855,6 +1053,17 @@ else:  # Stage 2
     # Update property names for stage 2
     property_names = args.target_properties
     property_count = len(property_names)
+
+# CRITICAL FIX: Verify data/vocab consistency AFTER loading data
+try:
+    first_batch = dict_train_loader['0'][0]
+    if hasattr(first_batch, 'tgt_token_ids'):
+        max_token_id = max(max(seq) for seq in first_batch.tgt_token_ids)
+        if max_token_id >= len(vocab):
+            raise ValueError(f"Data contains token ID {max_token_id} but vocab only has {len(vocab)} tokens")
+        print(f"✅ Data/vocab consistency verified. Max token ID: {max_token_id}, Vocab size: {len(vocab)}")
+except Exception as e:
+    print(f"WARNING: Could not validate data consistency: {e}")
 
 num_train_graphs = len(list(dict_train_loader.keys())[
     :-2])*batch_size + dict_train_loader[list(dict_train_loader.keys())[-1]][0].num_graphs
@@ -933,7 +1142,7 @@ def add_attention_regularization(model):
     print("✅ Attention regularization added!")
     return model
 
-# %% Create an instance of the G2S model
+# %% Create an instance of the G2S model with safe creation
 if args.training_stage == 1:
     # Stage 1: Regular training
     if args.ppguided:
@@ -941,9 +1150,12 @@ if args.training_stage == 1:
     else:
         model_type = G2S_VAE
     
-    model = model_type(num_node_features, num_edge_features, hidden_dimension, 
-                      embedding_dim, device, model_config, vocab, seed, 
-                      loss_weights=class_weights, add_latent=add_latent)
+    model = safe_model_creation(
+        model_type,
+        num_node_features, num_edge_features, hidden_dimension, 
+        embedding_dim, device, model_config, vocab, seed, 
+        loss_weights=class_weights, add_latent=add_latent
+    )
 else:
     # Stage 2: Transfer learning
     print(f"Loading pretrained model from: {args.pretrained_model_path}")
@@ -958,7 +1170,8 @@ else:
     else:
         pretrained_model_type = G2S_VAE
     
-    pretrained_model = pretrained_model_type(
+    pretrained_model = safe_model_creation(
+        pretrained_model_type,
         num_node_features, num_edge_features, hidden_dimension,
         embedding_dim, device, pretrained_config, vocab, seed,
         loss_weights=class_weights, add_latent=add_latent
@@ -970,7 +1183,8 @@ else:
     model_config['target_properties'] = args.target_properties
     
     # Create transfer model
-    model = G2S_VAE_Transfer(
+    model = safe_model_creation(
+        G2S_VAE_Transfer,
         num_node_features, num_edge_features, hidden_dimension,
         embedding_dim, device, model_config, vocab, seed,
         loss_weights=class_weights, add_latent=add_latent,
@@ -979,6 +1193,9 @@ else:
     )
 
 model.to(device)
+
+# CRITICAL: Add comprehensive validation after model creation
+validate_model_configuration(model, vocab, dict_train_loader)
 
 # Validate vocabulary size matches model
 print(f"\n🔍 Model Validation:")

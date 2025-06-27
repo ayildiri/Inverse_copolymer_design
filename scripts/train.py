@@ -831,25 +831,32 @@ print(model)
 # Use configurable warmup epochs
 n_iter = int(20 * num_train_graphs/batch_size) # 20 epochs
 # Beta scheduling function from Optimus paper 
-def frange_cycle_zero_linear(n_iter, start=0.0, stop=model_config['max_beta'],  n_cycle=5, ratio_increase=0.5, ratio_zero=0.3): #, beginning_zero=0.1):
-    L = np.ones(n_iter) * stop
-    period = n_iter/n_cycle
-    step = (stop-start)/(period*ratio_increase) # linear schedule
+def two_stage_beta_schedule(n_iter, warmup_ratio=0.4, max_beta=None):
+    """Two-stage beta: low for reconstruction, then increase for generation"""
+    if max_beta is None:
+        max_beta = model_config['max_beta']
+    
+    warmup_steps = int(n_iter * warmup_ratio)
+    
+    # Stage 1: Very low beta for perfect reconstruction
+    stage1 = np.ones(warmup_steps) * 0.0001
+    
+    # Stage 2: Gradually increase beta with cycles
+    remaining_steps = n_iter - warmup_steps
+    stage2 = frange_cycle_zero_linear(
+        remaining_steps, 
+        start=0.0001, 
+        stop=max_beta * 10,  # More aggressive
+        n_cycle=3,
+        ratio_increase=0.7,
+        ratio_zero=0.2
+    )
+    
+    return np.concatenate([stage1, stage2])
 
-    for c in range(n_cycle):
-        v, i = start, 0
-        while v <= stop and (int(i+c*period) < n_iter):
-            if i < period*ratio_zero:
-                L[int(i+c*period)] = start
-            else: 
-                L[int(i+c*period)] = v
-                v += step
-            i += 1
-    ## beginning zero
-    if args.AE_Warmup:
-        B = np.zeros(int(args.warmup_epochs*num_train_graphs/batch_size)) # configurable warmup epochs
-        L = np.append(B,L)
-    return L 
+# Replace the beta_schedule initialization (around line 795):
+if model_config['beta'] == "schedule":
+    beta_schedule = two_stage_beta_schedule(n_iter=n_iter, max_beta=model_config['max_beta'])
 
 if model_config['beta'] == "schedule":
     beta_schedule = frange_cycle_zero_linear(n_iter=n_iter)

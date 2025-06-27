@@ -192,6 +192,8 @@ def validate_model_configuration(model, vocab, dict_train_loader):
         
         raise
 
+# In train.py, fix the debug_elementwise_error function (around line 260-310)
+
 def debug_elementwise_error(model, vocab, dict_train_loader):
     """
     Specific debugging for the Elementwise error
@@ -232,15 +234,19 @@ def debug_elementwise_error(model, vocab, dict_train_loader):
                 first_batch = dict_train_loader[list(dict_train_loader.keys())[0]][0]
                 if hasattr(first_batch, 'tgt_token_ids'):
                     sample = first_batch.tgt_token_ids[0][:5]
-                    test_input = torch.tensor([sample], device=device).unsqueeze(-1)
-                    print(f"   Actual input dimensions: {test_input.size(-1)}")
+                    # CRITICAL FIX: Don't unsqueeze - check actual input shape
+                    test_input = torch.tensor([sample], device=device)  # Shape: [1, 5]
+                    print(f"   Actual input dimensions: {test_input.ndim}")
                     print(f"   Input shape: {test_input.shape}")
                     
-                    if test_input.size(-1) != expected_dims:
-                        print(f"   ❌ DIMENSION MISMATCH!")
-                        print(f"   Expected: {expected_dims}, Got: {test_input.size(-1)}")
-                        print(f"   \n🔧 SOLUTION: Modify embedding configuration")
-                        print(f"   Set feat_vocab_sizes=[] in SequenceDecoder initialization")
+                    # The issue is that Elementwise expects the last dimension to match its length
+                    # But we're providing 2D input when it expects 3D with last dim matching expected_dims
+                    print(f"   \n🔥 ROOT CAUSE:")
+                    print(f"   Elementwise expects input with last dimension = {expected_dims}")
+                    print(f"   But the input is 2D with shape {test_input.shape}")
+                    print(f"   \n🔧 SOLUTION:")
+                    print(f"   Remove .unsqueeze(-1) from the forward method")
+                    print(f"   Keep input as 2D tensor [batch, sequence]")
     
     return embeddings
 

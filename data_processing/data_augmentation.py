@@ -46,111 +46,6 @@ def get_property_columns(df, property_names=None):
         property_columns = [col for col in df.columns if col not in smiles_cols]
         return property_columns
 
-def augment_polymer_smiles(smiles_list, preserve_properties=True):
-    """
-    Augment polymer SMILES for better format learning during training.
-    This creates variations of existing polymers while preserving their properties.
-    
-    Args:
-        smiles_list: List of polymer SMILES strings
-        preserve_properties: If True, returns augmented data with same properties
-    
-    Returns:
-        List of tuples (augmented_smiles, original_index) if preserve_properties=True
-        Otherwise just list of augmented SMILES
-    """
-    augmented = []
-    
-    for idx, smiles in enumerate(smiles_list):
-        # Always include original
-        if preserve_properties:
-            augmented.append((smiles, idx))
-        else:
-            augmented.append(smiles)
-        
-        # Skip invalid formats
-        if '|' not in smiles:
-            continue
-            
-        parts = smiles.split('|')
-        if len(parts) < 4:
-            continue
-        
-        # Augmentation 1: Swap monomer order in copolymers
-        if '.' in parts[0]:
-            monomers = parts[0].split('.')
-            if len(monomers) == 2:
-                # Swap monomers and corresponding stoichiometry
-                try:
-                    swapped = f"{monomers[1]}.{monomers[0]}|{parts[2]}|{parts[1]}|{parts[3]}"
-                    if preserve_properties:
-                        augmented.append((swapped, idx))
-                    else:
-                        augmented.append(swapped)
-                except IndexError:
-                    pass
-        
-        # Augmentation 2: Different attachment point numbering
-        if '[*:1]' in smiles and '[*:2]' in smiles:
-            # Create variant with swapped attachment numbers
-            variant = smiles.replace('[*:1]', '[*:TEMP]')
-            variant = variant.replace('[*:2]', '[*:1]')
-            variant = variant.replace('[*:TEMP]', '[*:2]')
-            
-            # Also need to update connectivity pattern
-            if '<' in variant and '-' in variant:
-                # Swap 1 and 2 in connectivity pattern
-                variant = re.sub(r'<1-1:', '<2-2:', variant)
-                variant = re.sub(r'<2-3:', '<1-3:', variant)
-                variant = re.sub(r'<1-3:', '<2-3:', variant)
-                
-            if preserve_properties:
-                augmented.append((variant, idx))
-            else:
-                augmented.append(variant)
-        
-        # Augmentation 3: For homopolymers, create equivalent copolymer representation
-        if '.' not in parts[0] and '[*:1]' in parts[0] and '[*:2]' in parts[0]:
-            # Convert homopolymer to copolymer format with same monomer
-            homo_as_co = f"{parts[0]}.{parts[0]}|0.500|0.500|{parts[3]}"
-            if preserve_properties:
-                augmented.append((homo_as_co, idx))
-            else:
-                augmented.append(homo_as_co)
-                
-    return augmented
-
-def augment_training_data(df, smiles_column='poly_chemprop_input', property_columns=None):
-    """
-    Augment a DataFrame by creating variations of existing polymers.
-    This preserves property values for augmented samples.
-    
-    Args:
-        df: Input DataFrame
-        smiles_column: Column containing polymer SMILES
-        property_columns: List of property columns to preserve
-    
-    Returns:
-        Augmented DataFrame
-    """
-    if property_columns is None:
-        property_columns = get_property_columns(df)
-    
-    # Get augmented SMILES with their original indices
-    original_smiles = df[smiles_column].tolist()
-    augmented_data = augment_polymer_smiles(original_smiles, preserve_properties=True)
-    
-    # Build new DataFrame
-    new_rows = []
-    for aug_smiles, orig_idx in augmented_data:
-        new_row = {smiles_column: aug_smiles}
-        # Copy all property values from original row
-        for prop_col in property_columns:
-            new_row[prop_col] = df.iloc[orig_idx][prop_col]
-        new_rows.append(new_row)
-    
-    return pd.DataFrame(new_rows)
-
 def main():
     parser = argparse.ArgumentParser(description='Augment polymer dataset with new monomer combinations')
     parser.add_argument("--input_file", type=str, default="dataset-poly_chemprop.csv",
@@ -163,8 +58,6 @@ def main():
                         help="Number of random B monomer combinations to generate for each B monomer")
     parser.add_argument("--smiles_column", type=str, default="poly_chemprop_input",
                         help="Name of the column containing polymer SMILES strings")
-    parser.add_argument("--augment_existing", action='store_true',
-                        help="Also augment existing polymers with format variations (preserves properties)")
     
     args = parser.parse_args()
     
@@ -191,19 +84,7 @@ def main():
     
     print(f"Using property columns: {property_columns}")
     
-    # Optionally augment existing data with format variations
-    if args.augment_existing:
-        print("\nAugmenting existing polymers with format variations...")
-        df_augmented_existing = augment_training_data(df, args.smiles_column, property_columns)
-        print(f"Created {len(df_augmented_existing) - len(df)} format variations")
-        
-        # Save format-augmented version
-        format_aug_file = f"{args.input_file.replace('.csv', '')}-format_augmented.csv"
-        format_aug_path = os.path.join(main_dir_path, 'data', format_aug_file)
-        df_augmented_existing.to_csv(format_aug_path, index=False)
-        print(f"Saved format-augmented dataset: {format_aug_file}")
-    
-    # Extract monomers and combinations for new polymer generation
+    # Extract monomers and combinations
     monA_list = []
     monB_list = []
     stoichiometry_connectivity_combs = []
@@ -226,10 +107,10 @@ def main():
     monBs = list(set(monB_list))
     stoichiometry_connectivity_combs = list(set(stoichiometry_connectivity_combs))
     
-    print(f"\nFound {len(monAs)} unique A monomers and {len(monBs)} unique B monomers")
+    print(f"Found {len(monAs)} unique A monomers and {len(monBs)} unique B monomers")
     print(f"Found {len(stoichiometry_connectivity_combs)} unique stoichiometry/connectivity combinations")
     
-    # Build augmented dataset with new combinations
+    # Build augmented dataset
     n = args.n_combinations
     
     # Create copy of B monomers and change the wildcards to be [*:1] and [*:2] 

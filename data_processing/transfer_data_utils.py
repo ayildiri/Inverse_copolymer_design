@@ -4,11 +4,85 @@ import torch
 import numpy as np
 import os
 
+def validate_data_vocab_consistency(dict_loader, vocab, dataset_name="dataset"):
+    """
+    CRITICAL: Validate that all token IDs in the data are within vocabulary bounds
+    """
+    print(f"🔍 Validating {dataset_name} consistency with vocabulary...")
+    
+    max_token_found = -1
+    total_sequences = 0
+    problematic_batches = []
+    
+    for batch_key in dict_loader:
+        try:
+            batch_data = dict_loader[batch_key][0]
+            if hasattr(batch_data, 'tgt_token_ids'):
+                for seq_idx, token_sequence in enumerate(batch_data.tgt_token_ids):
+                    total_sequences += 1
+                    
+                    # Convert to list if it's a tensor
+                    if isinstance(token_sequence, torch.Tensor):
+                        token_list = token_sequence.tolist()
+                    else:
+                        token_list = list(token_sequence)
+                    
+                    # Check each token ID
+                    for token_id in token_list:
+                        if isinstance(token_id, (int, float)) and token_id >= 0:
+                            max_token_found = max(max_token_found, int(token_id))
+                            
+                            # Critical check: token ID must be within vocab bounds
+                            if int(token_id) >= len(vocab):
+                                problematic_batches.append({
+                                    'batch': batch_key,
+                                    'sequence': seq_idx,
+                                    'token_id': int(token_id),
+                                    'vocab_size': len(vocab)
+                                })
+                                
+                                # Stop at first problem for quick debugging
+                                if len(problematic_batches) >= 5:
+                                    break
+                    
+                    if len(problematic_batches) >= 5:
+                        break
+            
+            if len(problematic_batches) >= 5:
+                break
+                
+        except Exception as e:
+            print(f"⚠️ Error processing batch {batch_key}: {e}")
+            continue
+    
+    # Report results
+    if problematic_batches:
+        print(f"❌ CRITICAL ERROR: Found {len(problematic_batches)} token ID mismatches!")
+        print(f"   Vocabulary size: {len(vocab)}")
+        print(f"   Max token ID found: {max_token_found}")
+        print(f"   Problematic examples:")
+        for prob in problematic_batches[:3]:
+            print(f"     Batch {prob['batch']}, seq {prob['sequence']}: token_id={prob['token_id']} >= vocab_size={prob['vocab_size']}")
+        
+        print(f"\n🔧 SOLUTION:")
+        print(f"   1. Regenerate data files with correct vocabulary")
+        print(f"   2. Or use a vocabulary file that matches the data")
+        print(f"   3. Check that tokenization method matches between training and inference")
+        
+        raise ValueError(f"Token IDs in {dataset_name} exceed vocabulary size. Max token: {max_token_found}, Vocab size: {len(vocab)}")
+    
+    else:
+        print(f"✅ {dataset_name} validation passed!")
+        print(f"   Checked {total_sequences} sequences")
+        print(f"   Max token ID: {max_token_found} (within vocab size {len(vocab)})")
+        print(f"   Vocabulary coverage: {(max_token_found + 1) / len(vocab) * 100:.1f}%")
+
 def load_transfer_data(csv_path, stage, source_properties, target_properties, 
                       batch_size, tokenization, vocab, sample_weight=1.0, 
                       device='cuda', dataset_path=None):
     """
     Transfer learning data loading that works with stage-specific directories
+    ENHANCED with vocabulary validation
     """
     
     if dataset_path is None:
@@ -19,8 +93,13 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         else:
             dataset_path = os.path.join(base_path, "Stage2_Data")
     
+    print(f"📂 Loading data from: {dataset_path}")
+    print(f"🎯 Stage: {stage}")
+    print(f"🔤 Tokenization: {tokenization}")
+    print(f"📚 Vocabulary size: {len(vocab)}")
+    
     if stage == 1:
-        print(f"Stage 1: Loading dataset with {source_properties}")
+        print(f"🧬 Stage 1: Loading dataset with {source_properties}")
         
         # Files have been standardized without property suffixes
         train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
@@ -29,19 +108,39 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         
         # Check if files exist
         if not os.path.exists(train_loader_path):
-            print(f"ERROR: Could not find {train_loader_path}")
-            print(f"Available files in {dataset_path}:")
+            print(f"❌ ERROR: Could not find {train_loader_path}")
+            print(f"📁 Available files in {dataset_path}:")
             if os.path.exists(dataset_path):
-                for f in os.listdir(dataset_path):
+                for f in sorted(os.listdir(dataset_path)):
                     if f.endswith('.pt'):
                         print(f"  - {f}")
+            else:
+                print(f"❌ Directory {dataset_path} does not exist!")
             raise FileNotFoundError(f"Stage 1 data files not found in {dataset_path}")
         
-        dict_train_loader = torch.load(train_loader_path)
-        dict_val_loader = torch.load(val_loader_path)
-        dict_test_loader = torch.load(test_loader_path)
+        print(f"📥 Loading data files...")
+        try:
+            dict_train_loader = torch.load(train_loader_path, map_location='cpu')  # Load to CPU first
+            dict_val_loader = torch.load(val_loader_path, map_location='cpu')
+            dict_test_loader = torch.load(test_loader_path, map_location='cpu')
+            print(f"✅ Successfully loaded data files")
+        except Exception as e:
+            print(f"❌ Error loading data files: {e}")
+            raise
         
-        print(f"Stage 1: Loaded {len(dict_train_loader)} training batches with properties {source_properties}")
+        # CRITICAL: Validate vocabulary consistency IMMEDIATELY after loading
+        print(f"\n🔍 PERFORMING CRITICAL VOCABULARY VALIDATION...")
+        try:
+            validate_data_vocab_consistency(dict_train_loader, vocab, "training data")
+            validate_data_vocab_consistency(dict_val_loader, vocab, "validation data")
+            validate_data_vocab_consistency(dict_test_loader, vocab, "test data")
+            print(f"✅ All vocabulary validations passed!")
+        except Exception as e:
+            print(f"❌ VOCABULARY VALIDATION FAILED: {e}")
+            print(f"\n🔧 This is likely the cause of your embedding dimension mismatch!")
+            raise
+        
+        print(f"📊 Stage 1: Loaded {len(dict_train_loader)} training batches with properties {source_properties}")
         
         # For semi-supervised Stage 1, check data composition
         labeled_count = 0
@@ -96,7 +195,7 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         print(f"   📊 Test set: {test_labeled:,} labeled, {test_unlabeled:,} unlabeled")
         
     else:  # Stage 2
-        print(f"Stage 2: Loading dataset with {target_properties}")
+        print(f"🧬 Stage 2: Loading dataset with {target_properties}")
         
         # For Stage 2, files are named with bandgap pattern
         # Files have been standardized without property suffixes
@@ -106,19 +205,38 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
                 
         # Check if files exist
         if not os.path.exists(train_loader_path):
-            print(f"ERROR: Could not find {train_loader_path}")
-            print(f"Available files in {dataset_path}:")
+            print(f"❌ ERROR: Could not find {train_loader_path}")
+            print(f"📁 Available files in {dataset_path}:")
             if os.path.exists(dataset_path):
-                for f in os.listdir(dataset_path):
+                for f in sorted(os.listdir(dataset_path)):
                     if f.endswith('.pt'):
                         print(f"  - {f}")
+            else:
+                print(f"❌ Directory {dataset_path} does not exist!")
             raise FileNotFoundError(f"Stage 2 data files not found in {dataset_path}")
         
-        dict_train_loader = torch.load(train_loader_path)
-        dict_val_loader = torch.load(val_loader_path)
-        dict_test_loader = torch.load(test_loader_path)
+        print(f"📥 Loading data files...")
+        try:
+            dict_train_loader = torch.load(train_loader_path, map_location='cpu')
+            dict_val_loader = torch.load(val_loader_path, map_location='cpu')
+            dict_test_loader = torch.load(test_loader_path, map_location='cpu')
+            print(f"✅ Successfully loaded data files")
+        except Exception as e:
+            print(f"❌ Error loading data files: {e}")
+            raise
         
-        print(f"Stage 2: Loaded {len(dict_train_loader)} training batches with property {target_properties}")
+        # CRITICAL: Validate vocabulary consistency for Stage 2 as well
+        print(f"\n🔍 PERFORMING CRITICAL VOCABULARY VALIDATION...")
+        try:
+            validate_data_vocab_consistency(dict_train_loader, vocab, "Stage 2 training data")
+            validate_data_vocab_consistency(dict_val_loader, vocab, "Stage 2 validation data")
+            validate_data_vocab_consistency(dict_test_loader, vocab, "Stage 2 test data")
+            print(f"✅ All Stage 2 vocabulary validations passed!")
+        except Exception as e:
+            print(f"❌ STAGE 2 VOCABULARY VALIDATION FAILED: {e}")
+            raise
+        
+        print(f"📊 Stage 2: Loaded {len(dict_train_loader)} training batches with property {target_properties}")
         
         # Check Stage 2 data composition
         labeled_count = 0
@@ -145,13 +263,75 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         if unlabeled_count > 0:
             print(f"   ⚠️  Warning: Stage 2 contains unlabeled data - this is unusual")
     
+    # Move data to correct device if specified
+    if device != 'cpu':
+        print(f"📱 Moving data to device: {device}")
+        dict_train_loader = move_data_to_device(dict_train_loader, device)
+        dict_val_loader = move_data_to_device(dict_val_loader, device)
+        dict_test_loader = move_data_to_device(dict_test_loader, device)
+    
+    print(f"✅ Data loading completed successfully!")
     return dict_train_loader, dict_val_loader, dict_test_loader
+
+def move_data_to_device(dict_loader, device):
+    """
+    Move all tensors in data loader to specified device
+    """
+    try:
+        for batch_key in dict_loader:
+            # Move the graph data
+            dict_loader[batch_key][0].to(device)
+            # Move the matrices
+            dict_loader[batch_key][1].to(device)
+            dict_loader[batch_key][2].to(device)
+        return dict_loader
+    except Exception as e:
+        print(f"⚠️ Warning: Could not move data to device {device}: {e}")
+        return dict_loader
+
+def verify_tokenization_consistency(dict_loader, tokenization, vocab):
+    """
+    Verify that the data was created with the expected tokenization method
+    """
+    print(f"🔍 Verifying tokenization consistency...")
+    
+    # Check a few sample sequences
+    sample_count = 0
+    for batch_key in list(dict_loader.keys())[:3]:  # Check first 3 batches
+        batch_data = dict_loader[batch_key][0]
+        if hasattr(batch_data, 'tgt_token_ids'):
+            for seq in batch_data.tgt_token_ids[:2]:  # Check first 2 sequences per batch
+                sample_count += 1
+                
+                # Convert token IDs back to tokens for inspection
+                if isinstance(seq, torch.Tensor):
+                    token_ids = seq.tolist()
+                else:
+                    token_ids = list(seq)
+                
+                # Basic checks for tokenization patterns
+                # RT_tokenized should have specific patterns
+                if tokenization == "RT_tokenized":
+                    # Look for polymer-specific tokens
+                    has_polymer_tokens = any(vocab.get(tid, '') in ['|', '[*:', ':', '<', '>'] 
+                                           for tid in token_ids if tid < len(vocab))
+                    if not has_polymer_tokens and sample_count < 5:
+                        print(f"⚠️ Warning: Sample {sample_count} doesn't show expected RT_tokenized patterns")
+                
+                if sample_count >= 5:
+                    break
+        if sample_count >= 5:
+            break
+    
+    print(f"✅ Checked {sample_count} sample sequences for tokenization consistency")
 
 def apply_weighted_sampling(dict_loader, sample_weight):
     """
     Apply weighted sampling to oversample batches with more labeled data.
     This duplicates batches that have high labeled content.
     """
+    print(f"🎯 Applying weighted sampling with weight={sample_weight}...")
+    
     # First, analyze each batch
     batch_info = []
     for batch_key in dict_loader:
@@ -242,11 +422,11 @@ def prepare_stage1_properties(dict_loader, device):
             batch_size = batch_data.y1.shape[0]
             batch_data.y2 = torch.full((batch_size,), float('nan'), device=batch_data.y1.device)
             if modified_count == 0:  # Only print once
-                print(f"Note: Created dummy y2 for batches with only y1")
+                print(f"📝 Note: Created dummy y2 for batches with only y1")
             modified_count += 1
     
     if modified_count > 0:
-        print(f"   Modified {modified_count} batches to have y2 property")
+        print(f"   ✏️ Modified {modified_count} batches to have y2 property")
     
     return dict_loader
 

@@ -6,12 +6,13 @@ import os
 
 def validate_data_vocab_consistency(dict_loader, vocab, dataset_name="dataset"):
     """
-    CRITICAL: Validate that all token IDs in the data are within vocabulary bounds
+    CRITICAL: Validate that all token IDs in the data are within vocabulary bounds - FIXED
     """
     print(f"🔍 Validating {dataset_name} consistency with vocabulary...")
     
     max_token_found = -1
     total_sequences = 0
+    total_tokens = 0
     problematic_batches = []
     
     for batch_key in dict_loader:
@@ -21,32 +22,52 @@ def validate_data_vocab_consistency(dict_loader, vocab, dataset_name="dataset"):
                 for seq_idx, token_sequence in enumerate(batch_data.tgt_token_ids):
                     total_sequences += 1
                     
-                    # Convert to list if it's a tensor
+                    # FIXED: Handle different data types properly
                     if isinstance(token_sequence, torch.Tensor):
+                        token_list = token_sequence.detach().cpu().tolist()
+                    elif isinstance(token_sequence, np.ndarray):
                         token_list = token_sequence.tolist()
-                    else:
+                    elif isinstance(token_sequence, (list, tuple)):
                         token_list = list(token_sequence)
+                    else:
+                        print(f"⚠️ Unknown token sequence type: {type(token_sequence)}")
+                        continue
                     
                     # Check each token ID
-                    for token_id in token_list:
-                        if isinstance(token_id, (int, float)) and token_id >= 0:
-                            max_token_found = max(max_token_found, int(token_id))
+                    for token_idx, token_id in enumerate(token_list):
+                        total_tokens += 1
+                        
+                        # FIXED: Handle different token types
+                        if isinstance(token_id, torch.Tensor):
+                            token_val = token_id.item()
+                        elif isinstance(token_id, (int, float, np.integer, np.floating)):
+                            token_val = int(token_id)
+                        else:
+                            print(f"⚠️ Unknown token type: {type(token_id)} = {token_id}")
+                            continue
+                        
+                        # Skip padding and special negative values
+                        if token_val >= 0:
+                            max_token_found = max(max_token_found, token_val)
                             
                             # Critical check: token ID must be within vocab bounds
-                            if int(token_id) >= len(vocab):
+                            if token_val >= len(vocab):
                                 problematic_batches.append({
                                     'batch': batch_key,
                                     'sequence': seq_idx,
-                                    'token_id': int(token_id),
+                                    'position': token_idx,
+                                    'token_id': token_val,
                                     'vocab_size': len(vocab)
                                 })
                                 
-                                # Stop at first problem for quick debugging
+                                # Stop at first few problems for quick debugging
                                 if len(problematic_batches) >= 5:
                                     break
                     
                     if len(problematic_batches) >= 5:
                         break
+            else:
+                print(f"⚠️ Batch {batch_key} has no tgt_token_ids attribute")
             
             if len(problematic_batches) >= 5:
                 break
@@ -56,13 +77,15 @@ def validate_data_vocab_consistency(dict_loader, vocab, dataset_name="dataset"):
             continue
     
     # Report results
+    print(f"   📊 Checked {total_sequences:,} sequences with {total_tokens:,} total tokens")
+    
     if problematic_batches:
         print(f"❌ CRITICAL ERROR: Found {len(problematic_batches)} token ID mismatches!")
         print(f"   Vocabulary size: {len(vocab)}")
         print(f"   Max token ID found: {max_token_found}")
         print(f"   Problematic examples:")
         for prob in problematic_batches[:3]:
-            print(f"     Batch {prob['batch']}, seq {prob['sequence']}: token_id={prob['token_id']} >= vocab_size={prob['vocab_size']}")
+            print(f"     Batch {prob['batch']}, seq {prob['sequence']}, pos {prob['position']}: token_id={prob['token_id']} >= vocab_size={prob['vocab_size']}")
         
         print(f"\n🔧 SOLUTION:")
         print(f"   1. Regenerate data files with correct vocabulary")
@@ -73,10 +96,14 @@ def validate_data_vocab_consistency(dict_loader, vocab, dataset_name="dataset"):
     
     else:
         print(f"✅ {dataset_name} validation passed!")
-        print(f"   Checked {total_sequences} sequences")
         print(f"   Max token ID: {max_token_found} (within vocab size {len(vocab)})")
-        print(f"   Vocabulary coverage: {(max_token_found + 1) / len(vocab) * 100:.1f}%")
-
+        if max_token_found >= 0:
+            print(f"   Vocabulary coverage: {(max_token_found + 1) / len(vocab) * 100:.1f}%")
+        else:
+            print(f"   ⚠️ No valid token IDs found - this might indicate a data structure issue")
+    
+    return max_token_found
+    
 def load_transfer_data(csv_path, stage, source_properties, target_properties, 
                       batch_size, tokenization, vocab, sample_weight=1.0, 
                       device='cuda', dataset_path=None):

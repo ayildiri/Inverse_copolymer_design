@@ -246,7 +246,6 @@ class SequenceDecoder(nn.Module):
         self.ndim= model_config['embedding_dim']
         self.config = model_config
         
-        # 🔧 FIX: Increase max length for complete polymer format generation
         self.max_n = 512  # Changed from 256 to accommodate stoichiometry + connectivity
         
         self.vocab = vocab
@@ -256,7 +255,7 @@ class SequenceDecoder(nn.Module):
 
         self.decoder_embeddings = Embeddings(
             word_vec_size=model_config['embedding_dim'],
-            word_vocab_size=len(self.vocab)+1,
+            word_vocab_size=len(self.vocab),  # <-- FIXED: Removed +1
             word_padding_idx=self.vocab["_PAD"],
             position_encoding=True,
             dropout=0.3

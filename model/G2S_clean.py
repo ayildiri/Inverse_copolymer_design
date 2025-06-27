@@ -773,7 +773,7 @@ class SequenceDecoder(nn.Module):
                 
                 # Get logits for current step
                 logits = self.output_layer(dec_out)  # [1, b, vocab_size]
-                dec_outs[:, :, t] = logits.squeeze(0)  # Store in output tensor
+                dec_outs[:, :, t] = logits.squeeze(1)  # Store in output tensor
                 
                 # Get prediction for next input
                 pred = torch.argmax(logits.squeeze(0), dim=-1)  # [b]

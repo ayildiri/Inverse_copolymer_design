@@ -769,12 +769,19 @@ else:
     vocab_file_path = main_dir_path+'/data/poly_smiles_vocab_'+augment+'_'+tokenization+'.txt'
     data_path_prefix = main_dir_path+'/data/dict_{}_loader_'+augment+'_'+tokenization+'.pt'
 
+vocab = load_vocab(vocab_file_path)
+
 print(f"DEBUG: Constructed vocab file path: {vocab_file_path}")
 print(f"DEBUG: File exists: {os.path.exists(vocab_file_path)}")
 print(f"DEBUG: Current working directory: {os.getcwd()}")
 print(f"DEBUG: Absolute path: {os.path.abspath(vocab_file_path)}")
+print(f"\n🔍 DEBUG: Vocabulary Analysis")
+print(f"Vocab size: {len(vocab)}")
+print(f"First 10 tokens: {list(vocab.items())[:10]}")
+print(f"Last 10 tokens: {list(vocab.items())[-10:]}")
+print(f"Special tokens: _PAD={vocab.get('_PAD', 'MISSING')}, _SOS={vocab.get('_SOS', 'MISSING')}, _EOS={vocab.get('_EOS', 'MISSING')}, _UNK={vocab.get('_UNK', 'MISSING')}")
+print()
 
-vocab = load_vocab(vocab_file_path)
 
 model_config = {
     "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors

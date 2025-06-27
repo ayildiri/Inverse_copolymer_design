@@ -272,7 +272,7 @@ class SequenceDecoder(nn.Module):
             full_context_alignment=False, alignment_layer=-3, alignment_heads=0
         )
 
-        self.output_layer = nn.Linear(d_model, len(self.vocab), bias=True)
+        self.output_layer = nn.Linear(d_model, len(self.vocab), bias=True)  # This should already be correct (no +1)
 
         if self.config['loss']=="ce" or self.config['loss']=="wce":
             self.criterion = nn.CrossEntropyLoss(

@@ -789,43 +789,46 @@ class SequenceDecoder(nn.Module):
             )
             dec_outs = self.output_layer(dec_outs)                                  # [t, b, h] => [t, b, v]
             dec_outs = dec_outs.permute(0, 2, 1)                                    # [t, b, v] => [b, v, t]
-        else:
-            # Use model's own predictions (scheduled sampling)
-            batch_size = z.size(0)
-            max_len = target.size(1)
-            vocab_size = len(self.vocab)
+        # Replace the entire scheduled sampling else block with this cleaner version:
+
+    else:
+        # Use model's own predictions (scheduled sampling)
+        batch_size = z.size(0)
+        max_len = target.size(1)
+        vocab_size = len(self.vocab)
+        
+        # Initialize output tensor
+        dec_outs = torch.zeros(batch_size, vocab_size, max_len, device=z.device)
+        
+        # Start with SOS token - keep in [b, 1] format
+        current_input = target[:, :1]  # [b, 1]
+        
+        for t in range(max_len):
+            # Decode one step - transpose to [1, b] just for decoder
+            dec_out, _ = self.Decoder(
+                tgt=current_input.t(),  # Transpose here: [b, 1] -> [1, b]
+                enc_out=enc_output, 
+                src_len=src_lengths, 
+                step=t+1, 
+                add_latent=self.add_latent
+            )
             
-            # Initialize output tensor
-            dec_outs = torch.zeros(batch_size, vocab_size, max_len, device=z.device)
+            # Get logits for current step
+            logits = self.output_layer(dec_out)  # [1, b, vocab_size]
+            dec_outs[:, :, t] = logits.squeeze(0)  # Store in output tensor
             
-            # Start with SOS token - WITHOUT extra dimension
-            current_input = target[:, :1]  # [b, 1] - no unsqueeze needed
+            # Get prediction for next input
+            pred = torch.argmax(logits.squeeze(0), dim=-1, keepdim=True)  # [b, 1]
+            current_input = pred  # Already [b, 1], no reshape needed
             
-            for t in range(max_len):
-                # Decode one step
-                dec_out, _ = self.Decoder(
-                    tgt=current_input, 
-                    enc_out=enc_output, 
-                    src_len=src_lengths, 
-                    step=t+1, 
-                    add_latent=self.add_latent
-                )
+            # Optionally mix with ground truth (curriculum learning)
+            if t < max_len - 1:
+                # Random sampling per batch element
+                use_gt = torch.rand(batch_size, 1, device=z.device) < teacher_forcing_ratio
+                ground_truth = target[:, t+1:t+2]  # Next ground truth token [b, 1]
                 
-                # Get logits for current step
-                logits = self.output_layer(dec_out)  # [1, b, vocab_size]
-                dec_outs[:, :, t] = logits.squeeze(1)  # Store in output tensor
-                
-                # Get prediction for next input
-                pred = torch.argmax(logits.squeeze(0), dim=-1)  # [b]
-                current_input = pred.unsqueeze(0)  # [1, b] - correct shape without extra dimension
-                
-                # Optionally mix with ground truth (curriculum learning)
-                if t < max_len - 1:
-                    # Random sampling per batch element
-                    use_gt = torch.rand(batch_size, 1, device=z.device) < teacher_forcing_ratio
-                    ground_truth = target[:, t+1:t+2]  # Next ground truth token [b, 1]
-                    # Ensure shapes match for where operation
-                    current_input = torch.where(use_gt.t(), ground_truth.t(), current_input).t()
+                # Both are [b, 1], so where operation is straightforward
+                current_input = torch.where(use_gt, ground_truth, current_input)
     
         # evaluate
         target = torch.tensor(np.array(graph_batch.tgt_token_ids), device=z.device)

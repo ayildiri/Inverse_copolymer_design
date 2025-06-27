@@ -288,6 +288,248 @@ class SequenceDecoder(nn.Module):
                 reduction="none"
             )
 
+
+    def fix_polymer_format(self, smiles):
+        """Fix common format errors in generated SMILES"""
+        if not smiles:
+            return smiles
+        
+        # Ensure polymer format marker
+        if '|' not in smiles:
+            # Add default stoichiometry and connectivity
+            smiles += '|1.000|1.000|<1-1:0.500:0.500>'
+        
+        # Fix attachment points
+        if '[*]' in smiles:
+            smiles = smiles.replace('[*]', '[*:1]')
+        
+        # Ensure at least two attachment points
+        if '[*:1]' in smiles and '[*:2]' not in smiles:
+            # Find a suitable position for second attachment
+            if 'c' in smiles:  # Aromatic carbon
+                smiles = smiles.replace('c', 'c[*:2]', 1)
+            elif 'C' in smiles:  # Aliphatic carbon
+                smiles = smiles.replace('C', 'C[*:2]', 1)
+        
+        # Balance parentheses
+        open_count = smiles.count('(')
+        close_count = smiles.count(')')
+        if open_count > close_count:
+            smiles += ')' * (open_count - close_count)
+        
+        # Balance brackets
+        open_brackets = smiles.count('[')
+        close_brackets = smiles.count(']')
+        if open_brackets > close_brackets:
+            smiles += ']' * (open_brackets - close_brackets)
+        
+        # Ensure proper pipe count
+        pipe_count = smiles.count('|')
+        if pipe_count < 4:
+            parts = smiles.split('|')
+            while len(parts) < 4:
+                if len(parts) == 1:
+                    parts.append('1.000')  # Default stoich 1
+                elif len(parts) == 2:
+                    parts.append('1.000')  # Default stoich 2
+                elif len(parts) == 3:
+                    parts.append('<1-1:0.500:0.500>')  # Default connectivity
+            smiles = '|'.join(parts)
+        
+        return smiles
+        
+    def constrained_beam_search(self, z, beam_size=3, temperature=0.8):
+        """Generate with format constraints and chemical validity"""
+        batch_size = z.size(0)
+        device = z.device
+        
+        # Initialize beams
+        beams = [[([self.vocab["_SOS"]], 0.0)] for _ in range(batch_size)]
+        finished = [[] for _ in range(batch_size)]
+        
+        # Prepare encoder output
+        enc_output = z.unsqueeze(1)
+        src_lengths = torch.ones(batch_size, device=device).long()
+        
+        for step in range(self.max_n):
+            new_beams = [[] for _ in range(batch_size)]
+            
+            for batch_idx in range(batch_size):
+                for seq, score in beams[batch_idx]:
+                    # Check if sequence is complete
+                    if seq[-1] == self.vocab["_EOS"] or len(seq) > 400:
+                        finished[batch_idx].append((seq, score))
+                        continue
+                    
+                    # Prepare input
+                    input_seq = torch.tensor([seq], device=device).unsqueeze(-1)
+                    
+                    # Get predictions
+                    with torch.no_grad():
+                        dec_out, _ = self.Decoder(
+                            tgt=input_seq[-1:, :, :], 
+                            enc_out=enc_output[batch_idx:batch_idx+1], 
+                            src_len=src_lengths[batch_idx:batch_idx+1], 
+                            step=len(seq), 
+                            add_latent=self.add_latent
+                        )
+                        logits = self.output_layer(dec_out.squeeze(0))
+                        probs = F.softmax(logits / temperature, dim=-1)
+                    
+                    # Apply constraints
+                    probs = self.apply_generation_constraints(seq, probs)
+                    
+                    # Get top k tokens
+                    top_k_probs, top_k_indices = torch.topk(probs, min(beam_size * 2, probs.size(-1)))
+                    
+                    for prob, idx in zip(top_k_probs[0], top_k_indices[0]):
+                        new_seq = seq + [idx.item()]
+                        new_score = score + torch.log(prob).item()
+                        new_beams[batch_idx].append((new_seq, new_score))
+                
+                # Keep top beams
+                new_beams[batch_idx] = sorted(new_beams[batch_idx], key=lambda x: x[1], reverse=True)[:beam_size]
+                if not new_beams[batch_idx]:  # If all beams ended
+                    new_beams[batch_idx] = beams[batch_idx][:1]  # Keep at least one
+            
+            beams = new_beams
+            
+            # Check if all batches have at least one finished sequence
+            all_have_finished = all(len(f) > 0 for f in finished)
+            if all_have_finished and step > 100:
+                break
+        
+        # Select best sequences
+        final_sequences = []
+        for batch_idx in range(batch_size):
+            all_seqs = beams[batch_idx] + finished[batch_idx]
+            # Prefer finished sequences with valid format
+            valid_seqs = [(seq, score) for seq, score in all_seqs 
+                          if self.check_sequence_completeness(seq)]
+            if valid_seqs:
+                best_seq = max(valid_seqs, key=lambda x: x[1])
+            else:
+                best_seq = max(all_seqs, key=lambda x: x[1])
+            final_sequences.append(best_seq[0])
+        
+        return final_sequences
+    
+    def apply_generation_constraints(self, current_seq, probs):
+        """Apply hard constraints to generation probabilities"""
+        # Convert current sequence to tokens
+        current_tokens = [self.inv_vocab.get(t, '') for t in current_seq[1:]]  # Skip SOS
+        current_string = ''.join(current_tokens)
+        
+        # Mask invalid tokens
+        for token_id, token in self.inv_vocab.items():
+            if not self.is_valid_next_token(current_tokens, token_id):
+                probs[0, token_id] = 0.0
+        
+        # Renormalize
+        if probs.sum() > 0:
+            probs = probs / probs.sum()
+        else:
+            # Fallback to uniform if all masked
+            probs = torch.ones_like(probs) / probs.size(-1)
+        
+        return probs
+
+    def constrained_beam_search(self, z, beam_size=3, temperature=0.8):
+        """Generate with format constraints and chemical validity"""
+        batch_size = z.size(0)
+        device = z.device
+        
+        # Initialize beams
+        beams = [[([self.vocab["_SOS"]], 0.0)] for _ in range(batch_size)]
+        finished = [[] for _ in range(batch_size)]
+        
+        # Prepare encoder output
+        enc_output = z.unsqueeze(1)
+        src_lengths = torch.ones(batch_size, device=device).long()
+        
+        for step in range(self.max_n):
+            new_beams = [[] for _ in range(batch_size)]
+            
+            for batch_idx in range(batch_size):
+                for seq, score in beams[batch_idx]:
+                    # Check if sequence is complete
+                    if seq[-1] == self.vocab["_EOS"] or len(seq) > 400:
+                        finished[batch_idx].append((seq, score))
+                        continue
+                    
+                    # Prepare input
+                    input_seq = torch.tensor([seq], device=device).unsqueeze(-1)
+                    
+                    # Get predictions
+                    with torch.no_grad():
+                        dec_out, _ = self.Decoder(
+                            tgt=input_seq[-1:, :, :], 
+                            enc_out=enc_output[batch_idx:batch_idx+1], 
+                            src_len=src_lengths[batch_idx:batch_idx+1], 
+                            step=len(seq), 
+                            add_latent=self.add_latent
+                        )
+                        logits = self.output_layer(dec_out.squeeze(0))
+                        probs = F.softmax(logits / temperature, dim=-1)
+                    
+                    # Apply constraints
+                    probs = self.apply_generation_constraints(seq, probs)
+                    
+                    # Get top k tokens
+                    top_k_probs, top_k_indices = torch.topk(probs, min(beam_size * 2, probs.size(-1)))
+                    
+                    for prob, idx in zip(top_k_probs[0], top_k_indices[0]):
+                        new_seq = seq + [idx.item()]
+                        new_score = score + torch.log(prob).item()
+                        new_beams[batch_idx].append((new_seq, new_score))
+                
+                # Keep top beams
+                new_beams[batch_idx] = sorted(new_beams[batch_idx], key=lambda x: x[1], reverse=True)[:beam_size]
+                if not new_beams[batch_idx]:  # If all beams ended
+                    new_beams[batch_idx] = beams[batch_idx][:1]  # Keep at least one
+            
+            beams = new_beams
+            
+            # Check if all batches have at least one finished sequence
+            all_have_finished = all(len(f) > 0 for f in finished)
+            if all_have_finished and step > 100:
+                break
+        
+        # Select best sequences
+        final_sequences = []
+        for batch_idx in range(batch_size):
+            all_seqs = beams[batch_idx] + finished[batch_idx]
+            # Prefer finished sequences with valid format
+            valid_seqs = [(seq, score) for seq, score in all_seqs 
+                          if self.check_sequence_completeness(seq)]
+            if valid_seqs:
+                best_seq = max(valid_seqs, key=lambda x: x[1])
+            else:
+                best_seq = max(all_seqs, key=lambda x: x[1])
+            final_sequences.append(best_seq[0])
+        
+        return final_sequences
+
+    def apply_generation_constraints(self, current_seq, probs):
+        """Apply hard constraints to generation probabilities"""
+        # Convert current sequence to tokens
+        current_tokens = [self.inv_vocab.get(t, '') for t in current_seq[1:]]  # Skip SOS
+        current_string = ''.join(current_tokens)
+        
+        # Mask invalid tokens
+        for token_id, token in self.inv_vocab.items():
+            if not self.is_valid_next_token(current_tokens, token_id):
+                probs[0, token_id] = 0.0
+        
+        # Renormalize
+        if probs.sum() > 0:
+            probs = probs / probs.sum()
+        else:
+            # Fallback to uniform if all masked
+            probs = torch.ones_like(probs) / probs.size(-1)
+        
+        return probs
+    
     def validate_smiles_during_generation(self, token_ids, vocab):
         """Validate SMILES during generation to prevent chemical invalidity"""
         try:

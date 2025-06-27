@@ -982,11 +982,10 @@ model.to(device)
 
 # Validate vocabulary size matches model
 print(f"\n🔍 Model Validation:")
-print(f"Decoder embedding size: {model.Decoder.decoder_embeddings.word_embeddings.num_embeddings}")
 print(f"Output layer size: {model.Decoder.output_layer.out_features}")
 print(f"Vocabulary size: {len(vocab)}")
-assert model.Decoder.decoder_embeddings.word_embeddings.num_embeddings == len(vocab), \
-    f"Embedding size mismatch! Model has {model.Decoder.decoder_embeddings.word_embeddings.num_embeddings} but vocab has {len(vocab)}"
+assert model.Decoder.output_layer.out_features == len(vocab), \
+    f"Output layer size mismatch! Model has {model.Decoder.output_layer.out_features} but vocab has {len(vocab)}"
 print("✅ Model vocabulary size validated!\n")
 
 # 🔧 CRITICAL FIX: Reset dead context attention components

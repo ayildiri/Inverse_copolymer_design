@@ -130,10 +130,8 @@ class EarlyStoppingWithValidity:
                 self.early_stop = True
             return False
 
-
-def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold):
+def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold, epoch, total_epochs):
     # shuffle batches every epoch
-
     order_batches = list(range(len(dict_train_loader)))
     random.shuffle(order_batches)
 
@@ -144,6 +142,15 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
     mses = []
 
     model.train()
+    
+    # Calculate teacher forcing ratio based on epoch
+    # Start at 1.0 and gradually decrease to 0.5 over training
+    teacher_forcing_ratio = max(0.5, 1.0 - (epoch / total_epochs) * 0.5)
+    
+    # Log teacher forcing ratio periodically
+    if epoch % 10 == 0:
+        print(f"📚 Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
+    
     # Iterate in batches over the training dataset.
     for i, batch in enumerate(order_batches):
         # CRITICAL FIX: Clear decoder state completely before each batch
@@ -178,8 +185,9 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         inc_edges_to_atom_matrix.to(device)
 
         try:
-            # FIXED: Handle both basic VAE and PP-guided VAE
-            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            # FIXED: Handle both basic VAE and PP-guided VAE with teacher forcing
+            # Pass teacher forcing ratio to the model
+            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
 
             if len(result) == 7:  # Basic G2S_VAE
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
@@ -204,10 +212,11 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             # 🔥 CRITICAL FIX: Add gradient penalty to force gradients through context attention
             loss_with_penalty = add_gradient_penalty_to_loss(model, loss)
             # Add this debug print:
-            if i == 0:  # First batch only
+            if i == 0 and epoch % 10 == 0:  # First batch every 10 epochs
                 print(f"🔍 DEBUG: Original loss: {loss.item():.6f}")
                 print(f"🔍 DEBUG: Loss with penalty: {loss_with_penalty.item():.6f}")
                 print(f"🔍 DEBUG: Penalty amount: {(loss_with_penalty - loss).item():.9f}")
+                print(f"📚 DEBUG: Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
             loss_with_penalty.backward()
             
             # Monitor gradient norms before clipping
@@ -237,6 +246,7 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print("\n📊 Semi-supervised Stage 1 - First batch analysis:")
                 print(f"   Reconstruction loss applied to: ALL {data.num_graphs} molecules")
                 print(f"   KLD loss applied to: ALL {data.num_graphs} molecules")
+                print(f"   Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
                 # Count molecules with valid properties
                 valid_props = 0
                 if hasattr(data, 'y1') and hasattr(data, 'y2'):

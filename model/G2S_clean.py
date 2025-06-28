@@ -448,7 +448,38 @@ class SequenceDecoder(nn.Module):
             final_sequences.append(best_seq[0])
         
         return final_sequences
-    
+        
+    def sample_with_temperature(self, logits, temperature=1.0, top_k=50, top_p=0.95):
+        """Sample from logits with temperature and top-k/top-p filtering"""
+        # Apply temperature
+        logits = logits / max(temperature, 0.1)  # Prevent division by zero
+        
+        # Top-k filtering
+        if top_k > 0:
+            values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            min_value = values[:, -1].unsqueeze(-1)
+            logits = torch.where(logits < min_value, 
+                               torch.full_like(logits, float('-inf')), 
+                               logits)
+        
+        # Top-p (nucleus) filtering
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            
+            # Remove tokens with cumulative probability above threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            
+            indices_to_remove = sorted_indices_to_remove.scatter(
+                dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
+            logits[indices_to_remove] = float('-inf')
+        
+        # Sample from the filtered distribution
+        probs = F.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1)
+        
     def apply_generation_constraints(self, current_seq, probs):
         """Apply hard constraints to generation probabilities"""
         # Convert current sequence to tokens
@@ -857,8 +888,17 @@ class SequenceDecoder(nn.Module):
                     tokens = tokenids_to_vocab(sample_tokens, self.vocab)
                     smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
                     
+                    # NEW: Format validity REWARDS (negative penalties = rewards)
+                    if '|' in smiles_string and smiles_string.count('|') >= 3:
+                        validity_penalty -= 0.05  # REWARD for proper pipe structure
+                    if '[*:' in smiles_string:
+                        validity_penalty -= 0.05  # REWARD for attachment points
+                    if '<' in smiles_string and ':' in smiles_string.split('|')[-1]:
+                        validity_penalty -= 0.05  # REWARD for connectivity notation
+                    
+                    # Keep the penalty for invalid chemistry
                     if not self.validate_basic_chemistry(smiles_string):
-                        validity_penalty += 0.1  # Stronger penalty for RDKit-invalid chemistry
+                        validity_penalty += 0.1  # Penalty for RDKit-invalid chemistry
                 except Exception:
                     validity_penalty += 0.05  # Penalty for unparseable sequences
         else:
@@ -866,18 +906,30 @@ class SequenceDecoder(nn.Module):
             for sample in range(min(len(predictions), 10)):
                 try:
                     sample_tokens = predictions[sample].cpu().numpy()
+                    tokens = tokenids_to_vocab(sample_tokens, self.vocab)
+                    smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
+                    
+                    # NEW: Format validity REWARDS even without RDKit
+                    if '|' in smiles_string and smiles_string.count('|') >= 3:
+                        validity_penalty -= 0.03  # REWARD
+                    if '[*:' in smiles_string:
+                        validity_penalty -= 0.03  # REWARD
+                    if '<' in smiles_string:
+                        validity_penalty -= 0.03  # REWARD
+                        
+                    # Basic validation penalty
                     if not self.validate_smiles_during_generation(sample_tokens, self.vocab):
                         validity_penalty += 0.05
                 except Exception:
                     pass
         
-        # Add validity penalty to loss
-        if validity_penalty > 0:
-            validity_penalty = torch.tensor(validity_penalty / len(predictions), device=z.device)
-            recon_loss = recon_loss + validity_penalty
+        # Add validity penalty to loss with increased weight
+        if validity_penalty != 0:
+            validity_penalty = torch.tensor(validity_penalty / min(10, len(predictions)), device=z.device)
+            recon_loss = recon_loss + validity_penalty * 0.5  # Increased weight from 0.1 to 0.5
     
         return recon_loss, acc, predictions, target
-    
+        
     def safe_map_state(self, fn_map_state):
         """Safely apply map_state only if cache is properly initialized"""
         try:
@@ -900,172 +952,72 @@ class SequenceDecoder(nn.Module):
             print(f"Warning: map_state failed safely: {e}")
             return False
 
-    def inference(self, z):
+    def inference(self, z, temperature=0.9, use_beam_search=False):
         # CRITICAL FIX: Reset decoder cache before inference
         self.reset_decoder_cache()
         
-        global_scorer = GNMTGlobalScorer(alpha=0.5,
-                                             beta=0.0,
-                                             length_penalty="avg",
-                                             coverage_penalty="none")
-    
-        decode_strategy = BeamSearch(
-            pad=self.vocab["_PAD"],
-            bos=self.vocab["_SOS"],
-            eos=self.vocab["_EOS"],
-            unk=self.vocab['_UNK'],
-            ban_unk_token=True,
-            global_scorer=global_scorer,
-            beam_size=1,  # 🔧 STRICTER: Use greedy search for better validity
-            start=self.vocab["_SOS"],
-            batch_size=z.size(0),
-            
-            # 🔧 ENHANCED: Better parameters for chemical validity
-            min_length=50,   # 🔧 STRICTER: Ensure minimum meaningful length
-            n_best=1,
-            stepwise_penalty=None,
-            ratio=0.0,
-            
-            max_length=self.max_n,
-            
-            block_ngram_repeat=3,  # 🔧 ENHANCED: Prevent repetitive patterns
-            exclusion_tokens=set(),
-            return_attention=False,
-        )
-    
-        # adapted from onmt.translate.translator
-        # (0) Prep the components of the search.
-        parallel_paths = decode_strategy.parallel_paths  # beam_size
+        batch_size = z.size(0)
+        device = z.device
         
-        # (1) Encoder output.
-        # FIXED:
-        z_length = 1  # Latent sequence length is always 1
-        src_lengths = torch.ones(z.size(0), device=z.device).long()  # All 1s
-        print(f"🔧 DEBUG: z.shape={z.shape}, src_lengths={src_lengths[:5]}")
-        enc_output = z.unsqueeze(1)
-        self.Decoder.state["src"] = enc_output
-        
-        # (2) prep decode_strategy. Possibly repeat src objects.
-        src_map = None
-        target_prefix = None
-    
-        fn_map_state, enc_out, src_len_tiled, src_map = decode_strategy.initialize(
-            enc_out=enc_output,
-            src_len=src_lengths,
-            src_map=src_map,
-            target_prefix=target_prefix,
-            device=z.device
-    
-        )
-    
-        # FIXED: Safely apply map_state only if cache is properly initialized
-        if fn_map_state is not None:
-            self.safe_map_state(fn_map_state)
-    
-        # (3) Begin decoding step by step with enhanced validation:
-        for step in range(decode_strategy.max_length):
-            # CRITICAL FIX: Don't add extra dimension for decoder input
-            # The original code had: decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
-            # But we need: decoder_input = decode_strategy.current_predictions.view(-1, 1)
-            decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)  # [batch_size, 1, 1]
-            decoder_input = decoder_input.transpose(0, 1)  # [1, batch_size, 1]
+        # Use sampling-based generation for better diversity
+        if not use_beam_search:
+            # Initialize
+            enc_output = z.unsqueeze(1)
+            src_lengths = torch.ones(batch_size, device=device).long()
+            self.Decoder.state["src"] = enc_output
             
-            dec_outs, dec_attn = self.Decoder(
-                tgt=decoder_input, 
-                enc_out=enc_out, 
-                src_len=src_len_tiled, 
-                step=step, 
-                add_latent=self.add_latent
-            )
-            if "std" in dec_attn:
-                attn = dec_attn["std"].detach()
-            else:
-                attn = None
-    
-            dec_outs = dec_outs.transpose(0, 1)  # [1, b, h] -> [b, 1, h]
-            scores = self.output_layer(dec_outs.squeeze(1))
-            log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
-    
-            # 🔥 CRITICAL: Apply validation to prevent malformed patterns
-            if step > 30 and step % 8 == 0:  # Apply validation periodically
-                try:
-                    log_probs = self.filter_invalid_tokens_optimized(decode_strategy, log_probs)
-                except Exception as e:
-                    # If validation fails, continue without filtering
-                    pass
-
-            # 🔧 CRITICAL: Add chemical validity checking during beam search
-            if step > 10 and step % 5 == 0 and RDKIT_AVAILABLE:  # Check every 5 steps after step 10
-                try:
-                    # Get current sequences and validate them
-                    if hasattr(decode_strategy, 'alive_seq'):
-                        current_sequences = decode_strategy.alive_seq
-                        for i, seq in enumerate(current_sequences):
-                            # Convert to SMILES and check
-                            tokens = self.get_current_tokens_from_predictions(seq)
-                            current_smiles = ''.join(tokens)
-                            
-                            # If invalid chemistry detected, penalize this path
-                            if not self.validate_basic_chemistry(current_smiles):
-                                # Force this beam to end or heavily penalize
-                                if hasattr(decode_strategy, 'alive_scores') and i < len(decode_strategy.alive_scores):
-                                    decode_strategy.alive_scores[i] -= 5.0  # Heavy penalty
-                                    
-                except Exception:
-                    pass
-
-            decode_strategy.advance(log_probs, attn)
+            # Start with SOS
+            generated = torch.full((batch_size, 1), self.vocab["_SOS"], device=device)
             
-            any_finished = decode_strategy.is_finished.any()
-            if any_finished:
-                # Check for complete G2S sequences
-                complete_sequences = 0
-                try:
-                    for i, seq in enumerate(decode_strategy.alive_seq):
-                        if self.check_sequence_completeness(seq):
-                            complete_sequences += 1
-                except:
-                    complete_sequences = 0
+            for step in range(self.max_n):
+                # Prepare input
+                input_seq = generated[:, -1:].unsqueeze(-1).transpose(0, 1)
                 
-                decode_strategy.update_finished()
+                # Decode
+                dec_out, _ = self.Decoder(
+                    tgt=input_seq,
+                    enc_out=enc_output,
+                    src_len=src_lengths,
+                    step=step+1,
+                    add_latent=self.add_latent
+                )
+                dec_out = dec_out.transpose(0, 1)
+                logits = self.output_layer(dec_out.squeeze(1))
                 
-                # Allow stopping with reasonable completeness criteria
-                if decode_strategy.done and (complete_sequences > 0 or step > 250):
+                # Apply validity constraints softly
+                for b in range(batch_size):
+                    current_tokens = generated[b].tolist()
+                    current_token_strings = [self.inv_vocab.get(t, '') for t in current_tokens]
+                    for token_id in range(logits.size(-1)):
+                        if not self.is_valid_next_token(current_token_strings, token_id):
+                            logits[b, token_id] -= 5.0  # Soft penalty instead of -inf
+                
+                # Sample next token with temperature
+                next_token = self.sample_with_temperature(
+                    logits, temperature=temperature, top_k=50, top_p=0.95)
+                
+                generated = torch.cat([generated, next_token], dim=1)
+                
+                # Check for EOS
+                if (next_token == self.vocab["_EOS"]).all() or step > 300:
                     break
-                elif step > 400:  # Safety valve
-                    break
-            elif step > 400:  # Safety valve
-                break
-
-            select_indices = decode_strategy.select_indices
-
-            if any_finished:
-                # Reorder states.
-                if isinstance(enc_out, tuple):
-                    enc_out = tuple(x.index_select(0, select_indices) for x in enc_out)
-                else:
-                    enc_out = enc_out.index_select(0, select_indices)
-
-                src_len_tiled = src_len_tiled.index_select(0, select_indices)
-
-                if src_map is not None:
-                    src_map = src_map.index_select(0, select_indices)
-
-            if parallel_paths > 1 or any_finished:
-                # FIXED: Use safe map_state here too
-                try:
-                    self.Decoder.map_state(
-                        lambda state, dim: state.index_select(dim, select_indices)
-                    )
-                except Exception as e:
-                    # If map_state fails, continue without it
-                    print(f"Warning: map_state during inference failed: {e}")
-                    pass
+            
+            # Convert to expected format
+            predictions = []
+            for b in range(batch_size):
+                seq = generated[b].tolist()
+                # Apply post-processing fixes
+                tokens = tokenids_to_vocab(seq, self.vocab)
+                smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+                if hasattr(self, 'fix_polymer_format'):
+                    smiles = self.fix_polymer_format(smiles)
+                predictions.append((seq, 0.0))
+            
+            return predictions
         
-        # Reset layer cache after inference
-        self.reset_layer_cache()
-
-        return decode_strategy.predictions
+        else:
+            # Fall back to original beam search if requested
+            return self.constrained_beam_search(z, beam_size=3, temperature=temperature)
         
     # adapted from onmt.decoders.transformer
     def map_state(self, fn):

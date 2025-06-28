@@ -1775,4 +1775,41 @@ print(f'  - Gradient clipping: {args.gradient_clip_threshold}')
 print(f'  - Learning rate decay factor: {args.lr_decay_factor}')
 print(f'  - Validation frequency: every {args.validation_freq} epoch(s)')
 print(f'  - Checkpoint frequency: every {args.checkpoint_freq} epoch(s)')
+
+# Add diagnosis function
+def quick_generation_test(model, vocab, device, num_samples=10):
+    """Quick test of generation quality"""
+    print("\n🧪 Quick Generation Test...")
+    model.eval()
+    
+    # Temporarily set higher beta for generation
+    original_beta = model.beta
+    model.beta = max(0.1, model.beta)
+    
+    with torch.no_grad():
+        z = torch.randn(num_samples, model.embedding_dim, device=device)
+        predictions = model.Decoder.inference(z, temperature=0.9)
+        
+        valid_format = 0
+        for i, pred in enumerate(predictions[:5]):
+            tokens = tokenids_to_vocab(pred[0], vocab)
+            smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+            
+            if '[*:' in smiles and '|' in smiles:
+                valid_format += 1
+            
+            if i < 3:
+                print(f"  Sample {i+1}: {smiles[:80]}...")
+    
+    print(f"  Format validity: {valid_format}/{min(5, num_samples)} samples")
+    model.beta = original_beta
+    model.train()
+    return valid_format > 0
+
+# Run quick test
+if quick_generation_test(model, vocab, device):
+    print("✅ Generation capability confirmed!")
+else:
+    print("⚠️  Generation needs improvement - check beta value and training")
+
 #experiment.end()

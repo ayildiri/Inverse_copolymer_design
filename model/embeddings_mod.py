@@ -61,19 +61,18 @@ class PositionalEncoding(nn.Module):
 
         Args:
             emb (FloatTensor): Sequence of word vectors
-                ``(batch_size, seq_len, self.dim)``
+                ``(seq_len, batch_size, self.dim)``
             step (int or NoneType): If stepwise (``seq_len = 1``), use
                 the encoding for this position.
         """
-        pe = self.pe.transpose(0, 1)  # (batch x len x dim)
         emb = emb * math.sqrt(self.dim)
         step = step or 0
-        if pe.size(1) < step + emb.size(1):
+        if self.pe.size(0) < step + emb.size(0):
             raise SequenceTooLongError(
-                f"Sequence is {emb.size(1) + step} but PositionalEncoding is"
-                f" limited to {self.pe.size(1)}. See max_len argument."
+                f"Sequence is {emb.size(0) + step} but PositionalEncoding is"
+                f" limited to {self.pe.size(0)}. See max_len argument."
             )
-        emb = emb + pe[:, step : emb.size(1) + step, :]
+        emb = emb + self.pe[step : emb.size(0) + step, :, :]
 
         return emb
 
@@ -280,27 +279,50 @@ class Embeddings(nn.Module):
         """Computes the embeddings for words and features.
 
         Args:
-            source (LongTensor): index tensor ``(batch, len, nfeat)``
+            source (LongTensor): index tensor ``(len, batch, nfeat)`` or ``(batch, len, nfeat)``
+            latent (FloatTensor): latent representation ``(batch, 1, dim)``
 
         Returns:
-            FloatTensor: Word embeddings ``(batch, len, embedding_size)``
+            FloatTensor: Word embeddings ``(len, batch, embedding_size)``
         """
-
+        
+        # Get the initial embeddings
         if self.position_encoding:
-            for i, module in enumerate(self.make_embedding._modules.values()):
-                if i == len(self.make_embedding._modules.values()) - 1:
-                    source = module(source, step=step)
-                else:
-                    source = module(source)
+            # When using positional encoding, we need to handle the modules separately
+            # First apply the embedding lookup
+            source = self.make_embedding[0](source)  # emb_luts
+            
+            # Convert to sequence-first format if needed for positional encoding
+            if source.dim() == 3 and source.size(0) != 1:  # batch-first format
+                source = source.transpose(0, 1)  # Convert to seq-first
+                was_batch_first = True
+            else:
+                was_batch_first = False
+            
+            # Apply any intermediate modules (like MLP)
+            for i, module in enumerate(list(self.make_embedding._modules.values())[1:-1], 1):
+                source = module(source)
+            
+            # Apply positional encoding (expects seq-first format)
+            source = self.make_embedding[-1](source, step=step)  # pe module
+            
+            # Convert back to batch-first if needed
+            if was_batch_first:
+                source = source.transpose(0, 1)
         else:
             source = self.make_embedding(source)
         
-        # Custom: adding latent representation to each token embedding 
+        # Custom: adding latent representation to each token embedding
         if latent is not None:
-            # latent is [batch_size, 1, embedding_dim]
-            # source is [batch_size, seq_len, embedding_size]
-            # No need to transpose - just expand along the sequence dimension
-            latent = latent.expand(-1, source.size(1), -1)  # Expand to [batch_size, seq_len, embedding_dim]
+            # Determine the format of source tensor (batch-first vs seq-first)
+            if source.size(0) == latent.size(0):
+                # Batch-first format: [batch_size, seq_len, embedding_size]
+                latent = latent.expand(-1, source.size(1), -1)  # [batch_size, seq_len, embedding_dim]
+            else:
+                # Sequence-first format: [seq_len, batch_size, embedding_size]
+                latent = latent.transpose(0, 1)  # [1, batch_size, embedding_dim]
+                latent = latent.expand(source.size(0), -1, -1)  # [seq_len, batch_size, embedding_dim]
+            
             source = torch.cat((source, latent), dim=2)  # Concatenate along feature dimension
 
         return self.dropout(source)

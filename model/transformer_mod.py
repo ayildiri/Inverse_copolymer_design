@@ -282,6 +282,10 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
         # enc_out comes in as [batch, 1, dim] but needs to be [1, batch, dim] for attention
         if enc_out.dim() == 3 and enc_out.size(1) == 1:  # If it's [batch, 1, dim]
             enc_out = enc_out.transpose(0, 1)  # Convert to [1, batch, dim]
+            # Also need to adjust the mask dimensions to match
+            if src_pad_mask is not None:
+                # src_pad_mask is [batch, 1, tgt_len, 1] but needs adjustment
+                src_pad_mask = src_pad_mask.transpose(0, 2)  # [tgt_len, 1, batch, 1]
         
         mid, attns = self.context_attn(enc_out, enc_out, query_norm, mask=src_pad_mask)
         layer_out = self.feed_forward(self.drop(mid) + query)

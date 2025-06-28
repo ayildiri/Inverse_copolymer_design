@@ -1364,18 +1364,18 @@ def two_stage_beta_schedule(n_iter, warmup_ratio=0.4, max_beta=None):
     
     warmup_steps = int(n_iter * warmup_ratio)
     
-    # Stage 1: Very low beta for perfect reconstruction
-    stage1 = np.ones(warmup_steps) * 0.0001
+    # Stage 1: Gradual increase from very low (not constant!)
+    stage1 = np.linspace(0.0, max_beta * 0.2, warmup_steps)
     
-    # Stage 2: Gradually increase beta with cycles
+    # Stage 2: Cyclical increase to full beta
     remaining_steps = n_iter - warmup_steps
     stage2 = frange_cycle_zero_linear(
         remaining_steps, 
-        start=0.0001, 
-        stop=max_beta * 10,  # More aggressive
-        n_cycle=3,
-        ratio_increase=0.7,
-        ratio_zero=0.2
+        start=max_beta * 0.2, 
+        stop=max_beta,  # Use full max_beta, not 10x
+        n_cycle=4,
+        ratio_increase=0.6,
+        ratio_zero=0.1
     )
     
     return np.concatenate([stage1, stage2])

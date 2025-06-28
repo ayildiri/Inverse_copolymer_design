@@ -278,6 +278,11 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
         if add_latent:
             enc_out = torch.cat((enc_out,enc_out),dim=2)
 
+        # CRITICAL FIX: Ensure enc_out is in sequence-first format to match query_norm
+        # enc_out comes in as [batch, 1, dim] but query_norm is [seq_len, batch, dim]
+        if enc_out.size(0) != query_norm.size(1):  # If batch dimension is first
+            enc_out = enc_out.transpose(0, 1)  # Convert to sequence-first: [1, batch, dim]
+
         mid, attns = self.context_attn(enc_out, enc_out, query_norm, mask=src_pad_mask)
         layer_out = self.feed_forward(self.drop(mid) + query)
 

@@ -407,7 +407,8 @@ class SequenceDecoder(nn.Module):
                             step=len(seq), 
                             add_latent=self.add_latent
                         )
-                        logits = self.output_layer(dec_out.squeeze(0))
+                        dec_out = dec_out.transpose(0, 1)  # [1, b, h] -> [b, 1, h]
+                        logits = self.output_layer(dec_out)  # [b, 1, vocab_size]
                         probs = F.softmax(logits / temperature, dim=-1)
                     
                     # Apply constraints
@@ -781,6 +782,7 @@ class SequenceDecoder(nn.Module):
         if use_teacher_forcing or not self.training:
             # Normal teacher forcing (use ground truth as input)
             target_3d = target.unsqueeze(-1)  # Add dimension for OpenNMT: [b, t] -> [b, t, 1]
+            target_3d = target_3d.transpose(0, 1)  # Convert to sequence-first: [b, t, 1] -> [t, b, 1]
             dec_outs, _ = self.Decoder(
                 tgt=target_3d,
                 enc_out=enc_output, 
@@ -788,8 +790,9 @@ class SequenceDecoder(nn.Module):
                 step=target.size(1), 
                 add_latent=self.add_latent
             )
-            dec_outs = self.output_layer(dec_outs)                                  # [t, b, h] => [t, b, v]
-            dec_outs = dec_outs.permute(0, 2, 1)                                    # [t, b, v] => [b, v, t]
+            dec_outs = dec_outs.transpose(0, 1)  # Convert back to batch-first: [t, b, h] -> [b, t, h]
+            dec_outs = self.output_layer(dec_outs)  # [b, t, h] => [b, t, v]  (FIXED COMMENT)
+            dec_outs = dec_outs.permute(0, 2, 1)    # [b, t, v] => [b, v, t]  (FIXED COMMENT)
         else:
             # Use model's own predictions (scheduled sampling)
             batch_size = z.size(0)
@@ -803,8 +806,8 @@ class SequenceDecoder(nn.Module):
             current_input = target[:, :1]  # [b, 1]
             
             for t in range(max_len):
-                # Decode one step - convert to 3D for OpenNMT
-                current_input_3d = current_input.t().unsqueeze(-1)  # [b, 1] -> [1, b] -> [1, b, 1]
+                # Decode one step - convert to 3D and sequence-first for OpenNMT
+                current_input_3d = current_input.unsqueeze(-1).transpose(0, 1)  # [b, 1] -> [b, 1, 1] -> [1, b, 1]
                 dec_out, _ = self.Decoder(
                     tgt=current_input_3d,
                     enc_out=enc_output, 
@@ -812,13 +815,14 @@ class SequenceDecoder(nn.Module):
                     step=t+1, 
                     add_latent=self.add_latent
                 )
+                dec_out = dec_out.transpose(0, 1)  # [1, b, h] -> [b, 1, h]
                 
                 # Get logits for current step
-                logits = self.output_layer(dec_out)  # [1, b, vocab_size]
-                dec_outs[:, :, t] = logits.squeeze(0)  # Store in output tensor
+                logits = self.output_layer(dec_out)  # [b, 1, vocab_size]
+                dec_outs[:, :, t] = logits.squeeze(1)  # Store in output tensor
                 
                 # Get prediction for next input
-                pred = torch.argmax(logits.squeeze(0), dim=-1, keepdim=True)  # [b, 1]
+                pred = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)  # [b, 1]
                 current_input = pred  # Already [b, 1], no reshape needed
                 
                 # Optionally mix with ground truth (curriculum learning)
@@ -964,6 +968,7 @@ class SequenceDecoder(nn.Module):
             # The original code had: decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
             # But we need: decoder_input = decode_strategy.current_predictions.view(-1, 1)
             decoder_input = decode_strategy.current_predictions.view(-1, 1, 1)  # [batch_size, 1, 1]
+            decoder_input = decoder_input.transpose(0, 1)  # [1, batch_size, 1]
             
             dec_outs, dec_attn = self.Decoder(
                 tgt=decoder_input, 
@@ -977,6 +982,7 @@ class SequenceDecoder(nn.Module):
             else:
                 attn = None
     
+            dec_outs = dec_outs.transpose(0, 1)  # [1, b, h] -> [b, 1, h]
             scores = self.output_layer(dec_outs.squeeze(1))
             log_probs = F.log_softmax(scores.to(torch.float32), dim=-1).detach()
     

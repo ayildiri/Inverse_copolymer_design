@@ -236,64 +236,60 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
         add_latent=False # Customized GV
     ):
         """A naive forward pass for transformer decoder.
-
+    
         # T: could be 1 in the case of stepwise decoding or tgt_len
-
+    
         Args:
-            layer_in (FloatTensor): ``(batch_size, T, model_dim)``
+            layer_in (FloatTensor): ``(seq_len, batch_size, model_dim)``
             enc_out (FloatTensor): ``(batch_size, src_len, model_dim)``
             src_pad_mask (bool): ``(batch_size, 1, src_len)``
             tgt_pad_mask (bool): ``(batch_size, 1, T)``
             step (int or None): stepwise decoding counter
             future (bool): If set True, do not apply future_mask.
-
+    
         Returns:
             (FloatTensor, FloatTensor):
-
-            * layer_out ``(batch_size, T, model_dim)``
-            * attns ``(batch_size, head, T, src_len)``
-
+    
+            * layer_out ``(seq_len, batch_size, model_dim)``
+            * attns ``(batch_size, head, seq_len, src_len)``
+    
         """
         dec_mask = None
-        src_pad_mask = src_pad_mask.unsqueeze(1)  # [B,1,1,slen]
-
+    
         if layer_in.size(1) > 1:
             # masking is necessary when sequence length is greater than one
             dec_mask = self._compute_dec_mask(tgt_pad_mask, future)
             dec_mask = dec_mask.unsqueeze(1)
             dec_mask = dec_mask.expand(-1, -1, dec_mask.size(3), -1)
-            src_pad_mask = src_pad_mask.expand(-1, -1, dec_mask.size(3), -1)
-            # mask now are (batch x 1 x tlen x s or t len)
-            # 1 = heads to be expanded in MHA
-
+            # mask now are (batch x 1 x tlen x tlen)
+    
         layer_in_norm = self.layer_norm_1(layer_in)
-
         query, _ = self._forward_self_attn(layer_in_norm, dec_mask, step)
-
         query = self.drop(query) + layer_in
-
         query_norm = self.layer_norm_2(query)
-
+    
         # Customized: enc_out needs to be of same shape as the embeddings of tokens in decoder (emb_dim+latent_dim)
         if add_latent:
             enc_out = torch.cat((enc_out,enc_out),dim=2)
-        
-        # CRITICAL FIX: Ensure enc_out is in sequence-first format and fix mask
-        # enc_out comes in as [batch, 1, dim] but needs to be [1, batch, dim] for attention
-        if enc_out.dim() == 3 and enc_out.size(1) == 1:  # If it's [batch, 1, dim]
-            enc_out = enc_out.transpose(0, 1)  # Convert to [1, batch, dim]
-            
-            # Since enc_out is now [1, batch, dim], we need a mask that matches
-            # The attention will be [batch, heads, tgt_len, 1], so mask should be [batch, 1, 1, 1]
-            # This allows all decoder positions to attend to the single encoder output
-            batch_size = enc_out.size(1)
-            src_pad_mask = torch.zeros(batch_size, 1, 1, 1, dtype=torch.bool, device=enc_out.device)
-        
+    
+        # CRITICAL FIX: Handle latent vector to sequence attention
+        # enc_out is [batch, 1, dim], query_norm is [seq_len, batch, dim]
+        # We need to transpose enc_out and set proper mask
+        if enc_out.size(1) == 1:  # Single latent vector case
+            enc_out = enc_out.transpose(0, 1)  # [1, batch, dim]
+            # For latent-to-sequence attention, we don't need source masking
+            # Create a dummy mask that allows all attention
+            src_pad_mask = None
+        else:
+            # Original sequence-to-sequence case
+            src_pad_mask = src_pad_mask.unsqueeze(1)  # [B,1,1,slen]
+            if layer_in.size(1) > 1:
+                src_pad_mask = src_pad_mask.expand(-1, -1, dec_mask.size(3), -1)
+    
         mid, attns = self.context_attn(enc_out, enc_out, query_norm, mask=src_pad_mask)
         layer_out = self.feed_forward(self.drop(mid) + query)
-        
+    
         return layer_out, attns
-
 
 class TransformerDecoderBase(DecoderBase):
     def __init__(self, d_model, copy_attn, embeddings, alignment_layer, layer_norm):

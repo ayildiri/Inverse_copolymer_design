@@ -1788,7 +1788,8 @@ def quick_generation_test(model, vocab, device, num_samples=10):
     
     with torch.no_grad():
         z = torch.randn(num_samples, model.embedding_dim, device=device)
-        predictions = model.Decoder.inference(z, temperature=0.9)
+        result = model.inference(data=z, device=device, sample=False)
+        predictions = result[0]
         
         valid_format = 0
         for i, pred in enumerate(predictions[:5]):

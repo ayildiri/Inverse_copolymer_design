@@ -534,6 +534,38 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print(f"🔍 DEBUG: Loss with penalty: {loss_with_penalty.item():.6f}")
                 print(f"🔍 DEBUG: Penalty amount: {(loss_with_penalty - loss).item():.9f}")
                 print(f"📚 DEBUG: Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
+            
+            # Add validity reward after warmup
+            if epoch > 20 and i % 20 == 0:  # Check periodically
+                with torch.no_grad():
+                    # Generate a few samples
+                    z_sample = z[:min(5, z.size(0))]
+                    try:
+                        sample_preds = model.Decoder.inference(z_sample, temperature=0.8)
+                        
+                        # Calculate validity reward
+                        validity_reward = 0.0
+                        for pred in sample_preds:
+                            tokens = tokenids_to_vocab(pred[0], vocab)
+                            smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+                            
+                            # Format validity rewards
+                            if len(smiles) > 20 and '|' in smiles:
+                                validity_reward += 0.02
+                            if smiles.count('|') >= 3:
+                                validity_reward += 0.02
+                            if '[*:' in smiles and '<' in smiles:
+                                validity_reward += 0.02
+                        
+                        # Apply as bonus (negative loss)
+                        validity_reward = validity_reward / len(sample_preds)
+                        if validity_reward > 0:
+                            loss_with_penalty = loss_with_penalty - validity_reward * 0.1
+                            if i == 0:  # Log first batch
+                                print(f"   💎 Validity reward: {validity_reward:.4f}")
+                    except:
+                        pass  # Ignore errors during validity check
+            
             loss_with_penalty.backward()
             
             # Monitor gradient norms before clipping

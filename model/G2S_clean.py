@@ -617,8 +617,8 @@ class SequenceDecoder(nn.Module):
             if next_token_str in ['_SOS', '_EOS', '_PAD', '_UNK']:
                 return True
             
-            # Allow early generation
-            if len(current_tokens) < 10:
+            # Allow more freedom in early generation
+            if len(current_tokens) < 20:  # Increased from 10
                 return True
             
             current_sequence = ''.join(current_tokens)
@@ -631,7 +631,7 @@ class SequenceDecoder(nn.Module):
             # Never allow more closing than opening parentheses
             if close_parens > open_parens:
                 return False
-            
+       
             # 🔧 ENHANCED: Ring closure validation
             ring_numbers = {}
             for char in test_sequence:

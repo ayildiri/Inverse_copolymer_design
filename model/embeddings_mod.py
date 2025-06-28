@@ -297,10 +297,11 @@ class Embeddings(nn.Module):
         
         # Custom: adding latent representation to each token embedding 
         if latent is not None:
-            latent = latent.transpose(0,1)  # [batch_size, 1, embedding_dim] -> [1, batch_size, embedding_dim]
-            # Expand latent to match the sequence length of source
-            latent = latent.expand(source.size(0), -1, -1)  # Expand to [seq_len, batch_size, embedding_dim]
-            source = torch.cat((source,latent),dim=2)  # Now concatenate along feature dimension
+            # latent is [batch_size, 1, embedding_dim]
+            # source is [batch_size, seq_len, embedding_size]
+            # No need to transpose - just expand along the sequence dimension
+            latent = latent.expand(-1, source.size(1), -1)  # Expand to [batch_size, seq_len, embedding_dim]
+            source = torch.cat((source, latent), dim=2)  # Concatenate along feature dimension
 
         return self.dropout(source)
 

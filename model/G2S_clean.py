@@ -486,6 +486,9 @@ class SequenceDecoder(nn.Module):
         current_tokens = [self.inv_vocab.get(t, '') for t in current_seq[1:]]  # Skip SOS
         current_string = ''.join(current_tokens)
         
+        # Apply polymer-specific constraints first
+        probs = self.polymer_specific_constraints(current_seq, probs)
+        
         # Mask invalid tokens
         for token_id, token in self.inv_vocab.items():
             if not self.is_valid_next_token(current_tokens, token_id):
@@ -497,6 +500,30 @@ class SequenceDecoder(nn.Module):
         else:
             # Fallback to uniform if all masked
             probs = torch.ones_like(probs) / probs.size(-1)
+        
+        return probs
+    
+    def polymer_specific_constraints(self, current_seq, probs):
+        """Enhanced constraints for polymer SMILES"""
+        current_tokens = [self.inv_vocab.get(t, '') for t in current_seq[1:]]
+        current_string = ''.join(current_tokens)
+        
+        # Boost probability of polymer-specific tokens
+        polymer_tokens = ['[*:', '|', '<', '-', ':', '.']
+        for token_id, token in self.inv_vocab.items():
+            if any(pt in token for pt in polymer_tokens):
+                probs[0, token_id] *= 1.5  # Boost polymer tokens
+        
+        # Force proper sequence after certain patterns
+        if current_string.endswith('[*'):
+            # Must be followed by :1] or :2]
+            for token_id, token in self.inv_vocab.items():
+                if token not in [':1]', ':2]', ':']:
+                    probs[0, token_id] = 0
+        
+        # Renormalize to ensure valid probability distribution
+        if probs.sum() > 0:
+            probs = probs / probs.sum()
         
         return probs
     
@@ -1220,7 +1247,10 @@ class G2S_VAE_PPguided(nn.Module):
             h_G_mean = self.lincompress(h_G_mean)
             h_G_var = self.lincompress(h_G_var)
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
-        kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
+        
+        # Calculate KLD with ceiling to prevent explosion
+        kl_loss_raw = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())
+        kl_loss = torch.clamp(kl_loss_raw / (len(batch_list.ptr-1)), max=100.0)  # Ceiling at 100
     
         # Property predictions with flexible number of properties
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]

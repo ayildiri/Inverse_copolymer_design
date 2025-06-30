@@ -475,7 +475,9 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             model.Decoder.clear_decoder_state_completely()
         
         # Clear any accumulated gradients
-        optimizer.zero_grad()
+        if i % args.accumulate_grad_batches == 0:
+            optimizer.zero_grad()
+
         
         if model_config['beta']=="schedule":
             # determine beta at time step t
@@ -587,7 +589,10 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             
             # Use configurable gradient clipping threshold
             torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
-            optimizer.step()
+
+            # Step optimizer only after accumulating gradients
+            if (i + 1) % args.accumulate_grad_batches == 0:
+                optimizer.step()
             
             # Store metrics
             ce_losses.append(recon_loss.item())
@@ -1050,7 +1055,7 @@ parser.add_argument("--checkpoint_freq", type=int, default=5, help="Save checkpo
 parser.add_argument("--warmup_epochs", type=int, default=5, help="Number of epochs for AE warmup when AE_Warmup is True")
 parser.add_argument("--max_grad_norm_warning", type=float, default=10.0, help="Threshold for gradient norm warning")
 parser.add_argument("--kld_spike_threshold", type=float, default=5.0, help="Threshold multiplier for KLD spike detection")
-
+parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Number of batches to accumulate gradients")
 
 # Transfer learning arguments
 parser.add_argument("--training_stage", type=int, default=1, choices=[1, 2],
@@ -1701,6 +1706,21 @@ for epoch in range(epoch_cp, epochs):
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Epoch time: {time_str}")
     print(f"Current learning rate: {current_lr:.6f}")
+
+    # Save checkpoint before critical transitions
+    if args.AE_Warmup and epoch == args.warmup_epochs - 1:
+        transition_dict = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss_dict': train_loss_dict,
+            'val_loss_dict': val_loss_dict,
+            'model_config': model_config,
+            'global_step': global_step,
+            'monotonic_step': monotonic_step,
+        }
+        torch.save(transition_dict, os.path.join(directory_path, f"model_before_transition_epoch_{epoch}.pt"))
+        print(f"💾 Saved checkpoint before AE warmup ends")
 
     # Save checkpoint based on frequency
     if (epoch + 1) % args.checkpoint_freq == 0 or epoch == epochs - 1:

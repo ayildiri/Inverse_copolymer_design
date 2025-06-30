@@ -521,8 +521,14 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print(f"Loss: {loss.item()}, Recon: {recon_loss.item()}, KLD: {kl_loss.item()}")
                 continue  # Skip this batch
 
+            # Monitor and skip bad batches with extreme KLD
+            if kl_loss.item() > 1000 or torch.isnan(loss).any():
+                print(f"WARNING: Skipping batch {i} due to instability (KLD: {kl_loss.item():.2f})")
+                optimizer.zero_grad()  # Clear any accumulated gradients
+                continue
+
             # Check if KLD spike indicates instability
-            if i > 0 and kl_loss.item() > 5 * np.mean(kld_losses[-min(10, len(kld_losses)):]):
+            if i > 0 and kl_loss.item() > args.kld_spike_threshold * np.mean(kld_losses[-min(10, len(kld_losses)):]):
                 print(f"WARNING: KLD spike detected at batch {i}")
                 print(f"Current KLD: {kl_loss.item()}, Recent mean: {np.mean(kld_losses[-min(10, len(kld_losses)):]):.2f}")
 
@@ -1499,6 +1505,16 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay_factor, 
                               patience=args.scheduler_patience, verbose=True, min_lr=args.min_lr)
 
+# Add learning rate warmup
+from torch.optim.lr_scheduler import LambdaLR
+
+def lr_lambda(epoch):
+    if epoch < args.warmup_epochs:
+        return (epoch + 1) / args.warmup_epochs
+    return 1.0
+
+warmup_scheduler = LambdaLR(optimizer, lr_lambda)
+
 # Early stopping callback
 # Log directory creation
 
@@ -1678,6 +1694,10 @@ for epoch in range(epoch_cp, epochs):
         val_acc = train_acc
         val_mse = train_mse
 
+    # Apply learning rate warmup
+    if epoch < args.warmup_epochs:
+        warmup_scheduler.step()
+    
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Epoch time: {time_str}")
     print(f"Current learning rate: {current_lr:.6f}")

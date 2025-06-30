@@ -1262,6 +1262,26 @@ def reset_context_attention(model):
     print("🎯 This should wake up the dead context attention components!")
     return model
 
+def fix_dead_attention(model):
+    """More aggressive fix for dead attention"""
+    import torch.nn as nn
+    
+    for i, layer in enumerate(model.Decoder.Decoder.transformer_layers):
+        if hasattr(layer, 'context_attn'):
+            # Use different initialization for problematic layers
+            if i >= 2:  # Layers 2 and 3 seem most affected
+                nn.init.xavier_normal_(layer.context_attn.linear_keys.weight, gain=2.0)
+                nn.init.xavier_normal_(layer.context_attn.linear_query.weight, gain=2.0)
+                nn.init.xavier_normal_(layer.context_attn.linear_values.weight, gain=1.5)
+            
+            # Add small random bias to prevent symmetry
+            if hasattr(layer.context_attn, 'linear_keys') and hasattr(layer.context_attn.linear_keys, 'bias'):
+                if layer.context_attn.linear_keys.bias is not None:
+                    nn.init.normal_(layer.context_attn.linear_keys.bias, 0, 0.01)
+    
+    print(f"🔧 Applied aggressive fix for dead attention layers")
+    return model
+
 def add_gradient_penalty_to_loss(model, loss):
     """Add penalty to force gradients through context attention keys/queries"""
     penalty = 0.0
@@ -1381,6 +1401,9 @@ print("✅ Model vocabulary size validated!\n")
 # 🔧 CRITICAL FIX: Reset dead context attention components
 model = reset_context_attention(model)
 
+# 🔧 Apply more aggressive fix for dead attention
+model = fix_dead_attention(model)
+
 # 🎯 NEW: Add attention regularization
 model = add_attention_regularization(model)
 
@@ -1388,6 +1411,7 @@ print(model)
 
 # Use configurable warmup epochs
 n_iter = int(20 * num_train_graphs/batch_size) # 20 epochs
+# Beta scheduling function from Optimus paper 
 # Beta scheduling function from Optimus paper 
 def two_stage_beta_schedule(n_iter, warmup_ratio=0.4, max_beta=None):
     """Two-stage beta: low for reconstruction, then increase for generation"""
@@ -1412,13 +1436,34 @@ def two_stage_beta_schedule(n_iter, warmup_ratio=0.4, max_beta=None):
     
     return np.concatenate([stage1, stage2])
 
+def smoother_beta_schedule(n_iter, warmup_epochs, max_beta=0.5):
+    """Smoother transition after warmup"""
+    warmup_steps = warmup_epochs * (num_train_graphs / batch_size)
+    
+    # Very gradual increase after warmup
+    warmup = np.zeros(int(warmup_steps))
+    
+    # Smooth sigmoid transition instead of sharp increase
+    transition_steps = int(n_iter * 0.2)  # 20% for transition
+    transition = max_beta / (1 + np.exp(-10 * (np.arange(transition_steps) - transition_steps/2) / transition_steps))
+    
+    # Rest of training
+    remaining = int(n_iter - warmup_steps - transition_steps)
+    if remaining > 0:
+        rest = frange_cycle_zero_linear(remaining, start=max_beta*0.8, stop=max_beta, n_cycle=3)
+    else:
+        rest = np.array([])
+    
+    return np.concatenate([warmup, transition, rest])
+
+
 # Beta schedule initialization
 if model_config['beta'] == "schedule":
-    beta_schedule = two_stage_beta_schedule(n_iter=n_iter, max_beta=model_config['max_beta'])
-    # Add AE warmup if specified
     if args.AE_Warmup:
-        B = np.zeros(int(args.warmup_epochs*num_train_graphs/batch_size))
-        beta_schedule = np.append(B, beta_schedule)
+        # Use smoother schedule when AE warmup is enabled
+        beta_schedule = smoother_beta_schedule(n_iter=n_iter, warmup_epochs=args.warmup_epochs, max_beta=model_config['max_beta'])
+    else:
+        beta_schedule = two_stage_beta_schedule(n_iter=n_iter, max_beta=model_config['max_beta'])
 elif model_config['beta'] == "normalVAE":
     beta_schedule = np.ones(1)
 

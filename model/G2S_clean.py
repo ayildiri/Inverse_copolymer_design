@@ -1248,9 +1248,24 @@ class G2S_VAE_PPguided(nn.Module):
             h_G_var = self.lincompress(h_G_var)
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         
-        # Calculate KLD with ceiling to prevent explosion
+        # Calculate raw KLD
         kl_loss_raw = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())
-        kl_loss = torch.clamp(kl_loss_raw / (len(batch_list.ptr-1)), max=100.0)  # Ceiling at 100
+        kl_loss = kl_loss_raw / (len(batch_list.ptr-1))
+        
+        # Soft annealing instead of hard clamp
+        if kl_loss > 100:
+            # Gradually reduce instead of hard cutoff
+            kl_loss = 100 + torch.tanh((kl_loss - 100) / 100) * 20  # Soft ceiling around 120
+        
+        # Debug print every 100 batches
+        if hasattr(self, '_batch_counter'):
+            self._batch_counter += 1
+        else:
+            self._batch_counter = 0
+            
+        if self._batch_counter % 100 == 0:
+            kl_loss_unclamped = kl_loss_raw / (len(batch_list.ptr-1))
+            print(f"KLD Debug - Raw: {kl_loss_unclamped.item():.2f}, Annealed: {kl_loss.item():.2f}")
     
         # Property predictions with flexible number of properties
         pp_hidden = self.PP_lin1(z) #[b,hidden_dim] -> [b,pp_ffn_hidden]

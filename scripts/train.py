@@ -703,35 +703,46 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
     
-    # For fresh training (not resuming), reset the CSV file once at the beginning
-    if not resume_from_checkpoint and not os.path.exists(flag_file):
-        mode = 'w'  # Write mode (overwrite)
-        print(f"[INFO] Fresh training — resetting log: {csv_file}")
-        # Create flag file to mark that we've initialized the CSV for this training run
-        with open(flag_file, 'w') as f:
-            f.write(str(time.time()))
-    else:
-        # Either resuming or not the first time writing to the CSV in this run
-        mode = 'a'  # Append mode
+    # Read existing data if file exists
+    existing_data = []
+    headers = ['epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
+               'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 
+               'generation_validity', 'rdkit_validity']
     
-    # Write to the CSV file
-    with open(csv_file, mode, newline='') as f:
-        writer = csv.writer(f)
-        # Write header only if we're in write mode or the file doesn't exist yet
-        if mode == 'w' or not os.path.exists(csv_file):
-            writer.writerow([
-                'epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
-                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 
-                'generation_validity', 'rdkit_validity'  # Added rdkit_validity
-            ])
-        # Always write the data row
-        writer.writerow([
-            epoch,
-            train_metrics['loss'], train_metrics['kld'], train_metrics['acc'], train_metrics['mse'],
-            val_metrics['loss'], val_metrics['kld'], val_metrics['acc'], val_metrics['mse'],
-            generation_validity if generation_validity is not None else 0.0,
-            rdkit_validity if rdkit_validity is not None else 0.0  # Added
-        ])
+    if os.path.exists(csv_file):
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if int(row['epoch']) < epoch:  # Keep only epochs before current
+                    existing_data.append(row)
+    
+    # Write updated data
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        
+        # Write all previous epochs
+        for row in existing_data:
+            writer.writerow(row)
+        
+        # Write current epoch
+        writer.writerow({
+            'epoch': epoch,
+            'train_loss_mean': train_metrics['loss'],
+            'train_kld_mean': train_metrics['kld'],
+            'train_acc_mean': train_metrics['acc'],
+            'train_mse_mean': train_metrics['mse'],
+            'val_loss_mean': val_metrics['loss'],
+            'val_kld_mean': val_metrics['kld'],
+            'val_acc_mean': val_metrics['acc'],
+            'val_mse_mean': val_metrics['mse'],
+            'generation_validity': generation_validity if generation_validity is not None else 0.0,
+            'rdkit_validity': rdkit_validity if rdkit_validity is not None else 0.0
+        })
+    
+    # Update or create flag file
+    with open(flag_file, 'w') as f:
+        f.write(str(time.time()))
 
 def load_existing_loss_dicts(directory_path):
     """Load existing loss dictionaries if they exist"""

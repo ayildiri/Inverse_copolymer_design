@@ -1541,12 +1541,16 @@ data_augment="old"
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
-# Always use model_name in the path structure, regardless of save_dir
-if args.save_dir is not None:
-    # Create the expected directory structure inside save_dir
-    directory_path = os.path.join(args.save_dir, model_name)
+# Check if we're resuming and want to use exact path
+if args.save_dir is not None and args.resume_from_checkpoint is not None:
+    # When resuming, use the exact save_dir without appending model_name
+    directory_path = args.save_dir
 else:
-    directory_path = os.path.join(main_dir_path,'Checkpoints/', model_name)
+    # Normal behavior: create model_name subdirectory
+    if args.save_dir is not None:
+        directory_path = os.path.join(args.save_dir, model_name)
+    else:
+        directory_path = os.path.join(main_dir_path,'Checkpoints/', model_name)
 
 # Create directory with all parent directories
 os.makedirs(directory_path, exist_ok=True)

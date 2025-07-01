@@ -493,6 +493,7 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 alpha_t = model.alpha #stays the same
             else:
                 alpha_t = alpha_schedule[global_step]
+            print(f"DEBUG: global_step={global_step}, alpha_t={alpha_t}, alpha_schedule length={len(alpha_schedule)}")
             model.alpha = alpha_t
         
         # get graphs & matrices for MP from dictionary

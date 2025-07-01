@@ -544,6 +544,7 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print(f"📚 DEBUG: Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
             
             # Add validity reward after warmup
+            validity_reward = 0.0  # Initialize outside
             if epoch > 20 and i % 20 == 0:  # Check periodically
                 with torch.no_grad():
                     # Generate a few samples
@@ -552,7 +553,6 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                         sample_preds = model.Decoder.inference(z_sample, temperature=0.8)
                         
                         # Calculate validity reward
-                        validity_reward = 0.0
                         for pred in sample_preds:
                             tokens = tokenids_to_vocab(pred[0], vocab)
                             smiles = combine_tokens(tokens, tokenization="RT_tokenized")
@@ -567,13 +567,14 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                         
                         # Apply as bonus (negative loss)
                         validity_reward = validity_reward / len(sample_preds)
-                        if validity_reward > 0:
-                            validity_bonus = torch.tensor(validity_reward * 0.1, device=device, requires_grad=False)
-                            loss_with_penalty = loss_with_penalty - validity_bonus
-                            if i == 0:  # Log first batch
-                                print(f"   💎 Validity reward: {validity_reward:.4f}")
                     except:
                         pass  # Ignore errors during validity check
+            
+            # NOW apply the reward OUTSIDE the no_grad context
+            if validity_reward > 0:
+                loss_with_penalty = loss_with_penalty - validity_reward * 0.1
+                if i == 0:  # Log first batch
+                    print(f"   💎 Validity reward: {validity_reward:.4f}")
             
             loss_with_penalty.backward()
             

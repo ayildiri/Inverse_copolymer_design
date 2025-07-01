@@ -568,7 +568,8 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                         # Apply as bonus (negative loss)
                         validity_reward = validity_reward / len(sample_preds)
                         if validity_reward > 0:
-                            loss_with_penalty = loss_with_penalty - validity_reward * 0.1
+                            validity_bonus = torch.tensor(validity_reward * 0.1, device=device, requires_grad=False)
+                            loss_with_penalty = loss_with_penalty - validity_bonus
                             if i == 0:  # Log first batch
                                 print(f"   💎 Validity reward: {validity_reward:.4f}")
                     except:

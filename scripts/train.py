@@ -805,12 +805,19 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
     with torch.no_grad():
         try:
             z_random = torch.randn(num_samples, model.embedding_dim, device=device)
-            result = model.inference(data=z_random, device=device, sample=False, log_var=None)
             
-            if len(result) >= 4:
-                predictions, _, _, _ = result[:4]
+            # NEW: Try to use enhanced inference if available
+            if hasattr(model.Decoder, 'inference_with_retries'):
+                # Use the new enhanced method for better validity
+                predictions = model.Decoder.inference_with_retries(z_random, max_retries=3, temperature_range=(0.7, 0.9))
             else:
-                predictions = result[0] if result else None
+                # Fall back to standard inference
+                result = model.inference(data=z_random, device=device, sample=False, log_var=None)
+                
+                if len(result) >= 4:
+                    predictions, _, _, _ = result[:4]
+                else:
+                    predictions = result[0] if result else None
             
             if predictions is None:
                 return 0.0, 0.0

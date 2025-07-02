@@ -714,15 +714,19 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
         with open(csv_file, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                if int(row['epoch']) < epoch:  # Keep only epochs before current
+                # FIXED: Keep all epochs except the current one (which we'll update)
+                if int(row['epoch']) != epoch:
                     existing_data.append(row)
+    
+    # Sort existing data by epoch to maintain order
+    existing_data.sort(key=lambda x: int(x['epoch']))
     
     # Write updated data
     with open(csv_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
         
-        # Write all previous epochs
+        # Write all existing epochs
         for row in existing_data:
             writer.writerow(row)
         
@@ -744,6 +748,8 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     # Update or create flag file
     with open(flag_file, 'w') as f:
         f.write(str(time.time()))
+    
+    print(f"[CSV] Updated training_log.csv with epoch {epoch} data")
 
 def load_existing_loss_dicts(directory_path):
     """Load existing loss dictionaries if they exist"""
@@ -1605,6 +1611,27 @@ if resume_from_checkpoint:
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch_cp = checkpoint['epoch']
     
+    # ADD THIS: Debug logging for CSV
+    print(f"[RESUME] Resuming from epoch {epoch_cp} (will continue from epoch {epoch_cp + 1})")
+    print(f"[RESUME] Checkpoint directory: {directory_path}")
+    
+    # Check if CSV exists and log its status
+    csv_file = os.path.join(directory_path, 'training_log.csv')
+    if os.path.exists(csv_file):
+        print(f"[RESUME] Found existing training_log.csv at {csv_file}")
+        # Count existing epochs
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            epochs_in_csv = [int(row['epoch']) for row in reader]
+        if epochs_in_csv:
+            print(f"[RESUME] CSV contains epochs: {min(epochs_in_csv)} to {max(epochs_in_csv)} ({len(epochs_in_csv)} total)")
+            print(f"[RESUME] Last epoch in CSV: {max(epochs_in_csv)}")
+        else:
+            print(f"[RESUME] CSV exists but is empty")
+    else:
+        print(f"[RESUME] WARNING: No existing training_log.csv found at {csv_file}")
+        print(f"[RESUME] A new CSV will be created starting from epoch {epoch_cp + 1}")
+    
     # Merge checkpoint loss dicts with existing ones (checkpoint might be outdated)
     if 'loss_dict' in checkpoint and 'val_loss_dict' in checkpoint:
         checkpoint_train_dict = checkpoint['loss_dict']
@@ -1641,6 +1668,13 @@ else:
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch + 1}\n" + "-" * 30)
+    
+    # Safety check for CSV consistency
+    if epoch == epoch_cp and resume_from_checkpoint:
+        csv_file = os.path.join(directory_path, 'training_log.csv')
+        if os.path.exists(csv_file):
+            print(f"[SAFETY] First epoch after resume: {epoch + 1}")
+            print(f"[SAFETY] CSV file exists at: {csv_file}")
 
     t1 = time.time()
     model, train_ce_losses, train_total_losses, train_kld_losses, train_accs, train_mses, global_step, monotonic_step = train(dict_train_loader, global_step, monotonic_step, args.gradient_clip_threshold, epoch, epochs)

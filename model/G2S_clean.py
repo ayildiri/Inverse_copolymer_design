@@ -796,8 +796,6 @@ class SequenceDecoder(nn.Module):
                     if hasattr(layer.context_attn, 'attn'):
                         layer.context_attn.attn = None
 
-    # In G2S_clean.py, modify the forward method of SequenceDecoder (around line 790-800)
-
     def forward(self, graph_batch, z, loss_weights=None, teacher_forcing_ratio=1.0):
         """Forward pass of decoder with scheduled teacher forcing
     
@@ -1018,7 +1016,22 @@ class SequenceDecoder(nn.Module):
                     for token_id in range(logits.size(-1)):
                         if not self.is_valid_next_token(current_token_strings, token_id):
                             logits[b, token_id] -= 5.0  # Soft penalty instead of -inf
+
+                # Apply light format guidance even in regular inference
+                current_tokens = [self.inv_vocab.get(t, '') for t in generated[b].tolist()]
+                current_string = ''.join(current_tokens[1:])
                 
+                # Gentle boosts for format requirements
+                if len(current_string) > 10 and '[*:' not in current_string:
+                    for token_id, token in self.inv_vocab.items():
+                        if '[*:' in token:
+                            logits[b, token_id] += 0.5  # Gentle boost
+                
+                if '[*:' in current_string and '|' not in current_string:
+                    pipe_id = self.vocab.get('|', -1)
+                    if pipe_id >= 0:
+                        logits[b, pipe_id] += 0.5
+                        
                 # Sample next token with temperature
                 next_token = self.sample_with_temperature(
                     logits, temperature=temperature, top_k=50, top_p=0.95)
@@ -1045,6 +1058,133 @@ class SequenceDecoder(nn.Module):
         else:
             # Fall back to original beam search if requested
             return self.constrained_beam_search(z, beam_size=3, temperature=temperature)
+
+    def generate_with_format_guidance(self, z, max_length=400, temperature=0.7):
+        """Generation with strong format guidance - NEW METHOD"""
+        batch_size = z.size(0)
+        device = z.device
+        
+        # Initialize
+        enc_output = z.unsqueeze(1)
+        src_lengths = torch.ones(batch_size, device=device).long()
+        
+        # Reset decoder cache
+        self.reset_decoder_cache()
+        self.Decoder.state["src"] = enc_output
+        
+        # Start with SOS
+        generated = torch.full((batch_size, 1), self.vocab["_SOS"], device=device)
+        
+        # Format checkpoints
+        format_stages = {
+            'need_polymer_start': True,
+            'need_first_pipe': False,
+            'need_stoich1': False,
+            'need_second_pipe': False,
+            'need_stoich2': False,
+            'need_third_pipe': False,
+            'need_connectivity': False
+        }
+        
+        for step in range(max_length):
+            # Decode one step
+            input_seq = generated[:, -1:].unsqueeze(-1).transpose(0, 1)
+            dec_out, _ = self.Decoder(
+                tgt=input_seq,
+                enc_out=enc_output,
+                src_len=src_lengths,
+                step=step+1,
+                add_latent=self.add_latent
+            )
+            dec_out = dec_out.transpose(0, 1)
+            logits = self.output_layer(dec_out.squeeze(1))
+            
+            # Apply format-aware constraints
+            current_tokens = [self.inv_vocab.get(t.item(), '') for t in generated[0]]
+            current_string = ''.join(current_tokens[1:])  # Skip SOS
+            
+            # Boost probabilities based on format stage
+            if format_stages['need_polymer_start'] and len(current_string) > 10:
+                # Boost attachment point tokens
+                for token_id, token in self.inv_vocab.items():
+                    if '[*:' in token:
+                        logits[:, token_id] += 2.0
+                        
+            if '[*:' in current_string and format_stages['need_first_pipe']:
+                # Boost pipe token
+                pipe_id = self.vocab.get('|', -1)
+                if pipe_id >= 0:
+                    logits[:, pipe_id] += 3.0
+                    
+            # Temperature-adjusted sampling
+            next_token = self.sample_with_temperature(
+                logits, temperature=temperature, top_k=50, top_p=0.95
+            )
+            
+            generated = torch.cat([generated, next_token], dim=1)
+            
+            # Update format stages
+            current_string = ''.join([self.inv_vocab.get(t.item(), '') for t in generated[0][1:]])
+            if '[*:' in current_string:
+                format_stages['need_polymer_start'] = False
+                format_stages['need_first_pipe'] = True
+            if current_string.count('|') >= 1:
+                format_stages['need_first_pipe'] = False
+                format_stages['need_stoich1'] = True
+            
+            # Check for EOS or completion
+            if (next_token == self.vocab["_EOS"]).all() or (
+                current_string.count('|') == 3 and '>' in current_string
+            ):
+                break
+        
+        return generated
+
+    def inference_with_retries(self, z, max_retries=5, temperature_range=(0.6, 1.0)):
+        """Try multiple temperatures to get valid SMILES - NEW METHOD"""
+        best_predictions = []
+        best_validity = 0
+        
+        for batch_idx in range(z.size(0)):
+            z_single = z[batch_idx:batch_idx+1]
+            best_pred = None
+            best_score = 0
+            
+            for retry in range(max_retries):
+                temp = np.random.uniform(*temperature_range)
+                
+                # Try format-guided generation
+                if retry % 2 == 0 and hasattr(self, 'generate_with_format_guidance'):
+                    generated = self.generate_with_format_guidance(z_single, temperature=temp)
+                    pred = (generated[0].tolist(), 0.0)
+                else:
+                    # Use existing inference
+                    preds = self.inference(z_single, temperature=temp)
+                    pred = preds[0] if preds else None
+                
+                if pred:
+                    # Quick validity check
+                    tokens = tokenids_to_vocab(pred[0], self.vocab)
+                    smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+                    
+                    score = 0
+                    if '|' in smiles:
+                        score += 1
+                    if '[*:' in smiles:
+                        score += 1
+                    if smiles.count('|') == 3:
+                        score += 2
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_pred = pred
+                    
+                    if score >= 4:  # Good enough
+                        break
+            
+            best_predictions.append(best_pred if best_pred else ([], 0.0))
+        
+        return best_predictions
         
     # adapted from onmt.decoders.transformer
     def map_state(self, fn):
@@ -1300,14 +1440,17 @@ class G2S_VAE_PPguided(nn.Module):
         # ADD: Validity loss
         validity_penalty = self.compute_validity_loss(predictions)
         
-        # Modified total loss calculation
-        total_loss = recon_loss + self.beta*kl_loss + self.alpha*mse + 0.01*validity_penalty
-    
-        return recon_loss + self.beta*kl_loss + self.alpha*mse, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+        # ENHANCED: Increase validity weight significantly after warmup
+        validity_weight = 0.1 if hasattr(self, '_batch_counter') and self._batch_counter < 1000 else 0.5
+        
+        # Modified total loss calculation with stronger validity component
+        total_loss = recon_loss + self.beta*kl_loss + self.alpha*mse + validity_weight*validity_penalty
+        
+        # Return the enhanced total loss (not the original calculation)
+        return total_loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y
 
-    # ADD this new method after the forward method (around line 700):
     def compute_validity_loss(self, predictions):
-        """Penalize invalid format patterns"""
+        """Enhanced validity loss with stronger penalties and rewards"""
         validity_penalty = 0.0
         batch_size = len(predictions)
         
@@ -1322,17 +1465,38 @@ class G2S_VAE_PPguided(nn.Module):
                 if tokens:
                     smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
                     
-                    # Penalize missing key components
+                    # ENHANCED PENALTIES with graduated severity
+                    # Critical format requirements (highest penalty)
                     if '|' not in smiles_string:
-                        validity_penalty += 1.0
+                        validity_penalty += 2.0  # Increased from 1.0
+                    elif smiles_string.count('|') < 3:
+                        validity_penalty += 1.5  # Must have all pipe sections
+                        
                     if '[*:' not in smiles_string:
+                        validity_penalty += 2.0  # Increased from 1.0
+                        
+                    # Connectivity requirements
+                    if '<' not in smiles_string:
+                        validity_penalty += 1.5
+                    if ':' not in smiles_string.split('|')[-1] if '|' in smiles_string else smiles_string:
                         validity_penalty += 1.0
+                        
+                    # Balance requirements
                     if smiles_string.count('(') != smiles_string.count(')'):
-                        validity_penalty += 0.5
+                        validity_penalty += 1.0  # Increased from 0.5
                     if smiles_string.count('[') != smiles_string.count(']'):
-                        validity_penalty += 0.5
+                        validity_penalty += 1.0  # Increased from 0.5
+                        
+                    # REWARDS for good format (negative penalty)
+                    if len(smiles_string) > 30 and '|' in smiles_string:
+                        validity_penalty -= 0.3  # Reward reasonable length
+                    if smiles_string.count('|') == 3:  # Exact format
+                        validity_penalty -= 0.5
+                    if '[*:1]' in smiles_string and '[*:2]' in smiles_string:
+                        validity_penalty -= 0.5  # Both attachment points
+                        
             except:
-                validity_penalty += 0.5
+                validity_penalty += 1.0  # Penalty for unparseable
                 
         return torch.tensor(validity_penalty / batch_size, device=self.device, requires_grad=True)
 

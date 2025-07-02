@@ -1665,6 +1665,13 @@ else:
     if os.path.exists(flag_file):
         print("[INFO] Removing old .csv_initialized to allow clean training log overwrite.")
         os.remove(flag_file)
+    
+    # Reset CSV file when starting fresh
+    csv_file = os.path.join(directory_path, 'training_log.csv')  
+    if os.path.exists(csv_file):                                 
+        # Option A: Delete the old CSV
+        os.remove(csv_file)
+        print("[INFO] Removed existing training_log.csv for fresh start")
 
 for epoch in range(epoch_cp, epochs):
     print(f"Epoch {epoch + 1}\n" + "-" * 30)

@@ -45,7 +45,7 @@ try:
     RDKIT_AVAILABLE = True
 
     # Suppress RDKit warnings during SMILES parsing
-        RDLogger.DisableLog('rdApp.*')
+    RDLogger.DisableLog('rdApp.*')
 
 except ImportError as e:
     print(f"Error importing RDKit: {e}")

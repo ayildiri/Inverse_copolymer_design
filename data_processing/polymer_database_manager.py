@@ -42,6 +42,7 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, DataStructs, Descriptors
     from rdkit.Chem.rdMolDescriptors import CalcMolFormula
+    from rdkit import RDLogger
     RDKIT_AVAILABLE = True
 
     # Suppress RDKit warnings during SMILES parsing

@@ -585,6 +585,15 @@ class PolymerDatabaseManager:
         # Group by poly_chemprop_input
         grouped = df.groupby('poly_chemprop_input')
         
+        # Extended list of identifier/metadata columns that should not be averaged
+        identifier_columns = {
+            'poly_id', 'poly_type', 'comp', 'monoA', 'monoB', 
+            'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input',
+            'fracA', 'fracB', 'polymer_ID', 'monomer_ID', 'id', 'ID',
+            'polymer_class', 'source', 'reference', 'notes', 'comments',
+            'tacticity', 'polymer_name', 'name', 'Name'
+        }
+        
         # Define aggregation functions based on strategy
         agg_dict = {}
         
@@ -592,30 +601,78 @@ class PolymerDatabaseManager:
             if col == 'poly_chemprop_input':
                 continue
             
-            # Identifier columns - always take first
-            if col in ['poly_id', 'poly_type', 'comp', 'monoA', 'monoB', 
-                      'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input']:
-                agg_dict[col] = 'first'
+            # Check if column is in identifier list (case-insensitive)
+            col_lower = col.lower()
+            is_identifier = col in identifier_columns or any(
+                id_col.lower() in col_lower for id_col in ['_id', '_name', '_class', '_type', '_ref']
+            )
             
-            # Fraction columns - always take first
-            elif col in ['fracA', 'fracB']:
+            if is_identifier:
+                # Identifier columns - always take first
                 agg_dict[col] = 'first'
-            
-            # Property columns - use specified strategy
             else:
-                if merge_strategy == MergeStrategy.FIRST:
+                # Check if column is numeric
+                is_numeric = pd.api.types.is_numeric_dtype(df[col])
+                
+                if not is_numeric or merge_strategy == MergeStrategy.FIRST:
+                    # Non-numeric or FIRST strategy - take first non-null value
                     agg_dict[col] = lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else np.nan
                 elif merge_strategy == MergeStrategy.LAST:
                     agg_dict[col] = lambda x: x.dropna().iloc[-1] if len(x.dropna()) > 0 else np.nan
                 elif merge_strategy == MergeStrategy.MEAN:
-                    agg_dict[col] = lambda x: x.dropna().mean() if len(x.dropna()) > 0 else np.nan
+                    # For numeric columns, calculate mean
+                    def safe_mean(x):
+                        try:
+                            numeric_vals = pd.to_numeric(x.dropna(), errors='coerce')
+                            numeric_vals = numeric_vals.dropna()
+                            return numeric_vals.mean() if len(numeric_vals) > 0 else np.nan
+                        except:
+                            # If mean fails, fall back to first value
+                            return x.dropna().iloc[0] if len(x.dropna()) > 0 else np.nan
+                    agg_dict[col] = safe_mean
                 elif merge_strategy == MergeStrategy.MAX:
-                    agg_dict[col] = lambda x: x.dropna().max() if len(x.dropna()) > 0 else np.nan
+                    def safe_max(x):
+                        try:
+                            numeric_vals = pd.to_numeric(x.dropna(), errors='coerce')
+                            numeric_vals = numeric_vals.dropna()
+                            return numeric_vals.max() if len(numeric_vals) > 0 else np.nan
+                        except:
+                            return x.dropna().iloc[0] if len(x.dropna()) > 0 else np.nan
+                    agg_dict[col] = safe_max
                 elif merge_strategy == MergeStrategy.MIN:
-                    agg_dict[col] = lambda x: x.dropna().min() if len(x.dropna()) > 0 else np.nan
+                    def safe_min(x):
+                        try:
+                            numeric_vals = pd.to_numeric(x.dropna(), errors='coerce')
+                            numeric_vals = numeric_vals.dropna()
+                            return numeric_vals.min() if len(numeric_vals) > 0 else np.nan
+                        except:
+                            return x.dropna().iloc[0] if len(x.dropna()) > 0 else np.nan
+                    agg_dict[col] = safe_min
         
-        # Apply aggregation
-        merged_df = grouped.agg(agg_dict).reset_index()
+        # Apply aggregation with error handling
+        try:
+            merged_df = grouped.agg(agg_dict).reset_index()
+        except Exception as e:
+            if self.verbose:
+                logger.error(f"Error during smart merge: {e}")
+                logger.info("Falling back to 'first' strategy for problematic columns")
+            
+            # Fallback: identify problematic columns and use 'first' for them
+            safe_agg_dict = {}
+            for col, func in agg_dict.items():
+                try:
+                    # Test the aggregation on a small sample
+                    test_group = grouped.get_group(list(grouped.groups.keys())[0])
+                    if callable(func):
+                        func(test_group[col])
+                    safe_agg_dict[col] = func
+                except:
+                    # Use 'first' for problematic columns
+                    safe_agg_dict[col] = 'first'
+                    if self.verbose:
+                        logger.warning(f"Column '{col}' cannot use {merge_strategy.value} strategy, using 'first' instead")
+            
+            merged_df = grouped.agg(safe_agg_dict).reset_index()
         
         if self.verbose:
             original_count = len(df)
@@ -623,7 +680,34 @@ class PolymerDatabaseManager:
             logger.info(f"Reduced from {original_count} to {final_count} polymers ({original_count - final_count} duplicates merged)")
         
         return merged_df
-    
+
+    def _is_numeric_column(self, series: pd.Series, threshold: float = 0.5) -> bool:
+        """
+        Check if a column contains mostly numeric data
+        
+        Args:
+            series: Pandas series to check
+            threshold: Minimum fraction of numeric values to consider column numeric
+            
+        Returns:
+            True if column is numeric, False otherwise
+        """
+        if pd.api.types.is_numeric_dtype(series):
+            return True
+        
+        # Try to convert to numeric and see how many succeed
+        try:
+            numeric_series = pd.to_numeric(series, errors='coerce')
+            valid_numeric = numeric_series.notna().sum()
+            total_non_null = series.notna().sum()
+            
+            if total_non_null == 0:
+                return False
+                
+            return (valid_numeric / total_non_null) >= threshold
+        except:
+            return False
+            
     def _order_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Order columns in a logical way
@@ -1809,7 +1893,13 @@ class PolymerDatabaseManager:
                 'source', 'reference', 'notes', 'comments', 'url', 'index',
                 # PI1070 specific
                 'monomer_ID', 'mol_weight', 'atomic_weight', 'temp', 'press',
-                'tacticity', 'DP', 'n_mol', 'n_atom', 'Mn', 'polymer_class'
+                'tacticity', 'DP', 'n_mol', 'n_atom', 'Mn', 'polymer_class',
+                # Additional ID patterns
+                'polymer_ID', 'polymer_id', 'sample_id', 'sample_ID',
+                'batch', 'batch_id', 'experiment_id', 'run_id',
+                'name', 'polymer_name', 'sample_name', 'material_name',
+                # PI-specific patterns
+                'PI', 'pi_id', 'pi_code', 'material_code'
             ]
         
         # Build comprehensive exclusion list
@@ -2728,6 +2818,20 @@ Examples:
             print(f"✓ Smart merge completed successfully!")
             print(f"✓ Merged database saved to: {args.output}")
             return 0
+        except TypeError as e:
+            if "Could not convert string" in str(e) and "to numeric" in str(e):
+                print(f"\nError: Cannot use '{args.merge_strategy}' strategy with non-numeric columns.")
+                print("The dataset contains ID or text columns that cannot be averaged.")
+                print("\nSuggestions:")
+                print("1. Use --merge-strategy first (or last) instead of mean/max/min")
+                print("2. Or manually exclude non-numeric columns before merging")
+                print("\nRerun with: --merge-strategy first")
+            else:
+                print(f"Error during smart merge: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            return 1
         except Exception as e:
             print(f"Error during smart merge: {e}")
             if args.verbose:

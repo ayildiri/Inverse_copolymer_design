@@ -552,13 +552,31 @@ class PolymerDatabaseManager:
         for df in all_dfs:
             all_columns.update(df.columns)
         
-        # Standardize all dataframes to have the same columns
-        for i, df in enumerate(all_dfs):
-            for col in all_columns:
-                if col not in df.columns:
-                    df[col] = np.nan
-            all_dfs[i] = df[list(all_columns)]
+        # Convert to sorted list for consistent ordering
+        all_columns = sorted(list(all_columns))
         
+        # Standardize all dataframes to have the same columns (efficiently)
+        standardized_dfs = []
+        for df in all_dfs:
+            # Find missing columns
+            missing_cols = [col for col in all_columns if col not in df.columns]
+            
+            if missing_cols:
+                # Create a DataFrame with all missing columns at once
+                missing_df = pd.DataFrame(
+                    index=df.index,
+                    columns=missing_cols,
+                    data=np.nan
+                )
+                # Concatenate original df with missing columns df
+                df = pd.concat([df, missing_df], axis=1)
+            
+            # Reorder columns to match all_columns
+            df = df[all_columns]
+            standardized_dfs.append(df)
+        
+        all_dfs = standardized_dfs
+                               
         # Combine all dataframes
         combined_df = pd.concat(all_dfs, ignore_index=True)
         

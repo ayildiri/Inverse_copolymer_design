@@ -43,6 +43,10 @@ try:
     from rdkit.Chem import AllChem, DataStructs, Descriptors
     from rdkit.Chem.rdMolDescriptors import CalcMolFormula
     RDKIT_AVAILABLE = True
+
+    # Suppress RDKit warnings during SMILES parsing
+        RDLogger.DisableLog('rdApp.*')
+
 except ImportError as e:
     print(f"Error importing RDKit: {e}")
     print("Please install RDKit with: pip install rdkit-pypi")
@@ -160,7 +164,19 @@ class PolymerDatabaseManager:
                 r'<1-3:0\.25:0\.25.*<1-4:0\.25:0\.25.*<2-3:0\.25:0\.25.*<2-4:0\.25:0\.25.*<1-2:0\.5:0\.5.*<3-4:0\.5:0\.5'
             ]
         }
-    
+
+    def set_rdkit_verbosity(self, verbose: bool = False):
+        """
+        Control RDKit error message verbosity
+        
+        Args:
+            verbose: If True, show RDKit errors. If False, suppress them.
+        """
+        if not verbose:
+            RDLogger.DisableLog('rdApp.*')
+        else:
+            RDLogger.EnableLog('rdApp.*')
+            
     # ========================
     # Dataset Type Detection and Repair
     # ========================
@@ -795,6 +811,14 @@ class PolymerDatabaseManager:
             if not smiles or smiles.strip() == '' or smiles == 'nan':
                 return None
                 
+            # Pre-clean common corruption patterns
+            smiles = self._pre_clean_smiles(smiles)
+            
+            # Pre-repair empty parentheses if still present
+            if '()' in smiles:
+                # Try to fix empty parentheses before sending to RDKit
+                smiles = self._attempt_smiles_repair(smiles)
+                
             # Count parentheses
             open_parens = smiles.count('(')
             close_parens = smiles.count(')')
@@ -945,7 +969,39 @@ class PolymerDatabaseManager:
         repaired = self._repair_simple_patterns(repaired)
         
         return repaired
-    
+        
+    def _pre_clean_smiles(self, smiles: str) -> str:
+        """
+        Pre-clean SMILES before sending to RDKit to avoid parse errors
+        
+        Args:
+            smiles: Input SMILES string
+            
+        Returns:
+            Pre-cleaned SMILES string
+        """
+        if not smiles or not isinstance(smiles, str):
+            return smiles
+            
+        # Quick fixes for common corruption patterns
+        cleaned = smiles
+        
+        # Remove multiple consecutive empty parentheses
+        cleaned = re.sub(r'\(\){2,}', '', cleaned)
+        
+        # Fix common aromatic ring corruptions
+        if '()' in cleaned:
+            # Simple aromatic patterns
+            cleaned = re.sub(r'c\(\)c', 'cc', cleaned)
+            cleaned = re.sub(r'c\(\)n', 'cn', cleaned)
+            cleaned = re.sub(r'n\(\)c', 'nc', cleaned)
+            
+            # Aromatic with numbers
+            cleaned = re.sub(r'c(\d+)c\(\)c', r'c\1cc', cleaned)
+            cleaned = re.sub(r'cc\(\)c(\d+)', r'ccc\1', cleaned)
+        
+        return cleaned
+
     def _repair_aromatic_rings(self, smiles: str) -> str:
         """
         Repair aromatic ring systems with comprehensive pattern matching
@@ -2181,9 +2237,17 @@ class PolymerDatabaseManager:
         # CANONICALIZE monoA SMILES
         if self.verbose:
             logger.info("Canonicalizing monoA SMILES...")
+        
+        # Temporarily suppress RDKit errors during bulk canonicalization
+        self.set_rdkit_verbosity(False)
+        
         new_df['monoA'] = new_df['monoA'].apply(
             lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
         )
+        
+        # Re-enable if verbose mode
+        if self.verbose:
+            self.set_rdkit_verbosity(True)
         
         # Remove rows where canonicalization failed
         initial_count = len(new_df)
@@ -2203,9 +2267,17 @@ class PolymerDatabaseManager:
             # CANONICALIZE monoB SMILES
             if self.verbose:
                 logger.info("Canonicalizing monoB SMILES...")
+            
+            # Temporarily suppress RDKit errors during bulk canonicalization
+            self.set_rdkit_verbosity(False)
+            
             new_df['monoB'] = new_df['monoB'].apply(
                 lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
             )
+            
+            # Re-enable if verbose mode
+            if self.verbose:
+                self.set_rdkit_verbosity(True)
         
         # Handle target column selection
         if target_columns is None or column_mapping is None:

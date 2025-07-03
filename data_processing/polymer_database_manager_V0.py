@@ -1,9 +1,11 @@
 """
-Polymer Database Manager
-========================
+Polymer Database Manager - Enhanced Version
+==========================================
 
 A comprehensive toolkit for processing polymer datasets and managing polymer databases
 with ChemProp input generation, chemical validation, and template management.
+
+Enhanced to handle all scenarios, fix unknown values, and grow databases intelligently.
 
 Place this file in: /content/Inverse_copolymer_design/data_processing/
 
@@ -27,6 +29,7 @@ import warnings
 import re
 import logging
 from typing import List, Tuple, Optional, Dict, Any, Union
+from datetime import datetime
 
 # Handle imports for both command line and programmatic usage
 try:
@@ -53,28 +56,31 @@ logger = logging.getLogger(__name__)
 
 class PolymerDatabaseManager:
     """
-    Main class for managing polymer databases with comprehensive processing capabilities
+    Enhanced Polymer Database Manager with robust handling for all scenarios
     """
     
-    def __init__(self, template_path: str = None, verbose: bool = True, clean_template: bool = True):
+    def __init__(self, template_path: str = None, verbose: bool = True, 
+                 clean_template: bool = True, fix_unknowns: bool = True):
         """
-        Initialize the Polymer Database Manager
+        Initialize the Enhanced Polymer Database Manager
         
         Args:
             template_path: Path to existing template CSV file
             verbose: Whether to print detailed logs
             clean_template: Whether to clean poly_chemprop_input in template
+            fix_unknowns: Whether to attempt fixing unknown values
         """
         self.template_path = template_path
         self.template_df = None
         self.verbose = verbose
+        self.fix_unknowns = fix_unknowns
         
         if template_path and os.path.exists(template_path):
             self.template_df = pd.read_csv(template_path)
             if verbose:
                 logger.info(f"Loaded template with {len(self.template_df)} rows and {len(self.template_df.columns)} columns")
             
-            # ✅ NEW: Clean template poly_chemprop_input if requested
+            # Clean template poly_chemprop_input if requested
             if clean_template and 'poly_chemprop_input' in self.template_df.columns:
                 if verbose:
                     logger.info("Cleaning template poly_chemprop_input data...")
@@ -94,6 +100,10 @@ class PolymerDatabaseManager:
                 self.template_df = self.template_df[self.template_df['poly_chemprop_input'].notna()]
                 if len(self.template_df) != initial_count and verbose:
                     logger.warning(f"Removed {initial_count - len(self.template_df)} corrupted rows from template")
+            
+            # Fix unknowns in template if requested
+            if fix_unknowns and self.template_df is not None:
+                self._fix_unknown_values(self.template_df)
         
         # Default polymer configurations - NOT hardcoded, can be modified
         self.default_poly_types = ['alternating', 'block', 'random']
@@ -103,19 +113,36 @@ class PolymerDatabaseManager:
             '6A_2B': (0.75, 0.25),
             '2A_6B': (0.25, 0.75)
         }
+        
+        # Enhanced patterns for polymer type detection
+        self.polymer_type_patterns = {
+            'alternating': [
+                r'<1-3:0\.5:0\.5.*<1-4:0\.5:0\.5.*<2-3:0\.5:0\.5.*<2-4:0\.5:0\.5(?!.*<1-1)',
+                r'<1-3:0\.500:0\.500.*<1-4:0\.500:0\.500.*<2-3:0\.500:0\.500.*<2-4:0\.500:0\.500(?!.*<1-1)'
+            ],
+            'block': [
+                r'<1-2:.*<1-1:.*<2-2:.*<3-4:.*<3-3:.*<4-4:',
+                r'<1-2:0\.375:0\.375.*<1-1:0\.375:0\.375.*<2-2:0\.375:0\.375',
+                r'<1-2:0\.750:0\.750.*<3-4:0\.750:0\.750(?!.*<1-1:0\.25)'
+            ],
+            'random': [
+                r'<1-3:0\.25:0\.25.*<1-4:0\.25:0\.25.*<2-3:0\.25:0\.25.*<2-4:0\.25:0\.25.*<1-2:0\.25:0\.25.*<3-4:0\.25:0\.25.*<1-1:0\.25:0\.25.*<2-2:0\.25:0\.25.*<3-3:0\.25:0\.25.*<4-4:0\.25:0\.25',
+                r'<1-3:0\.250:0\.250.*<1-4:0\.250:0\.250.*<2-3:0\.250:0\.250.*<2-4:0\.250:0\.250.*<1-1:',
+                r'<1-3:0\.25:0\.25.*<1-4:0\.25:0\.25.*<2-3:0\.25:0\.25.*<2-4:0\.25:0\.25.*<1-2:0\.5:0\.5.*<3-4:0\.5:0\.5'
+            ]
+        }
     
     # ========================
-    # Chemical Processing Core
+    # Enhanced Chemical Processing
     # ========================
     
     def canonicalize_smiles(self, smiles: str) -> Optional[str]:
         """
-        Canonicalize SMILES and convert attachment points to numbered format
-        Ensures chemical validity is preserved and consistent formatting
+        Enhanced canonicalize SMILES with better error handling and repair
         """
         try:
-            # ✅ NEW: Pre-filter obviously invalid patterns
-            if not smiles or smiles.strip() == '':
+            # Pre-filter obviously invalid patterns
+            if not smiles or smiles.strip() == '' or smiles == 'nan':
                 return None
                 
             # Count parentheses
@@ -138,11 +165,11 @@ class PolymerDatabaseManager:
             # Clean up any malformed attachment points
             numbered_smiles = re.sub(r'\*([^:\[])', r'[*:1]\1', numbered_smiles)  # Handle bare *
             
-            # ✅ IMPROVED: Try original first, then attempt repair if needed
+            # Try original first, then attempt repair if needed
             mol = Chem.MolFromSmiles(numbered_smiles)
             
             if mol is None:
-                # ✅ ENHANCED: Try auto-repair with multiple strategies
+                # Enhanced repair attempts
                 repaired_smiles = self._attempt_smiles_repair(numbered_smiles)
                 if repaired_smiles != numbered_smiles:
                     mol = Chem.MolFromSmiles(repaired_smiles)
@@ -151,17 +178,23 @@ class PolymerDatabaseManager:
                         if self.verbose:
                             logger.info(f"Auto-repaired SMILES: {smiles} → {repaired_smiles}")
                     else:
-                        # ✅ ENHANCED: Try multiple repair strategies
-                        for attempt in range(3):
+                        # Try multiple repair strategies
+                        for attempt in range(5):  # Increased attempts
                             if attempt == 0:
                                 # Strategy 1: Remove all ()
                                 test_smiles = repaired_smiles.replace('()', '')
                             elif attempt == 1:
                                 # Strategy 2: Replace () with C
                                 test_smiles = repaired_smiles.replace('()', 'C')
-                            else:
+                            elif attempt == 2:
                                 # Strategy 3: More aggressive repair
                                 test_smiles = self._aggressive_repair(repaired_smiles)
+                            elif attempt == 3:
+                                # Strategy 4: Fix double bonds
+                                test_smiles = self._fix_double_bonds(repaired_smiles)
+                            else:
+                                # Strategy 5: Last resort - simplify
+                                test_smiles = self._simplify_smiles(repaired_smiles)
                             
                             mol = Chem.MolFromSmiles(test_smiles)
                             if mol is not None:
@@ -198,6 +231,24 @@ class PolymerDatabaseManager:
         except:
             return None
 
+    def _fix_double_bonds(self, smiles: str) -> str:
+        """Fix common double bond issues"""
+        fixed = smiles
+        # Fix disconnected double bonds
+        fixed = re.sub(r'=\(\)', '=C', fixed)
+        fixed = re.sub(r'\(\)=', 'C=', fixed)
+        # Fix double bond valence issues
+        fixed = re.sub(r'C\(=\)C', 'C=C', fixed)
+        return fixed
+    
+    def _simplify_smiles(self, smiles: str) -> str:
+        """Simplify complex SMILES as last resort"""
+        # Remove all empty parentheses
+        simplified = re.sub(r'\(\)+', '', smiles)
+        # Fix common patterns
+        simplified = re.sub(r'([A-Za-z])([A-Za-z])', r'\1C\2', simplified)
+        return simplified
+
     def _standardize_attachment_points(self, smiles: str) -> str:
         """
         Standardize attachment point numbering to ensure consistency
@@ -227,16 +278,17 @@ class PolymerDatabaseManager:
         
         repaired = smiles
         
-        # ✅ NEW: Pre-filter obviously corrupted patterns
+        # Pre-filter obviously corrupted patterns
         corrupted_patterns = [
             (r'\(\)\(\)', ''),                          # ()() → remove
             (r'\(\)\(\)\(\)', ''),                      # ()()() → remove
+            (r'\(\)\(\)\(\)\(\)', ''),                  # ()()()() → remove
         ]
         
         for pattern, replacement in corrupted_patterns:
             repaired = re.sub(pattern, replacement, repaired)
         
-        # ✅ COMPREHENSIVE: Apply repairs in order of specificity
+        # Apply repairs in order of specificity
         repaired = self._repair_aromatic_rings(repaired)
         repaired = self._repair_aliphatic_rings(repaired)
         repaired = self._repair_general_patterns(repaired)
@@ -250,7 +302,7 @@ class PolymerDatabaseManager:
         """
         repaired = smiles
         
-        # ✅ COMPREHENSIVE: Handle numbered aromatic rings first (most specific)
+        # Handle numbered aromatic rings first (most specific)
         numbered_ring_patterns = [
             # Single digit rings: c1...()...c1, c2...()...c2, etc.
             (r'c(\d)([^c]*?)c\(\)([^c]*?)c\1', r'c\1\2c\3c\1'),
@@ -262,7 +314,7 @@ class PolymerDatabaseManager:
         for pattern, replacement in numbered_ring_patterns:
             repaired = re.sub(pattern, replacement, repaired)
         
-        # ✅ COMPREHENSIVE: Handle aromatic chains without ring numbers
+        # Handle aromatic chains without ring numbers
         aromatic_chain_patterns = [
             # Basic aromatic chains
             (r'cc\(\)cc', 'cccc'),           # cc()cc → cccc
@@ -289,50 +341,6 @@ class PolymerDatabaseManager:
             repaired = re.sub(pattern, replacement, repaired)
         
         return repaired
-    
-    def _repair_aromatic_chains(self, smiles: str) -> str:
-        """
-        Fix aromatic chains and partial rings
-        """
-        repaired = smiles
-        
-        # ✅ COMPREHENSIVE: Cover all the patterns we're seeing
-        aromatic_patterns = [
-            # Benzene ring patterns (most common)
-            (r'ccc\(\)cc', 'ccccc'),                # ccc()cc → ccccc
-            (r'cc\(\)cc', 'cccc'),                  # cc()cc → cccc  
-            (r'c\(\)cc', 'ccc'),                    # c()cc → ccc
-            (r'cc\(\)c', 'ccc'),                    # cc()c → ccc
-            (r'c\(\)c', 'cc'),                      # c()c → cc
-            
-            # Thiophene patterns 
-            (r'ccc\(\)s', 'cccs'),                  # ccc()s → cccs
-            (r'cc\(\)s', 'ccs'),                    # cc()s → ccs
-            (r'c\(\)s', 'cs'),                      # c()s → cs
-            
-            # Pyridine patterns
-            (r'ccc\(\)n', 'cccn'),                  # ccc()n → cccn
-            (r'cc\(\)n', 'ccn'),                    # cc()n → ccn
-            (r'c\(\)n', 'cn'),                      # c()n → cn
-            
-            # With substituents (like your error cases)
-            (r'([cn])c\(\)([cn])', r'\1cc\2'),       # Insert carbon between aromatics
-            (r'([cn])\(\)([cn])', r'\1c\2'),         # Insert missing carbon
-            
-            # Complex ring systems (like c2ccc()cc2)
-            (r'c(\d+)ccc\(\)cc\1', r'c\1ccccc\1'),  # c2ccc()cc2 → c2ccccc2
-            (r'c(\d+)cc\(\)cc\1', r'c\1cccc\1'),    # c2cc()cc2 → c2cccc2
-            (r'c(\d+)c\(\)cc\1', r'c\1ccc\1'),      # c2c()cc2 → c2ccc2
-            
-            # Numbered ring with heteroatoms
-            (r'c(\d+)ccc\(\)s\1', r'c\1cccs\1'),    # c1ccc()s1 → c1cccs1
-            (r'c(\d+)cc\(\)s\1', r'c\1ccs\1'),      # c1cc()s1 → c1ccs1
-        ]
-        
-        for pattern, replacement in aromatic_patterns:
-            repaired = re.sub(pattern, replacement, repaired)
-        
-        return repaired
 
     def _repair_aliphatic_rings(self, smiles: str) -> str:
         """
@@ -340,7 +348,7 @@ class PolymerDatabaseManager:
         """
         repaired = smiles
         
-        # ✅ COMPREHENSIVE: Handle numbered aliphatic rings
+        # Handle numbered aliphatic rings
         aliphatic_ring_patterns = [
             # Single digit rings: C1...()...C1, C2...()...C2, etc.
             (r'C(\d)([^C]*?)C\(\)([^C]*?)C\1', r'C\1\2C\3C\1'),
@@ -352,7 +360,7 @@ class PolymerDatabaseManager:
         for pattern, replacement in aliphatic_ring_patterns:
             repaired = re.sub(pattern, replacement, repaired)
         
-        # ✅ COMPREHENSIVE: Handle aliphatic chains
+        # Handle aliphatic chains
         aliphatic_chain_patterns = [
             # Basic aliphatic chains
             (r'CC\(\)CC', 'CCCC'),           # CC()CC → CCCC
@@ -378,7 +386,7 @@ class PolymerDatabaseManager:
         """
         repaired = smiles
         
-        # ✅ COMPREHENSIVE: Handle complex functional groups
+        # Handle complex functional groups
         functional_group_patterns = [
             # Carbonyl groups
             (r'O=C\(\)([CO])', r'O=C\1'),           # O=C()O → O=CO, O=C()C → O=CC
@@ -410,7 +418,7 @@ class PolymerDatabaseManager:
         """
         repaired = smiles
         
-        # ✅ FALLBACK: Last resort patterns - context-aware replacement
+        # Fallback: Last resort patterns - context-aware replacement
         remaining_patterns = [
             # In aromatic contexts, replace () with c
             (r'([a-z])\(\)([a-z])', r'\1c\2'),      # aromatic()aromatic → aromaticccaromatic
@@ -469,13 +477,20 @@ class PolymerDatabaseManager:
 
     def get_iupac_name(self, smiles: str) -> str:
         """
-        Get IUPAC name for a SMILES string with multiple fallback strategies
+        Enhanced IUPAC name generation with better fallbacks
         """
         try:
+            # Handle empty or invalid input
+            if pd.isna(smiles) or smiles == '' or smiles == 'nan':
+                return "Unknown_compound"
+                
             # Remove attachment points for name generation
             clean_smiles = re.sub(r'\[\*:\d+\]', '', smiles)
             clean_smiles = re.sub(r'\[\*\]', '', clean_smiles)
             clean_smiles = re.sub(r'\*', '', clean_smiles)
+            
+            if not clean_smiles:
+                return "Unknown_compound"
             
             mol = Chem.MolFromSmiles(clean_smiles)
             if mol is None:
@@ -507,7 +522,7 @@ class PolymerDatabaseManager:
 
     def _lookup_common_polymer_names(self, smiles: str) -> Optional[str]:
         """
-        Lookup table for common polymer monomers
+        Enhanced lookup table for common polymer monomers
         """
         # Common polymer monomer names
         common_names = {
@@ -531,6 +546,11 @@ class PolymerDatabaseManager:
             'Fc1ccc(F)cc1': 'difluorobenzene',
             'Clc1ccc(Cl)cc1': 'dichlorobenzene',
             'Brc1ccc(Br)cc1': 'dibromobenzene',
+            'c1ccc(cc1)c2ccccc2': 'biphenyl',
+            'c1ccc(cc1)Cc2ccccc2': 'diphenylmethane',
+            'c1ccc(cc1)C(c2ccccc2)c3ccccc3': 'triphenylmethane',
+            'c1cc2cc3ccccc3cc2cc1': 'anthracene',
+            'c1ccc2cc3ccccc3cc2c1': 'phenanthrene',
         }
         
         return common_names.get(smiles)
@@ -554,7 +574,7 @@ class PolymerDatabaseManager:
 
     def _generate_descriptive_name(self, mol: Chem.Mol, smiles: str) -> Optional[str]:
         """
-        Generate a descriptive name based on molecular features
+        Enhanced descriptive name generation based on molecular features
         """
         try:
             # Basic descriptive naming based on functional groups and structure
@@ -572,6 +592,8 @@ class PolymerDatabaseManager:
                         name_parts.append("benzene")
                     elif num_rings == 2:
                         name_parts.append("naphthalene")
+                    elif num_rings == 3:
+                        name_parts.append("anthracene")
                     else:
                         name_parts.append(f"aromatic_{num_rings}ring")
                 else:
@@ -591,7 +613,7 @@ class PolymerDatabaseManager:
             # Check for functional groups
             functional_groups = []
             
-            # Common functional group SMARTS patterns
+            # Enhanced functional group SMARTS patterns
             fg_patterns = {
                 'amine': '[NX3;H2,H1;!$(NC=O)]',
                 'alcohol': '[OX2H]',
@@ -599,8 +621,15 @@ class PolymerDatabaseManager:
                 'ester': '[#6][CX3](=O)[OX2H0][#6]',
                 'nitro': '[NX3+](=O)[O-]',
                 'sulfonyl': '[SX4](=O)(=O)',
-                'halide': '[F,Cl,Br,I]',
+                'fluoride': '[F]',
+                'chloride': '[Cl]',
+                'bromide': '[Br]',
+                'iodide': '[I]',
                 'nitrile': '[CX2]#[NX1]',
+                'thiol': '[SH]',
+                'ether': '[OD2]([#6])[#6]',
+                'ketone': '[CX3](=O)[#6]',
+                'aldehyde': '[CX3H1](=O)',
             }
             
             for fg_name, pattern in fg_patterns.items():
@@ -608,7 +637,7 @@ class PolymerDatabaseManager:
                     functional_groups.append(fg_name)
             
             if functional_groups:
-                name_parts.extend(functional_groups)
+                name_parts.extend(functional_groups[:3])  # Limit to 3 functional groups
             
             if name_parts:
                 return "_".join(name_parts) + "_derivative"
@@ -622,7 +651,7 @@ class PolymerDatabaseManager:
 
     def check_polymer_validity(self, mona_smiles: str, monb_smiles: str) -> Tuple[bool, str]:
         """
-        Check if polymer monomers are valid and can form a proper polymer structure
+        Enhanced polymer validity checking
         """
         # Verify monomers have attachment points
         mona_valid = mona_smiles is not None and '[*:' in mona_smiles
@@ -637,6 +666,13 @@ class PolymerDatabaseManager:
         
         if mona_points < 1 or monb_points < 1:
             return False, "Insufficient attachment points"
+        
+        # Check if attachment points are properly numbered
+        mona_nums = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', mona_smiles)])
+        monb_nums = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', monb_smiles)])
+        
+        if not mona_nums or not monb_nums:
+            return False, "Attachment points not properly numbered"
             
         return True, "Valid polymer structure"
 
@@ -763,7 +799,7 @@ class PolymerDatabaseManager:
         return connectivity
 
     # =============================
-    # ChemProp Input Generation
+    # Enhanced ChemProp Input Generation
     # =============================
     
     def make_master_chemprop_input(self, smiA: str, smiB: str) -> str:
@@ -867,7 +903,7 @@ class PolymerDatabaseManager:
             fracB = 1.0 - fracA
             stoich = f"{fracA:.3f}|{fracB:.3f}"
             
-            if poly_type == 'alternating':
+            if poly_type == 'alternating' or poly_type == 'alternating (homopolymer)':
                 edges = '<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5'
             elif poly_type == 'block':
                 if selfedges:
@@ -897,11 +933,15 @@ class PolymerDatabaseManager:
 
     def _extract_monomers_from_poly_input(self, poly_input: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        Extract monomer SMILES from poly_chemprop_input format
-        Format: monA.monB|stoich|connectivity
+        Enhanced extraction of monomer SMILES from poly_chemprop_input format
         """
         try:
             if pd.isna(poly_input) or not isinstance(poly_input, str):
+                return None, None
+            
+            # Clean the input first
+            poly_input = self.clean_poly_chemprop_input(poly_input)
+            if not poly_input:
                 return None, None
             
             # Split by first pipe to get monomers part
@@ -926,14 +966,7 @@ class PolymerDatabaseManager:
 
     def clean_poly_chemprop_input(self, poly_input: str, remove_trailing_values: bool = True) -> Optional[str]:
         """
-        Clean poly_chemprop_input by removing trailing property values and other artifacts
-        
-        Args:
-            poly_input: Raw poly_chemprop_input string
-            remove_trailing_values: Whether to remove ~XXX.X patterns at the end
-            
-        Returns:
-            Cleaned poly_chemprop_input string
+        Enhanced cleaning of poly_chemprop_input with better pattern matching
         """
         if pd.isna(poly_input) or not isinstance(poly_input, str):
             return None
@@ -943,15 +976,119 @@ class PolymerDatabaseManager:
         if remove_trailing_values:
             import re
             # Only remove values that start with ~ (tilde)
-            # Pattern: ~502.5, ~123, ~45.67, etc.
             cleaned = re.sub(r'~[0-9]*\.?[0-9]*$', '', cleaned).strip()
-            
-            # ✅ REMOVED: The aggressive second regex that was cutting off valid connectivity values
-            # The issue was: re.sub(r'(?<=[<>:\d])\d+\.\d+$', '', cleaned) 
-            # This was removing valid "0.5" from connectivity patterns!
+            # Also remove any trailing numeric values without tilde
+            cleaned = re.sub(r'\s+[0-9]+\.?[0-9]*$', '', cleaned).strip()
         
+        # Validate basic structure
+        if '|' not in cleaned:
+            return None
+            
         return cleaned if cleaned else None
 
+    def _detect_polymer_type_from_connectivity(self, connectivity: str) -> str:
+        """
+        Detect polymer type from connectivity pattern
+        """
+        if not connectivity:
+            return "unknown"
+        
+        for poly_type, patterns in self.polymer_type_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, connectivity):
+                    return poly_type
+        
+        return "unknown"
+    
+    def _detect_composition_from_stoichiometry(self, stoich: str) -> str:
+        """
+        Detect composition from stoichiometry values
+        """
+        if not stoich:
+            return "unknown"
+        
+        try:
+            if '|' in stoich:
+                parts = stoich.split('|')
+                fracA = float(parts[0])
+            else:
+                # Handle case where stoich is just the fraction
+                fracA = float(stoich.split(':')[0] if ':' in stoich else stoich)
+            
+            # Match to closest known composition
+            if abs(fracA - 0.5) < 0.01:
+                return "4A_4B"
+            elif abs(fracA - 0.75) < 0.01:
+                return "6A_2B"
+            elif abs(fracA - 0.25) < 0.01:
+                return "2A_6B"
+            else:
+                # Create custom composition label
+                fracB = 1.0 - fracA
+                return f"{int(fracA*8)}A_{int(fracB*8)}B"
+        except:
+            return "unknown"
+    
+    def _fix_unknown_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Fix unknown values in poly_type, comp, and IUPAC names
+        """
+        if not self.fix_unknowns:
+            return df
+        
+        fixed_count = 0
+        
+        # Fix poly_type
+        if 'poly_type' in df.columns and 'poly_chemprop_input' in df.columns:
+            unknown_mask = df['poly_type'].isin(['unknown', 'Unknown', None, '']) | df['poly_type'].isna()
+            
+            for idx in df[unknown_mask].index:
+                poly_input = df.loc[idx, 'poly_chemprop_input']
+                if pd.notna(poly_input):
+                    # Extract connectivity pattern
+                    parts = str(poly_input).split('|')
+                    if len(parts) >= 3:
+                        connectivity = parts[2]
+                        detected_type = self._detect_polymer_type_from_connectivity(connectivity)
+                        if detected_type != "unknown":
+                            df.loc[idx, 'poly_type'] = detected_type
+                            fixed_count += 1
+        
+        # Fix comp
+        if 'comp' in df.columns and 'poly_chemprop_input' in df.columns:
+            unknown_mask = df['comp'].isin(['unknown', 'Unknown', None, '']) | df['comp'].isna()
+            
+            for idx in df[unknown_mask].index:
+                poly_input = df.loc[idx, 'poly_chemprop_input']
+                if pd.notna(poly_input):
+                    # Extract stoichiometry
+                    parts = str(poly_input).split('|')
+                    if len(parts) >= 2:
+                        stoich = parts[1]
+                        detected_comp = self._detect_composition_from_stoichiometry(stoich)
+                        if detected_comp != "unknown":
+                            df.loc[idx, 'comp'] = detected_comp
+                            fixed_count += 1
+        
+        # Fix IUPAC names
+        for col in ['monoA_IUPAC', 'monoB_IUPAC']:
+            if col in df.columns:
+                smiles_col = col.replace('_IUPAC', '')
+                if smiles_col in df.columns:
+                    invalid_mask = df[col].isin(['Invalid_SMILES', 'Unknown_compound', None, '']) | df[col].isna()
+                    
+                    for idx in df[invalid_mask].index:
+                        smiles = df.loc[idx, smiles_col]
+                        if pd.notna(smiles):
+                            iupac = self.get_iupac_name(smiles)
+                            if iupac not in ['Invalid_SMILES', 'Unknown_compound']:
+                                df.loc[idx, col] = iupac
+                                fixed_count += 1
+        
+        if self.verbose and fixed_count > 0:
+            logger.info(f"Fixed {fixed_count} unknown values in the dataset")
+        
+        return df
     
     # ========================
     # Database Management
@@ -962,7 +1099,7 @@ class PolymerDatabaseManager:
         if existing_ids is None:
             existing_ids = set()
         
-        # ✅ NEW: Parse existing IDs to find the highest number and detect naming pattern
+        # Parse existing IDs to find the highest number and detect naming pattern
         max_id = -1
         id_prefix = ""
         id_format = "numeric"  # Default format
@@ -970,12 +1107,12 @@ class PolymerDatabaseManager:
         if existing_ids:
             for existing_id in existing_ids:
                 try:
-                    # ✅ NEW: Handle different ID formats
+                    # Handle different ID formats
                     if existing_id.startswith('p_'):
                         # Format: p_12345
                         id_prefix = "p_"
                         id_format = "p_prefix"
-                        num = int(existing_id.replace('p_', ''))  # ✅ Extract 42966 from p_42966
+                        num = int(existing_id.replace('p_', ''))
                         max_id = max(max_id, num)
                     elif '_' in existing_id:
                         # Format: 12345_6 
@@ -992,23 +1129,23 @@ class PolymerDatabaseManager:
                 except (ValueError, AttributeError):
                     continue
         
-        # ✅ NEW: Generate new IDs continuing from the highest found
+        # Generate new IDs continuing from the highest found
         poly_ids = []
         unique_pairs = df[['monoA', 'monoB']].drop_duplicates()
         
-        # ✅ NEW: Start from the next number after max_id
-        current_id = max_id + 1  # ✅ Start from 42967 if max was 42966
+        # Start from the next number after max_id
+        current_id = max_id + 1
         
         for idx, (_, row) in enumerate(unique_pairs.iterrows()):
-            # ✅ NEW: Generate ID based on detected format
+            # Generate ID based on detected format
             if id_format == "p_prefix":
-                new_id = f"p_{current_id}"  # ✅ Generates p_42967, p_42968, etc.
+                new_id = f"p_{current_id}"
             elif id_format == "underscore":
                 new_id = f"{current_id}_{idx}"
             else:
                 new_id = str(current_id)
             
-            # ✅ NEW: Ensure uniqueness
+            # Ensure uniqueness
             while new_id in existing_ids:
                 current_id += 1
                 if id_format == "p_prefix":
@@ -1026,10 +1163,11 @@ class PolymerDatabaseManager:
         pair_to_id = dict(zip(zip(unique_pairs['monoA'], unique_pairs['monoB']), poly_ids))
         result_ids = [pair_to_id[(row['monoA'], row['monoB'])] for _, row in df.iterrows()]
     
-        # ✅ NEW: Logging for debugging
+        # Logging for debugging
         if self.verbose:
             logger.info(f"Generated poly_ids continuing from {max_id} using format: {id_format}")
-            logger.info(f"New ID range: {poly_ids[0] if poly_ids else 'None'} to {poly_ids[-1] if poly_ids else 'None'}")
+            if poly_ids:
+                logger.info(f"New ID range: {poly_ids[0]} to {poly_ids[-1]}")
         
         return result_ids
 
@@ -1037,7 +1175,6 @@ class PolymerDatabaseManager:
                               compositions: List[str] = None) -> pd.DataFrame:
         """
         Expand dataset to include different polymer types and compositions
-        FLEXIBLE: Can override default polymer types and compositions
         """
         if poly_types is None:
             poly_types = self.default_poly_types
@@ -1055,7 +1192,7 @@ class PolymerDatabaseManager:
                 for poly_type in ['alternating']:
                     for comp in ['4A_4B']:
                         new_row = row.copy()
-                        new_row['poly_type'] = f"{poly_type} (homopolymer)"  # ✅ NEW: Add (homopolymer)
+                        new_row['poly_type'] = f"{poly_type} (homopolymer)"
                         new_row['comp'] = comp
                         new_row['fracA'] = 0.5
                         new_row['fracB'] = 0.5
@@ -1093,7 +1230,7 @@ class PolymerDatabaseManager:
         if exclude_columns is None:
             exclude_columns = []
         
-        # ✅ NEW: Auto-exclude common non-target patterns
+        # Auto-exclude common non-target patterns
         if auto_exclude_patterns is None:
             auto_exclude_patterns = [
                 # Structure columns
@@ -1103,10 +1240,10 @@ class PolymerDatabaseManager:
                 # ChemProp columns
                 'chemprop', 'master', 'input',
                 # Common metadata
-                'source', 'reference', 'notes', 'comments', 'url'
+                'source', 'reference', 'notes', 'comments', 'url', 'index'
             ]
         
-        # ✅ NEW: Build comprehensive exclusion list
+        # Build comprehensive exclusion list
         comprehensive_exclude = set(exclude_columns)
         
         # Add columns that match patterns (case-insensitive)
@@ -1123,7 +1260,7 @@ class PolymerDatabaseManager:
         # Remove excluded columns
         potential_targets = [col for col in numeric_columns if col not in comprehensive_exclude]
         
-        # ✅ NEW: Log what was excluded for transparency
+        # Log what was excluded for transparency
         if self.verbose:
             excluded_found = [col for col in df.columns if col in comprehensive_exclude]
             if excluded_found:
@@ -1134,13 +1271,13 @@ class PolymerDatabaseManager:
     def interactive_column_selection(self, df: pd.DataFrame, interactive: bool = True) -> Tuple[List[str], Dict[str, str]]:
         """
         Interactively select target columns and their new names
-        FLEXIBLE: Returns whatever columns user selects
         """
         if not interactive:
             # Auto-detect mode
             potential_targets = self.detect_target_columns(df)
             if not potential_targets:
-                raise ValueError("No suitable target columns found!")
+                # If no numeric columns found, return empty lists
+                return [], {}
             
             # Create default mapping (keep original names)
             column_mapping = {col: col for col in potential_targets}
@@ -1166,17 +1303,21 @@ class PolymerDatabaseManager:
         print("1. Use all auto-detected columns")
         print("2. Select specific columns by number")
         print("3. Enter column names manually")
+        print("4. Skip target column selection (no properties)")
         
         while True:
             try:
-                choice = input("\nEnter your choice (1, 2, or 3): ").strip()
-                if choice in ['1', '2', '3']:
+                choice = input("\nEnter your choice (1, 2, 3, or 4): ").strip()
+                if choice in ['1', '2', '3', '4']:
                     break
-                print("Please enter 1, 2, or 3")
+                print("Please enter 1, 2, 3, or 4")
             except KeyboardInterrupt:
                 raise
             except:
-                print("Please enter 1, 2, or 3")
+                print("Please enter 1, 2, 3, or 4")
+        
+        if choice == '4':
+            return [], {}
         
         selected_columns = []
         
@@ -1214,6 +1355,9 @@ class PolymerDatabaseManager:
                 else:
                     print(f"Column '{name}' not found!")
         
+        if not selected_columns:
+            return [], {}
+        
         print(f"\nSelected columns: {selected_columns}")
         
         # Ask for new names
@@ -1236,18 +1380,19 @@ class PolymerDatabaseManager:
         return selected_columns, column_mapping
 
     # ========================
-    # Main Processing Methods - FULLY FLEXIBLE
+    # Main Processing Methods
     # ========================
     
     def _process_existing_poly_chemprop_dataset(self, new_df: pd.DataFrame, 
                                           target_columns: List[str] = None,
                                           column_mapping: Dict[str, str] = None,
                                           exclude_columns: List[str] = None,
-                                          clean_poly_inputs: bool = True) -> pd.DataFrame:
+                                          clean_poly_inputs: bool = True,
+                                          fix_existing_unknowns: bool = True) -> pd.DataFrame:
         """
-        Process a dataset that already contains poly_chemprop_input
+        Enhanced processing of datasets that already contain poly_chemprop_input
         """
-        # ✅ NEW: Clean poly_chemprop_input data if requested
+        # Clean poly_chemprop_input data if requested
         if clean_poly_inputs and 'poly_chemprop_input' in new_df.columns:
             if self.verbose:
                 logger.info("Cleaning poly_chemprop_input data (removing trailing property values)...")
@@ -1268,7 +1413,7 @@ class PolymerDatabaseManager:
             if len(new_df) != initial_count and self.verbose:
                 logger.warning(f"Removed {initial_count - len(new_df)} rows due to poly_chemprop_input cleaning failures")
         
-        # Handle target column selection - COMPLETELY FLEXIBLE
+        # Handle target column selection
         if target_columns is None or column_mapping is None:
             target_columns, column_mapping = self.interactive_column_selection(new_df, interactive=True)
         
@@ -1289,7 +1434,7 @@ class PolymerDatabaseManager:
         unique_polys = new_df['poly_chemprop_input'].drop_duplicates()
         poly_id_mapping = {}
         
-        # ✅ NEW: Parse existing IDs to find the highest number and detect naming pattern
+        # Parse existing IDs to find the highest number
         max_id = -1
         id_format = "numeric"  # Default format
         
@@ -1351,15 +1496,44 @@ class PolymerDatabaseManager:
             new_df['monoA'] = monomers_extracted.apply(lambda x: x[0] if x else None)
             new_df['monoB'] = monomers_extracted.apply(lambda x: x[1] if x else None)
         
-        # Add missing polymer-related columns with defaults
+        # Add missing polymer-related columns with intelligent defaults
         if 'poly_type' not in new_df.columns:
             new_df['poly_type'] = 'unknown'
+            # Try to detect from connectivity
+            for idx in new_df.index:
+                poly_input = new_df.loc[idx, 'poly_chemprop_input']
+                if pd.notna(poly_input) and '|' in str(poly_input):
+                    parts = str(poly_input).split('|')
+                    if len(parts) >= 3:
+                        detected_type = self._detect_polymer_type_from_connectivity(parts[2])
+                        new_df.loc[idx, 'poly_type'] = detected_type
+        
         if 'comp' not in new_df.columns:
             new_df['comp'] = 'unknown'
+            # Try to detect from stoichiometry
+            for idx in new_df.index:
+                poly_input = new_df.loc[idx, 'poly_chemprop_input']
+                if pd.notna(poly_input) and '|' in str(poly_input):
+                    parts = str(poly_input).split('|')
+                    if len(parts) >= 2:
+                        detected_comp = self._detect_composition_from_stoichiometry(parts[1])
+                        new_df.loc[idx, 'comp'] = detected_comp
+        
         if 'fracA' not in new_df.columns:
             new_df['fracA'] = 0.5
+            # Extract from stoichiometry
+            for idx in new_df.index:
+                poly_input = new_df.loc[idx, 'poly_chemprop_input']
+                if pd.notna(poly_input) and '|' in str(poly_input):
+                    parts = str(poly_input).split('|')
+                    if len(parts) >= 2 and '|' in parts[1]:
+                        try:
+                            new_df.loc[idx, 'fracA'] = float(parts[1].split('|')[0])
+                        except:
+                            pass
+        
         if 'fracB' not in new_df.columns:
-            new_df['fracB'] = 0.5
+            new_df['fracB'] = new_df['fracA'].apply(lambda x: 1.0 - x)
         
         # Generate master_chemprop_input if missing
         if 'master_chemprop_input' not in new_df.columns:
@@ -1393,28 +1567,29 @@ class PolymerDatabaseManager:
             if 'monoB_IUPAC' not in new_df.columns:
                 new_df['monoB_IUPAC'] = "Unknown_compound"
         
+        # Fix unknown values if requested
+        if fix_existing_unknowns and self.fix_unknowns:
+            new_df = self._fix_unknown_values(new_df)
+        
         if self.verbose:
             logger.info(f"Successfully processed poly_chemprop_input dataset with {len(new_df)} rows")
             logger.info(f"Target columns preserved: {final_target_columns}")
         
         return new_df
     
-    # ✅ NEW: Add exclude_columns parameter
     def process_new_dataset(self, input_path: str = None, df: pd.DataFrame = None,
                       expand_variants: bool = True, generate_iupac: bool = True,
                       interactive: bool = True, target_columns: List[str] = None,
                       column_mapping: Dict[str, str] = None, 
                       poly_types: List[str] = None, compositions: List[str] = None,
-                      exclude_columns: List[str] = None, clean_poly_inputs: bool = True):
-        
-        # ✅ NEW: Store for later use
+                      exclude_columns: List[str] = None, clean_poly_inputs: bool = True,
+                      fix_existing_unknowns: bool = True):
+        """
+        Enhanced process new dataset with better handling of all scenarios
+        """
+        # Store for later use
         self._exclude_columns = exclude_columns if exclude_columns else []
-        """
-        Process a new dataset and prepare it for appending to template
-        COMPLETELY FLEXIBLE - no hardcoded assumptions about target properties
-        WITH CONSISTENT CANONICALIZATION
-        Can handle both monomer-based datasets and pre-processed poly_chemprop_input datasets
-        """
+        
         # Load data
         if df is not None:
             new_df = df.copy()
@@ -1427,16 +1602,19 @@ class PolymerDatabaseManager:
         else:
             raise ValueError("Either input_path or df must be provided")
         
-        # ✅ NEW: Check if dataset already has poly_chemprop_input
+        # Check if dataset already has poly_chemprop_input
         has_poly_chemprop = 'poly_chemprop_input' in new_df.columns
         has_monomers = any(col in new_df.columns for col in ['monoA', 'smiles', 'MonA', 'SMILES', 'Smiles'])
         
         if has_poly_chemprop and not has_monomers:
             if self.verbose:
                 logger.info("Dataset contains poly_chemprop_input - processing as pre-processed polymer data")
-            return self._process_existing_poly_chemprop_dataset(new_df, target_columns, column_mapping, exclude_columns, clean_poly_inputs=True)
+            return self._process_existing_poly_chemprop_dataset(
+                new_df, target_columns, column_mapping, exclude_columns, 
+                clean_poly_inputs=clean_poly_inputs, fix_existing_unknowns=fix_existing_unknowns
+            )
         
-        # Standardize column names - flexible mappings
+        # Standardize column names
         column_mapping_standard = {
             'smiles': 'monoA',
             'MonA': 'monoA',
@@ -1453,7 +1631,7 @@ class PolymerDatabaseManager:
         if 'monoA' not in new_df.columns:
             raise ValueError("No 'monoA', 'smiles', 'MonA', or 'poly_chemprop_input' column found!")
         
-        # CANONICALIZE monoA SMILES IMMEDIATELY
+        # CANONICALIZE monoA SMILES
         if self.verbose:
             logger.info("Canonicalizing monoA SMILES...")
         new_df['monoA'] = new_df['monoA'].apply(
@@ -1482,7 +1660,7 @@ class PolymerDatabaseManager:
                 lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
             )
         
-        # Handle target column selection - COMPLETELY FLEXIBLE
+        # Handle target column selection
         if target_columns is None or column_mapping is None:
             target_columns, column_mapping = self.interactive_column_selection(new_df, interactive=interactive)
         
@@ -1494,7 +1672,7 @@ class PolymerDatabaseManager:
         # Update target_columns to use new names
         final_target_columns = [column_mapping[col] for col in target_columns]
         
-        # Expand polymer variants if requested - with flexible options
+        # Expand polymer variants if requested
         if expand_variants:
             new_df = self.expand_polymer_variants(new_df, poly_types=poly_types, compositions=compositions)
             if self.verbose:
@@ -1517,7 +1695,7 @@ class PolymerDatabaseManager:
         
         new_df['poly_id'] = self.generate_poly_ids(new_df, existing_ids)
         
-        # Generate IUPAC names if requested (IMPROVED)
+        # Generate IUPAC names if requested
         if generate_iupac:
             if 'monoA_IUPAC' not in new_df.columns:
                 if self.verbose:
@@ -1529,7 +1707,7 @@ class PolymerDatabaseManager:
                     logger.info("Generating IUPAC names for monoB...")
                 new_df['monoB_IUPAC'] = new_df['monoB'].apply(self.get_iupac_name)
         
-        # Generate ChemProp inputs with CONSISTENT PROCESSING
+        # Generate ChemProp inputs
         if self.verbose:
             logger.info("Generating ChemProp inputs...")
         
@@ -1554,6 +1732,10 @@ class PolymerDatabaseManager:
         if initial_count != final_count and self.verbose:
             logger.warning(f"Removed {initial_count - final_count} rows due to ChemProp input generation failures")
         
+        # Fix unknown values if any were generated
+        if fix_existing_unknowns and self.fix_unknowns:
+            new_df = self._fix_unknown_values(new_df)
+        
         if self.verbose:
             logger.info(f"Successfully processed dataset with {len(new_df)} rows")
             logger.info(f"Target columns preserved: {final_target_columns}")
@@ -1563,7 +1745,7 @@ class PolymerDatabaseManager:
     def append_to_template(self, new_df: pd.DataFrame, output_path: str = None, 
                       exclude_columns: List[str] = None) -> pd.DataFrame:
         """
-        Append new dataset to existing template with optional column cleanup
+        Enhanced append to template with better column management
         """
         if exclude_columns is None:
             exclude_columns = []
@@ -1581,18 +1763,34 @@ class PolymerDatabaseManager:
                 if col not in new_df.columns:
                     new_df[col] = None
             
-            # Reorder columns to match template preference, then add new columns
-            template_cols = list(self.template_df.columns)
-            new_cols = [col for col in all_columns if col not in template_cols]
-            final_columns = template_cols + new_cols
+            # Define preferred column order
+            preferred_order = [
+                'poly_id', 'poly_type', 'comp', 'fracA', 'fracB',
+                'monoA', 'monoA_IUPAC', 'monoB', 'monoB_IUPAC',
+                'master_chemprop_input', 'poly_chemprop_input'
+            ]
             
+            # Build final column order
+            ordered_columns = []
+            # First add preferred columns that exist
+            for col in preferred_order:
+                if col in all_columns:
+                    ordered_columns.append(col)
+            
+            # Then add any remaining columns
+            remaining_columns = [col for col in all_columns if col not in ordered_columns]
+            # Sort remaining columns for consistency
+            remaining_columns = natsorted(remaining_columns) if NATSORT_AVAILABLE else sorted(remaining_columns)
+            final_columns = ordered_columns + remaining_columns
+            
+            # Reorder columns
             self.template_df = self.template_df[final_columns]
             new_df = new_df[final_columns]
             
             # Combine dataframes
             combined_df = pd.concat([self.template_df, new_df], ignore_index=True)
         
-        # ✅ NEW: Remove unwanted columns from final output
+        # Remove unwanted columns from final output
         if exclude_columns:
             columns_to_remove = [col for col in exclude_columns if col in combined_df.columns]
             if columns_to_remove:
@@ -1600,8 +1798,12 @@ class PolymerDatabaseManager:
                 if self.verbose:
                     logger.info(f"Removed unwanted columns: {columns_to_remove}")
         
+        # Fix any unknown values in the combined dataset
+        if self.fix_unknowns:
+            combined_df = self._fix_unknown_values(combined_df)
+        
         if output_path:
-            combined_df.to_csv(output_path, index=False)  # ✅ Saves only wanted columns
+            combined_df.to_csv(output_path, index=False)
             if self.verbose:
                 logger.info(f"Saved combined dataset to {output_path}")
         
@@ -1616,32 +1818,41 @@ class PolymerDatabaseManager:
     
     def quick_process(self, input_path: str, output_path: str, 
                      expand_variants: bool = True, interactive: bool = True,
-                     poly_types: List[str] = None, compositions: List[str] = None) -> pd.DataFrame:
+                     poly_types: List[str] = None, compositions: List[str] = None,
+                     fix_unknowns: bool = True) -> pd.DataFrame:
         """
         Quick processing method that combines process_new_dataset and append_to_template
-        FLEXIBLE: Can customize polymer types and compositions
         """
         processed_df = self.process_new_dataset(
             input_path=input_path,
             expand_variants=expand_variants,
             interactive=interactive,
             poly_types=poly_types,
-            compositions=compositions
+            compositions=compositions,
+            fix_existing_unknowns=fix_unknowns
         )
         
         combined_df = self.append_to_template(processed_df, output_path)
         return combined_df
 
-    def cleanup_existing_database(self, input_path: str, output_path: str) -> pd.DataFrame:
+    def cleanup_existing_database(self, input_path: str, output_path: str, 
+                                fix_unknowns: bool = True) -> pd.DataFrame:
         """
-        Clean up an existing database to ensure consistent formatting
-        Useful for fixing databases created with earlier versions
+        Enhanced cleanup of existing database with unknown value fixing
         """
         if self.verbose:
             logger.info(f"Cleaning up existing database: {input_path}")
         
         df = pd.read_csv(input_path)
         original_count = len(df)
+        
+        # Clean poly_chemprop_input if present
+        if 'poly_chemprop_input' in df.columns:
+            if self.verbose:
+                logger.info("Cleaning poly_chemprop_input values...")
+            df['poly_chemprop_input'] = df['poly_chemprop_input'].apply(
+                lambda x: self.clean_poly_chemprop_input(x, remove_trailing_values=True)
+            )
         
         # Canonicalize existing SMILES
         if 'monoA' in df.columns:
@@ -1689,6 +1900,10 @@ class PolymerDatabaseManager:
                 )
             ]
         
+        # Fix unknown values
+        if fix_unknowns and self.fix_unknowns:
+            df = self._fix_unknown_values(df)
+        
         # Remove any rows that failed processing
         df = df[df['poly_chemprop_input'].notna()] if 'poly_chemprop_input' in df.columns else df
         final_count = len(df)
@@ -1704,11 +1919,66 @@ class PolymerDatabaseManager:
         
         return df
 
+    def update_existing_entries(self, database_path: str, update_unknowns: bool = True,
+                              update_iupac: bool = True, update_poly_inputs: bool = False) -> pd.DataFrame:
+        """
+        Update existing database entries without adding new ones
+        Useful for fixing unknowns in existing databases
+        """
+        if self.verbose:
+            logger.info(f"Updating existing entries in: {database_path}")
+        
+        df = pd.read_csv(database_path)
+        updates_made = 0
+        
+        # Update unknown polymer types and compositions
+        if update_unknowns:
+            initial_unknowns = (df['poly_type'] == 'unknown').sum() + (df['comp'] == 'unknown').sum()
+            df = self._fix_unknown_values(df)
+            final_unknowns = (df['poly_type'] == 'unknown').sum() + (df['comp'] == 'unknown').sum()
+            updates_made += initial_unknowns - final_unknowns
+        
+        # Update IUPAC names
+        if update_iupac:
+            for col in ['monoA_IUPAC', 'monoB_IUPAC']:
+                if col in df.columns:
+                    invalid_count = df[col].isin(['Invalid_SMILES', 'Unknown_compound']).sum()
+                    if invalid_count > 0:
+                        smiles_col = col.replace('_IUPAC', '')
+                        if smiles_col in df.columns:
+                            df[col] = df[smiles_col].apply(self.get_iupac_name)
+                            new_invalid = df[col].isin(['Invalid_SMILES', 'Unknown_compound']).sum()
+                            updates_made += invalid_count - new_invalid
+        
+        # Update poly_chemprop_inputs if requested (careful - can change results)
+        if update_poly_inputs and all(col in df.columns for col in ['monoA', 'monoB', 'poly_type', 'fracA']):
+            if self.verbose:
+                logger.warning("Updating poly_chemprop_inputs - this may change model inputs!")
+            
+            df['poly_chemprop_input'] = [
+                self.make_poly_chemprop_input(sA, sB, t, fA, selfedges=True)
+                for sA, sB, t, fA in zip(
+                    df['monoA'], df['monoB'], 
+                    df['poly_type'], df['fracA']
+                )
+            ]
+            updates_made += len(df)
+        
+        # Save updated database
+        df.to_csv(database_path, index=False)
+        
+        if self.verbose:
+            logger.info(f"Updated {updates_made} entries in the database")
+            logger.info(f"Database saved to: {database_path}")
+        
+        return df
+
 # ========================
 # Additional Utility Functions
 # ========================
 
-def cleanup_database(input_path: str, output_path: str, verbose: bool = True) -> pd.DataFrame:
+def cleanup_database(input_path: str, output_path: str, verbose: bool = True,
+                    fix_unknowns: bool = True) -> pd.DataFrame:
     """
     Standalone function to clean up an existing polymer database
     
@@ -1716,12 +1986,13 @@ def cleanup_database(input_path: str, output_path: str, verbose: bool = True) ->
         input_path: Path to existing database CSV
         output_path: Path to save cleaned database
         verbose: Whether to show detailed output
+        fix_unknowns: Whether to fix unknown values
         
     Returns:
         Cleaned DataFrame
     """
-    manager = PolymerDatabaseManager(verbose=verbose)
-    return manager.cleanup_existing_database(input_path, output_path)
+    manager = PolymerDatabaseManager(verbose=verbose, fix_unknowns=fix_unknowns)
+    return manager.cleanup_existing_database(input_path, output_path, fix_unknowns=fix_unknowns)
 
 def fix_database_consistency(database_path: str, backup: bool = True) -> str:
     """
@@ -1744,33 +2015,79 @@ def fix_database_consistency(database_path: str, backup: bool = True) -> str:
         print(f"Created backup: {backup_path}")
     
     # Clean the database
-    manager = PolymerDatabaseManager(verbose=True)
-    cleaned_df = manager.cleanup_existing_database(database_path, database_path)
+    manager = PolymerDatabaseManager(verbose=True, fix_unknowns=True)
+    cleaned_df = manager.cleanup_existing_database(database_path, database_path, fix_unknowns=True)
     
     print(f"Fixed database saved to: {database_path}")
     return database_path
 
+def merge_databases(database_paths: List[str], output_path: str, 
+                   remove_duplicates: bool = True) -> pd.DataFrame:
+    """
+    Merge multiple polymer databases into one
+    
+    Args:
+        database_paths: List of paths to databases to merge
+        output_path: Path to save merged database
+        remove_duplicates: Whether to remove duplicate entries
+        
+    Returns:
+        Merged DataFrame
+    """
+    manager = PolymerDatabaseManager(verbose=True, fix_unknowns=True)
+    
+    all_dfs = []
+    for path in database_paths:
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            print(f"Loaded {len(df)} rows from {path}")
+            all_dfs.append(df)
+        else:
+            print(f"Warning: File not found: {path}")
+    
+    if not all_dfs:
+        raise ValueError("No valid databases found to merge")
+    
+    # Combine all dataframes
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    print(f"Combined dataset has {len(combined_df)} rows")
+    
+    # Remove duplicates based on poly_chemprop_input
+    if remove_duplicates and 'poly_chemprop_input' in combined_df.columns:
+        original_count = len(combined_df)
+        combined_df = combined_df.drop_duplicates(subset=['poly_chemprop_input'], keep='first')
+        print(f"Removed {original_count - len(combined_df)} duplicate entries")
+    
+    # Fix any unknown values
+    combined_df = manager._fix_unknown_values(combined_df)
+    
+    # Save merged database
+    combined_df.to_csv(output_path, index=False)
+    print(f"Merged database saved to: {output_path}")
+    
+    return combined_df
+
 # ========================
-# Convenience Functions - NO HARDCODING
+# Convenience Functions
 # ========================
 
-def create_database_manager(template_path: str = None, clean_template: bool = True) -> PolymerDatabaseManager:
+def create_database_manager(template_path: str = None, clean_template: bool = True,
+                          fix_unknowns: bool = True) -> PolymerDatabaseManager:
     """Create a new database manager instance"""
-    return PolymerDatabaseManager(template_path, clean_template=clean_template)
+    return PolymerDatabaseManager(template_path, clean_template=clean_template, fix_unknowns=fix_unknowns)
 
 def quick_process_dataset(input_path: str, output_path: str, template_path: str = None,
                          expand_variants: bool = True, interactive: bool = True,
                          poly_types: List[str] = None, compositions: List[str] = None,
-                         clean_template: bool = True) -> pd.DataFrame:
+                         clean_template: bool = True, fix_unknowns: bool = True) -> pd.DataFrame:
     """
     Quick function to process a dataset with minimal setup
-    FLEXIBLE: Can override all default behaviors
     """
-    manager = PolymerDatabaseManager(template_path, clean_template=clean_template)
-    return manager.quick_process(input_path, output_path, expand_variants, interactive, poly_types, compositions)
+    manager = PolymerDatabaseManager(template_path, clean_template=clean_template, fix_unknowns=fix_unknowns)
+    return manager.quick_process(input_path, output_path, expand_variants, interactive, poly_types, compositions, fix_unknowns)
 
 # ========================
-# Configuration Updates - RUNTIME FLEXIBILITY
+# Configuration Updates
 # ========================
 
 def update_default_polymer_configs(manager: PolymerDatabaseManager, 
@@ -1779,7 +2096,6 @@ def update_default_polymer_configs(manager: PolymerDatabaseManager,
                                  comp_fracs: Dict[str, Tuple[float, float]] = None):
     """
     Update default polymer configurations at runtime
-    FLEXIBLE: No need to hardcode anything
     """
     if poly_types is not None:
         manager.default_poly_types = poly_types
@@ -1794,12 +2110,12 @@ def update_default_polymer_configs(manager: PolymerDatabaseManager,
 
 def main():
     """
-    Command line interface for the Polymer Database Manager
+    Enhanced command line interface for the Polymer Database Manager
     """
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Polymer Database Manager - Process polymer datasets with ChemProp input generation',
+        description='Enhanced Polymer Database Manager - Process polymer datasets with ChemProp input generation',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1817,6 +2133,12 @@ Examples:
   
   # Clean up existing database for consistency
   !python data_processing/polymer_database_manager.py --cleanup input_db.csv -o cleaned_db.csv
+  
+  # Fix unknown values in existing database
+  !python data_processing/polymer_database_manager.py --fix-unknowns database.csv
+  
+  # Merge multiple databases
+  !python data_processing/polymer_database_manager.py --merge db1.csv db2.csv db3.csv -o merged.csv
   
   # Custom polymer types and compositions
   !python data_processing/polymer_database_manager.py -i data.csv -o output.csv --poly-types alternating block --compositions 4A_4B 6A_2B
@@ -1839,9 +2161,13 @@ Examples:
     parser.add_argument('-t', '--template',
                        help='Existing template CSV file path to append to')
     
-    # Cleanup mode
+    # Special modes
     parser.add_argument('--cleanup', action='store_true',
                        help='Clean up existing database for consistency (use with -i for input database)')
+    parser.add_argument('--fix-unknowns', action='store_true',
+                       help='Fix unknown values in existing database (use with -i)')
+    parser.add_argument('--merge', nargs='+', metavar='DB',
+                       help='Merge multiple databases into one')
     
     # Processing options
     parser.add_argument('--no-expand', action='store_true',
@@ -1849,7 +2175,9 @@ Examples:
     parser.add_argument('--no-iupac', action='store_true',
                        help='Do not generate IUPAC names')
     parser.add_argument('--no-clean-poly', action='store_true',
-                       help='Do not clean poly_chemprop_input in input data and template (keep trailing property values)')
+                       help='Do not clean poly_chemprop_input in input data and template')
+    parser.add_argument('--no-fix-unknowns', action='store_true',
+                       help='Do not attempt to fix unknown values')
     parser.add_argument('--non-interactive', action='store_true',
                        help='Use non-interactive mode (auto-detect all numeric columns)')
     parser.add_argument('--verbose', '-v', action='store_true', default=True,
@@ -1863,7 +2191,7 @@ Examples:
     parser.add_argument('--target-names', nargs='+',
                        help='New names for target columns (must match --target-columns length)')
     
-    # ✅ NEW: More flexible exclusion options
+    # Column management
     parser.add_argument('--exclude-columns', nargs='+',
                        help='Specific column names to exclude from auto-detection')
     parser.add_argument('--exclude-patterns', nargs='+',
@@ -1890,9 +2218,26 @@ Examples:
     # Information options
     parser.add_argument('--list-columns', action='store_true',
                        help='List all columns in the input file and potential targets, then exit')
+    parser.add_argument('--check-unknowns', action='store_true',
+                       help='Check for unknown values in the database and report statistics')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     
     args = parser.parse_args()
+    
+    # Handle merge mode
+    if args.merge:
+        if not args.output:
+            print("Error: --output is required for merge mode")
+            return 1
+        
+        try:
+            merged_df = merge_databases(args.merge, args.output, remove_duplicates=True)
+            print(f"✓ Databases merged successfully!")
+            print(f"✓ Merged database saved to: {args.output}")
+            return 0
+        except Exception as e:
+            print(f"Error during merge: {e}")
+            return 1
     
     # Handle cleanup mode
     if args.cleanup:
@@ -1901,12 +2246,31 @@ Examples:
             return 1
         
         try:
-            cleaned_df = cleanup_database(args.input, args.output, verbose=not args.quiet)
+            cleaned_df = cleanup_database(args.input, args.output, 
+                                        verbose=not args.quiet, 
+                                        fix_unknowns=not args.no_fix_unknowns)
             print(f"✓ Database cleanup completed!")
             print(f"✓ Cleaned database saved to: {args.output}")
             return 0
         except Exception as e:
             print(f"Error during cleanup: {e}")
+            return 1
+    
+    # Handle fix-unknowns mode
+    if args.fix_unknowns:
+        if not args.input:
+            print("Error: --fix-unknowns requires --input to specify the database")
+            return 1
+        
+        try:
+            manager = PolymerDatabaseManager(verbose=not args.quiet, fix_unknowns=True)
+            df = manager.update_existing_entries(args.input, update_unknowns=True, 
+                                               update_iupac=True, update_poly_inputs=False)
+            print(f"✓ Unknown values fixed!")
+            print(f"✓ Updated database saved to: {args.input}")
+            return 0
+        except Exception as e:
+            print(f"Error fixing unknowns: {e}")
             return 1
     
     # Regular processing mode requires input
@@ -1937,12 +2301,39 @@ Examples:
         print(f"Error: Input file not found: {args.input}")
         return 1
     
+    # Check unknowns mode
+    if args.check_unknowns:
+        try:
+            df = pd.read_csv(args.input)
+            unknown_stats = {}
+            
+            if 'poly_type' in df.columns:
+                unknown_stats['poly_type'] = (df['poly_type'] == 'unknown').sum()
+            if 'comp' in df.columns:
+                unknown_stats['comp'] = (df['comp'] == 'unknown').sum()
+            if 'monoA_IUPAC' in df.columns:
+                unknown_stats['monoA_IUPAC'] = df['monoA_IUPAC'].isin(['Invalid_SMILES', 'Unknown_compound']).sum()
+            if 'monoB_IUPAC' in df.columns:
+                unknown_stats['monoB_IUPAC'] = df['monoB_IUPAC'].isin(['Invalid_SMILES', 'Unknown_compound']).sum()
+            
+            print(f"Unknown values in {args.input}:")
+            print("-" * 50)
+            total_unknowns = 0
+            for col, count in unknown_stats.items():
+                print(f"{col}: {count} unknown values ({count/len(df)*100:.1f}%)")
+                total_unknowns += count
+            print(f"\nTotal unknown values: {total_unknowns}")
+            print(f"Affected rows: {len(df[df[list(unknown_stats.keys())].isin(['unknown', 'Unknown_compound', 'Invalid_SMILES']).any(axis=1)])}")
+            return 0
+        except Exception as e:
+            print(f"Error checking unknowns: {e}")
+            return 1
+    
     # List columns mode
     if args.list_columns:
         try:
             df = pd.read_csv(args.input)
             manager = PolymerDatabaseManager(verbose=False)
-            # ✅ NEW: Flexible exclusion handling
             exclude_patterns = args.exclude_patterns if hasattr(args, 'exclude_patterns') else None
             potential_targets = manager.detect_target_columns(
                 df, 
@@ -1955,9 +2346,12 @@ Examples:
             for i, col in enumerate(df.columns):
                 col_type = str(df[col].dtype)
                 is_target = " (potential target)" if col in potential_targets else ""
-                print(f"{i+1:2d}. {col:<25} ({col_type}){is_target}")
+                non_null = df[col].notna().sum()
+                null_pct = (1 - non_null/len(df)) * 100
+                print(f"{i+1:2d}. {col:<25} ({col_type}) [{non_null}/{len(df)} non-null, {null_pct:.1f}% null]{is_target}")
             
             print(f"\nAuto-detected target columns: {potential_targets}")
+            print(f"\nDataset shape: {df.shape}")
             return 0
         except Exception as e:
             print(f"Error reading file: {e}")
@@ -1979,11 +2373,16 @@ Examples:
     try:
         # Initialize manager
         if args.verbose:
-            print(f"Initializing Polymer Database Manager...")
+            print(f"Initializing Enhanced Polymer Database Manager...")
             if args.template:
                 print(f"Using template: {args.template}")
         
-        manager = PolymerDatabaseManager(template_path=args.template, verbose=args.verbose, clean_template=not args.no_clean_poly)
+        manager = PolymerDatabaseManager(
+            template_path=args.template, 
+            verbose=args.verbose, 
+            clean_template=not args.no_clean_poly,
+            fix_unknowns=not args.no_fix_unknowns
+        )
         
         # Update configurations if provided
         if args.poly_types != ['alternating', 'block', 'random']:
@@ -2020,13 +2419,14 @@ Examples:
             interactive=not args.non_interactive,
             target_columns=target_columns,
             column_mapping=column_mapping,
-            exclude_columns=args.exclude_columns,  # ✅ NEW: Pass exclude_columns
-            clean_poly_inputs=not args.no_clean_poly,  # ✅ NEW: Clean poly inputs by default
+            exclude_columns=args.exclude_columns,
+            clean_poly_inputs=not args.no_clean_poly,
+            fix_existing_unknowns=not args.no_fix_unknowns,
             poly_types=args.poly_types if args.poly_types != ['alternating', 'block', 'random'] else None,
             compositions=args.compositions if args.compositions != ['4A_4B', '6A_2B', '2A_6B'] else None
         )
         
-        # ✅ NEW: Use stored exclude_columns when appending
+        # Use stored exclude_columns when appending
         exclude_cols = getattr(manager, '_exclude_columns', [])
         combined_df = manager.append_to_template(processed_df, output_path, exclude_columns=exclude_cols)
                 
@@ -2043,6 +2443,16 @@ Examples:
                                         'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input', 'poly_chemprop_input']]
             if target_cols:
                 print(f"✓ Target properties: {target_cols}")
+            
+            # Report on unknown values if any
+            unknown_count = 0
+            if 'poly_type' in combined_df.columns:
+                unknown_count += (combined_df['poly_type'] == 'unknown').sum()
+            if 'comp' in combined_df.columns:
+                unknown_count += (combined_df['comp'] == 'unknown').sum()
+            
+            if unknown_count > 0:
+                print(f"\n⚠ Note: {unknown_count} unknown values remain. Use --fix-unknowns to resolve.")
         
         return 0
         
@@ -2057,7 +2467,7 @@ def run_interactive_mode():
     """
     Interactive mode for Jupyter/Colab environments
     """
-    print("Polymer Database Manager - Interactive Mode")
+    print("Enhanced Polymer Database Manager - Interactive Mode")
     print("=" * 50)
     
     # Get input file
@@ -2084,17 +2494,21 @@ def run_interactive_mode():
     generate_iupac = input("Generate IUPAC names? (y/n, default: y): ").strip().lower()
     generate_iupac = generate_iupac != 'n'
     
+    fix_unknowns = input("Fix unknown values? (y/n, default: y): ").strip().lower()
+    fix_unknowns = fix_unknowns != 'n'
+    
     interactive = input("Use interactive column selection? (y/n, default: y): ").strip().lower()
     interactive = interactive != 'n'
     
     # Initialize and process
-    manager = PolymerDatabaseManager(template_path=template_file, verbose=True)
+    manager = PolymerDatabaseManager(template_path=template_file, verbose=True, fix_unknowns=fix_unknowns)
     
     processed_df = manager.process_new_dataset(
         input_path=input_file,
         expand_variants=expand_variants,
         generate_iupac=generate_iupac,
-        interactive=interactive
+        interactive=interactive,
+        fix_existing_unknowns=fix_unknowns
     )
     
     combined_df = manager.append_to_template(processed_df, output_file)
@@ -2103,11 +2517,24 @@ def run_interactive_mode():
     print(f"✓ Output saved to: {output_file}")
     print(f"✓ Final database: {len(combined_df)} rows")
     
+    # Report unknown values
+    unknown_stats = {}
+    if 'poly_type' in combined_df.columns:
+        unknown_stats['poly_type'] = (combined_df['poly_type'] == 'unknown').sum()
+    if 'comp' in combined_df.columns:
+        unknown_stats['comp'] = (combined_df['comp'] == 'unknown').sum()
+    
+    if any(unknown_stats.values()):
+        print("\nUnknown values remaining:")
+        for col, count in unknown_stats.items():
+            if count > 0:
+                print(f"  {col}: {count} unknowns")
+    
     return combined_df
 
 # Version info
-__version__ = "1.0.0"
-__author__ = "Polymer Database Toolkit"
+__version__ = "2.0.0"
+__author__ = "Enhanced Polymer Database Toolkit"
 
 if __name__ == "__main__":
     sys.exit(main())

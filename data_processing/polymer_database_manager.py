@@ -1832,7 +1832,7 @@ class PolymerDatabaseManager:
             poly_input = f"{can_mona}.{can_monb}|{stoich}|{edges}"
             
             # Basic validation
-            if not poly_input or poly_input.count('|') != 2:
+            if not poly_input or poly_input.count('|') != 3:
                 if self.verbose:
                     logger.debug(f"Invalid poly_chemprop_input format: {poly_input}")
                 return None

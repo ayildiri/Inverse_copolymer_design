@@ -33,6 +33,7 @@ import numpy as np
 import warnings
 import re
 import logging
+import shutil  # Added missing import
 from typing import List, Tuple, Optional, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
@@ -642,12 +643,14 @@ class PolymerDatabaseManager:
         grouped = df.groupby('poly_chemprop_input')
         
         # Extended list of identifier/metadata columns that should not be averaged
+        # FIXED: Added missing metadata columns
         identifier_columns = {
             'poly_id', 'poly_type', 'comp', 'monoA', 'monoB', 
             'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input',
             'fracA', 'fracB', 'polymer_ID', 'monomer_ID', 'id', 'ID',
             'polymer_class', 'source', 'reference', 'notes', 'comments',
-            'tacticity', 'polymer_name', 'name', 'Name'
+            'tacticity', 'polymer_name', 'name', 'Name',
+            'temp', 'press', 'DP', 'Mn', 'mol_weight_monomer'  # Added missing metadata columns
         }
         
         # Define aggregation functions based on strategy
@@ -922,6 +925,7 @@ class PolymerDatabaseManager:
                 
             # Ensure aromatic atoms have proper valence before canonicalization
             try:
+                # FIXED: Added try-except around SanitizeMol
                 Chem.SanitizeMol(mol)
                 canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
                 
@@ -929,13 +933,13 @@ class PolymerDatabaseManager:
                 canonical_smiles = self._standardize_attachment_points(canonical_smiles)
                 
                 return canonical_smiles
-            except:
+            except Exception as e:
                 # If sanitization fails, try to fix the structure
-                for atom in mol.GetAtoms():
-                    if atom.GetIsAromatic():
-                        atom.SetNumExplicitHs(0)
-                        atom.SetNoImplicit(False)
                 try:
+                    for atom in mol.GetAtoms():
+                        if atom.GetIsAromatic():
+                            atom.SetNumExplicitHs(0)
+                            atom.SetNoImplicit(False)
                     Chem.SanitizeMol(mol)
                     canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
                     canonical_smiles = self._standardize_attachment_points(canonical_smiles)
@@ -1693,7 +1697,14 @@ class PolymerDatabaseManager:
                 weights = (fracA, fracB)
                 edges = self.create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points, weights)
 
-            return f"{can_mona}.{can_monb}|{stoich}|{edges}"
+            # FIXED: Validate the generated poly_chemprop_input
+            poly_input = f"{can_mona}.{can_monb}|{stoich}|{edges}"
+            
+            # Basic validation
+            if not poly_input or poly_input.count('|') != 2:
+                return None
+                
+            return poly_input
             
         except Exception as e:
             if self.verbose:
@@ -1715,7 +1726,9 @@ class PolymerDatabaseManager:
             
             # Split by first pipe to get monomers part
             parts = poly_input.split('|')
-            if len(parts) < 1:
+            
+            # FIXED: Check if parts is empty
+            if not parts or len(parts) < 1:
                 return None, None
             
             monomers_part = parts[0]
@@ -1807,37 +1820,44 @@ class PolymerDatabaseManager:
         
         fixed_count = 0
         
+        # FIXED: Use vectorized operations for better performance
         # Fix poly_type
         if 'poly_type' in df.columns and 'poly_chemprop_input' in df.columns:
             unknown_mask = df['poly_type'].isin(['unknown', 'Unknown', None, '']) | df['poly_type'].isna()
             
-            for idx in df[unknown_mask].index:
-                poly_input = df.loc[idx, 'poly_chemprop_input']
-                if pd.notna(poly_input):
-                    # Extract connectivity pattern
-                    parts = str(poly_input).split('|')
-                    if len(parts) >= 3:
-                        connectivity = parts[2]
-                        detected_type = self._detect_polymer_type_from_connectivity(connectivity)
-                        if detected_type != "unknown":
-                            df.loc[idx, 'poly_type'] = detected_type
-                            fixed_count += 1
+            if unknown_mask.any():
+                # Vectorized extraction of connectivity patterns
+                def extract_and_detect_poly_type(poly_input):
+                    if pd.notna(poly_input):
+                        parts = str(poly_input).split('|')
+                        if len(parts) >= 3:
+                            connectivity = parts[2]
+                            return self._detect_polymer_type_from_connectivity(connectivity)
+                    return "unknown"
+                
+                detected_types = df.loc[unknown_mask, 'poly_chemprop_input'].apply(extract_and_detect_poly_type)
+                fixed_mask = detected_types != "unknown"
+                df.loc[unknown_mask & fixed_mask, 'poly_type'] = detected_types[fixed_mask]
+                fixed_count += fixed_mask.sum()
         
         # Fix comp
         if 'comp' in df.columns and 'poly_chemprop_input' in df.columns:
             unknown_mask = df['comp'].isin(['unknown', 'Unknown', None, '']) | df['comp'].isna()
             
-            for idx in df[unknown_mask].index:
-                poly_input = df.loc[idx, 'poly_chemprop_input']
-                if pd.notna(poly_input):
-                    # Extract stoichiometry
-                    parts = str(poly_input).split('|')
-                    if len(parts) >= 2:
-                        stoich = parts[1]
-                        detected_comp = self._detect_composition_from_stoichiometry(stoich)
-                        if detected_comp != "unknown":
-                            df.loc[idx, 'comp'] = detected_comp
-                            fixed_count += 1
+            if unknown_mask.any():
+                # Vectorized extraction of stoichiometry
+                def extract_and_detect_comp(poly_input):
+                    if pd.notna(poly_input):
+                        parts = str(poly_input).split('|')
+                        if len(parts) >= 2:
+                            stoich = parts[1]
+                            return self._detect_composition_from_stoichiometry(stoich)
+                    return "unknown"
+                
+                detected_comps = df.loc[unknown_mask, 'poly_chemprop_input'].apply(extract_and_detect_comp)
+                fixed_mask = detected_comps != "unknown"
+                df.loc[unknown_mask & fixed_mask, 'comp'] = detected_comps[fixed_mask]
+                fixed_count += fixed_mask.sum()
         
         # Fix IUPAC names
         for col in ['monoA_IUPAC', 'monoB_IUPAC']:
@@ -1846,13 +1866,19 @@ class PolymerDatabaseManager:
                 if smiles_col in df.columns:
                     invalid_mask = df[col].isin(['Invalid_SMILES', 'Unknown_compound', None, '']) | df[col].isna()
                     
-                    for idx in df[invalid_mask].index:
-                        smiles = df.loc[idx, smiles_col]
-                        if pd.notna(smiles):
-                            iupac = self.get_iupac_name(smiles)
-                            if iupac not in ['Invalid_SMILES', 'Unknown_compound']:
-                                df.loc[idx, col] = iupac
-                                fixed_count += 1
+                    if invalid_mask.any():
+                        # Process in batches for better performance
+                        batch_size = 1000
+                        indices = df[invalid_mask].index
+                        
+                        for i in range(0, len(indices), batch_size):
+                            batch_indices = indices[i:i+batch_size]
+                            batch_smiles = df.loc[batch_indices, smiles_col]
+                            batch_iupac = batch_smiles.apply(self.get_iupac_name)
+                            
+                            valid_iupac = ~batch_iupac.isin(['Invalid_SMILES', 'Unknown_compound'])
+                            df.loc[batch_indices[valid_iupac], col] = batch_iupac[valid_iupac]
+                            fixed_count += valid_iupac.sum()
         
         if self.verbose and fixed_count > 0:
             logger.info(f"Fixed {fixed_count} unknown values in the dataset")
@@ -1903,7 +1929,7 @@ class PolymerDatabaseManager:
         
         # Generate IDs for each row (not just unique pairs)
         for idx in range(len(df)):
-            poly_ids.append(str(current_id))
+            poly_ids.append(str(current_id))  # FIXED: Always return strings
             current_id += 1
         
         if self.verbose:
@@ -2254,13 +2280,16 @@ class PolymerDatabaseManager:
                 clean_poly_inputs=clean_poly_inputs, fix_existing_unknowns=fix_existing_unknowns
             )
         
-        # Standardize column names
+        # Standardize column names  
+        # FIXED: Handle inconsistent column name handling
         column_mapping_standard = {
             'smiles': 'monoA',
             'MonA': 'monoA',
             'MonB': 'monoB',
             'SMILES': 'monoA',
-            'Smiles': 'monoA'
+            'Smiles': 'monoA',
+            'monA': 'monoA',  # Added
+            'monB': 'monoB'   # Added
         }
         
         for old_name, new_name in column_mapping_standard.items():
@@ -2415,6 +2444,7 @@ class PolymerDatabaseManager:
         if exclude_columns is None:
             exclude_columns = []
         
+        # FIXED: Corrected the indentation logic
         if self.template_df is None:
             combined_df = new_df.copy()
         else:
@@ -2425,42 +2455,42 @@ class PolymerDatabaseManager:
                 
                 # Regenerate IDs for new_df to continue from template's highest ID
                 new_df['poly_id'] = self.generate_poly_ids(new_df, existing_ids)
-                
-                # Align columns - preserves ALL columns from both datasets
-                all_columns = list(set(self.template_df.columns) | set(new_df.columns))
-                
-                # Add missing columns to both dataframes
-                for col in all_columns:
-                    if col not in self.template_df.columns:
-                        self.template_df[col] = None
-                    if col not in new_df.columns:
-                        new_df[col] = None
-                
-                # Order columns nicely
-                combined_df = pd.concat([self.template_df, new_df], ignore_index=True)
-                combined_df = self._order_columns(combined_df)
             
-            # Remove unwanted columns from final output
-            if exclude_columns:
-                columns_to_remove = [col for col in exclude_columns if col in combined_df.columns]
-                if columns_to_remove:
-                    combined_df = combined_df.drop(columns=columns_to_remove)
-                    if self.verbose:
-                        logger.info(f"Removed unwanted columns: {columns_to_remove}")
+            # Align columns - preserves ALL columns from both datasets
+            all_columns = list(set(self.template_df.columns) | set(new_df.columns))
             
-            # Fix any unknown values in the combined dataset
-            if self.fix_unknowns:
-                combined_df = self._fix_unknown_values(combined_df)
+            # Add missing columns to both dataframes
+            for col in all_columns:
+                if col not in self.template_df.columns:
+                    self.template_df[col] = None
+                if col not in new_df.columns:
+                    new_df[col] = None
             
-            if output_path:
-                combined_df.to_csv(output_path, index=False)
+            # Order columns nicely
+            combined_df = pd.concat([self.template_df, new_df], ignore_index=True)
+            combined_df = self._order_columns(combined_df)
+        
+        # Remove unwanted columns from final output
+        if exclude_columns:
+            columns_to_remove = [col for col in exclude_columns if col in combined_df.columns]
+            if columns_to_remove:
+                combined_df = combined_df.drop(columns=columns_to_remove)
                 if self.verbose:
-                    logger.info(f"Saved combined dataset to {output_path}")
-            
+                    logger.info(f"Removed unwanted columns: {columns_to_remove}")
+        
+        # Fix any unknown values in the combined dataset
+        if self.fix_unknowns:
+            combined_df = self._fix_unknown_values(combined_df)
+        
+        if output_path:
+            combined_df.to_csv(output_path, index=False)
             if self.verbose:
-                logger.info(f"Combined dataset has {len(combined_df)} rows and {len(combined_df.columns)} columns")
-            
-            return combined_df
+                logger.info(f"Saved combined dataset to {output_path}")
+        
+        if self.verbose:
+            logger.info(f"Combined dataset has {len(combined_df)} rows and {len(combined_df.columns)} columns")
+        
+        return combined_df
 
     # ========================
     # Convenience Methods
@@ -2676,7 +2706,6 @@ def fix_database_consistency(database_path: str, backup: bool = True) -> str:
     Returns:
         Path to the fixed database
     """
-    import shutil
     from datetime import datetime
     
     if backup:

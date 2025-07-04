@@ -421,6 +421,24 @@ class PolymerDatabaseManager:
                 if re.search(pattern, connectivity):
                     return poly_type
         
+        # Additional heuristic detection based on edge types
+        edges = re.findall(r'<(\d+)-(\d+):', connectivity)
+        if edges:
+            # Count self-edges (like 1-1, 2-2, etc.)
+            self_edges = sum(1 for e1, e2 in edges if e1 == e2)
+            total_edges = len(edges)
+            
+            # If only cross-monomer edges (no self-edges), likely alternating
+            if self_edges == 0 and total_edges == 4:
+                return "alternating"
+            # If high proportion of self-edges, likely block or random
+            elif self_edges >= 4:
+                # Check if it has all possible edges (random) or just some (block)
+                if total_edges >= 10:
+                    return "random"
+                else:
+                    return "block"
+        
         return "unknown"
     
     def _detect_comp_from_poly_input(self, poly_input: str) -> str:
@@ -1227,7 +1245,13 @@ class PolymerDatabaseManager:
             clean_smiles = re.sub(r'\[\*\]', '', clean_smiles)
             clean_smiles = re.sub(r'\*', '', clean_smiles)
             
-            if not clean_smiles:
+            # Fix incomplete stereochemistry
+            clean_smiles = re.sub(r'/C\(=C\\', 'C(=C', clean_smiles)
+            clean_smiles = re.sub(r'\\C\(=C/', 'C(=C', clean_smiles)
+            clean_smiles = re.sub(r'/$', '', clean_smiles)
+            clean_smiles = re.sub(r'\\$', '', clean_smiles)
+            
+            if not clean_smiles or clean_smiles.strip() == '':
                 return "Unknown_compound"
             
             mol = Chem.MolFromSmiles(clean_smiles)
@@ -1842,12 +1866,14 @@ class PolymerDatabaseManager:
             existing_ids = set()
         
         # Parse existing IDs to find the highest number and detect naming pattern
-        max_id = -1
+        max_id = 0  # Start from 0 instead of -1
         id_prefix = ""
         id_format = "numeric"  # Default format
         
         if existing_ids:
             for existing_id in existing_ids:
+                # Convert to string to handle numeric IDs
+                existing_id = str(existing_id)
                 try:
                     # Handle different ID formats
                     if existing_id.startswith('p_'):

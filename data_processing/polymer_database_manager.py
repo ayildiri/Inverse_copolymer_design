@@ -933,9 +933,13 @@ class PolymerDatabaseManager:
     # Enhanced Chemical Processing (inherited from previous version)
     # ========================
     
-    def canonicalize_smiles(self, smiles: str) -> Optional[str]:
+    def canonicalize_smiles(self, smiles: str, verbose_conversion: bool = False) -> Optional[str]:
         """
         Enhanced canonicalize SMILES with better error handling and repair
+        
+        Args:
+            smiles: SMILES string to canonicalize
+            verbose_conversion: Whether to log bare asterisk conversions (default: False for bulk operations)
         """
         try:
             # Pre-filter obviously invalid patterns
@@ -961,14 +965,28 @@ class PolymerDatabaseManager:
             # Handle different attachment point formats
             numbered_smiles = smiles
             
+            # ENHANCED: Handle bare asterisks - convert ALL of them to numbered format
+            if '*' in numbered_smiles and '[*:' not in numbered_smiles:
+                # Count bare asterisks (not inside brackets)
+                import re
+                bare_asterisks = re.findall(r'(?<!\[)\*(?![:\]])', numbered_smiles)
+                
+                # Replace each bare asterisk with numbered attachment point
+                counter = 1
+                while True:
+                    # Find next bare asterisk
+                    match = re.search(r'(?<!\[)\*(?![:\]])', numbered_smiles)
+                    if not match:
+                        break
+                    # Replace it with numbered attachment point
+                    numbered_smiles = numbered_smiles[:match.start()] + f'[*:{counter}]' + numbered_smiles[match.end():]
+                    counter += 1
+            
             # Convert [*] to [*:1], [*:2] etc.
             counter = 1
             while '[*]' in numbered_smiles:
                 numbered_smiles = numbered_smiles.replace('[*]', f'[*:{counter}]', 1)
                 counter += 1
-            
-            # Clean up any malformed attachment points
-            numbered_smiles = re.sub(r'\*([^:\[])', r'[*:1]\1', numbered_smiles)  # Handle bare *
             
             # Try original first, then attempt repair if needed
             mol = Chem.MolFromSmiles(numbered_smiles)
@@ -1622,7 +1640,9 @@ class PolymerDatabaseManager:
         if not attachment_points:
             return monomer_smiles, monomer_smiles
         
-        # For the second unit, shift attachment points by largest number
+        # For homopolymers, we need different numbering for the two units
+        # First unit keeps original numbering (e.g., 1, 2)
+        # Second unit gets offset numbering (e.g., 3, 4)
         max_point = max(attachment_points)
         monb_smiles = monomer_smiles
         
@@ -1698,7 +1718,7 @@ class PolymerDatabaseManager:
         Create properly formatted poly_chemprop_input string with chemical validity checks
         """
         try:
-            # Canonicalize monomers
+            # Canonicalize monomers (this will convert bare * to [*:n])
             can_mona = self.canonicalize_smiles(mona)
             is_homopolymer = (monb == mona)
 
@@ -1710,8 +1730,25 @@ class PolymerDatabaseManager:
             if can_mona is None or can_monb is None:
                 return None
 
+            # Check if monomers already have attachment points
+            has_attachment_a = '[*:' in can_mona
+            has_attachment_b = '[*:' in can_monb
+            
+            # If both already have attachment points, use them directly
+            if has_attachment_a and has_attachment_b:
+                # Ensure proper numbering for homopolymers
+                if is_homopolymer:
+                    # Renumber second monomer attachment points
+                    mona_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_mona)])
+                    if mona_points:
+                        max_point = max(mona_points)
+                        temp_monb = can_monb
+                        for point in sorted(mona_points, reverse=True):
+                            temp_monb = temp_monb.replace(f'[*:{point}]', f'[*:{point + max_point}]')
+                        can_monb = temp_monb
+                        
             # For traditional polymer processing (BOO/Br system), process attachment points
-            if '[*:' not in can_mona and '[*:' not in can_monb:
+            elif '[*:' not in can_mona and '[*:' not in can_monb:
                 # Process using original termini removal system
                 mA = Chem.MolFromSmiles(mona)
                 mB = Chem.MolFromSmiles(monb)
@@ -2395,9 +2432,26 @@ class PolymerDatabaseManager:
         # Temporarily suppress RDKit errors during bulk canonicalization
         self.set_rdkit_verbosity(False)
         
-        new_df['monoA'] = new_df['monoA'].apply(
+        # Keep track of conversion count for summary
+        conversion_count = 0
+        processed_count = 0
+        
+        canonicalized = new_df['monoA'].apply(
             lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else x
         )
+        
+        # Count bare asterisk conversions
+        if self.verbose:
+            for orig, canon in zip(new_df['monoA'], canonicalized):
+                if pd.notna(orig) and pd.notna(canon):
+                    processed_count += 1
+                    if '*' in str(orig) and '[*:' not in str(orig) and '[*:' in str(canon):
+                        conversion_count += 1
+            
+            if conversion_count > 0:
+                logger.info(f"Converted {conversion_count} monomers with bare asterisk (*) attachment points")
+        
+        new_df['monoA'] = canonicalized
         
         # Re-enable if verbose mode
         if self.verbose:
@@ -2761,9 +2815,80 @@ class PolymerDatabaseManager:
         
         return df
 
+    def test_bare_asterisk_conversion(self, test_smiles: List[str] = None):
+        """
+        Test conversion of bare asterisk attachment points
+        
+        Args:
+            test_smiles: List of SMILES to test, or uses default examples
+        """
+        if test_smiles is None:
+            test_smiles = [
+                "*C(C*)C(c1ccccc1)C",
+                "*C1CC(CC1)C*",
+                "*C(C*)CCCCCC",
+                "C(C)(C)c1ccc(*)cc1*"
+            ]
+        
+        print("Testing bare asterisk conversion:")
+        print("-" * 60)
+        
+        for smiles in test_smiles:
+            canonical = self.canonicalize_smiles(smiles, verbose_conversion=True)
+            print(f"Original:  {smiles}")
+            print(f"Converted: {canonical}")
+            
+            if canonical:
+                # Test if it can generate poly_chemprop_input
+                poly_input = self.make_poly_chemprop_input(
+                    canonical, canonical, 'alternating', 0.5
+                )
+                if poly_input:
+                    print(f"✓ Valid poly_chemprop_input generated")
+                else:
+                    print(f"✗ Failed to generate poly_chemprop_input")
+            else:
+                print(f"✗ Failed to canonicalize")
+            print()
+
 # ========================
 # Additional Utility Functions
 # ========================
+
+def test_pi1070_format():
+    """Quick test for PI1070 monomer format with bare asterisks"""
+    test_monomers = [
+        "*C(C*)C(c1ccccc1)C",
+        "*C1CC(CC1)C*",
+        "*C(C*)CCCCCC"
+    ]
+    
+    print("Testing PI1070 monomer format conversion:")
+    print("=" * 70)
+    
+    manager = PolymerDatabaseManager(verbose=False)
+    
+    for monomer in test_monomers:
+        print(f"\nOriginal: {monomer}")
+        
+        # Test canonicalization
+        canonical = manager.canonicalize_smiles(monomer, verbose_conversion=True)
+        print(f"Canonical: {canonical}")
+        
+        if canonical:
+            # Test poly_chemprop_input generation
+            poly_input = manager.make_poly_chemprop_input(
+                canonical, canonical, 'alternating', 0.5
+            )
+            
+            if poly_input:
+                print(f"✓ Success! Poly_chemprop_input: {poly_input[:80]}...")
+            else:
+                print("✗ Failed to generate poly_chemprop_input")
+        else:
+            print("✗ Failed to canonicalize")
+    
+    return manager
 
 def cleanup_database(input_path: str, output_path: str, verbose: bool = True,
                     fix_unknowns: bool = True, repair_missing: bool = True) -> pd.DataFrame:
@@ -3056,9 +3181,16 @@ Examples:
                        help='Check for unknown values in the database and report statistics')
     parser.add_argument('--detect-type', action='store_true',
                        help='Detect dataset type and report what repairs would be made')
+    parser.add_argument('--test-bare-asterisk', action='store_true',
+                       help='Test conversion of bare asterisk (*) attachment points')
     parser.add_argument('--version', action='version', version=f'%(prog)s 3.0.0')
     
     args = parser.parse_args()
+    
+    # Handle test bare asterisk mode
+    if args.test_bare_asterisk:
+        test_pi1070_format()
+        return 0
     
     # Handle smart merge mode (NEW!)
     if args.smart_merge:

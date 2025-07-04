@@ -2916,8 +2916,11 @@ def debug_pi1070_issue():
     print("=" * 80)
     
     # Set up manager with verbose logging
+    # Temporarily change log level to DEBUG
     import logging
-    logging.basicConfig(level=logging.DEBUG)
+    original_level = logging.getLogger().level
+    logging.getLogger().setLevel(logging.DEBUG)
+    
     manager = PolymerDatabaseManager(verbose=True)
     
     for i, monomer in enumerate(test_monomers):
@@ -2956,7 +2959,10 @@ def debug_pi1070_issue():
                 print(f"   ✓ {poly_type}: {poly_input[:100]}...")
             else:
                 print(f"   ✗ {poly_type}: Failed to generate")
-                
+    
+    # Restore original log level            
+    logging.getLogger().setLevel(original_level)
+    
     return manager
 
 def cleanup_database(input_path: str, output_path: str, verbose: bool = True,
@@ -3264,9 +3270,20 @@ Examples:
         return 0
     
     # Handle debug PI1070 mode
-    if hasattr(args, 'debug_pi1070') and args.debug_pi1070:
+    if args.debug_pi1070:
         debug_pi1070_issue()
         return 0
+    
+    # Check if output is required for remaining operations
+    # Info modes and in-place operations don't need output
+    info_modes = ['list_columns', 'check_unknowns', 'detect_type', 'fix_unknowns', 
+                  'test_bare_asterisk', 'debug_pi1070']
+    if not args.output and not any(getattr(args, mode, False) for mode in info_modes):
+        # For cleanup without output, it will default to input
+        if not args.cleanup:
+            print("Error: --output is required for this operation")
+            parser.print_help()
+            return 1
     
     # Handle smart merge mode (NEW!)
     if args.smart_merge:
@@ -3347,13 +3364,16 @@ Examples:
             print("Error: --cleanup requires --input to specify the database to clean")
             return 1
         
+        # Default output to input if not specified (in-place cleanup)
+        output_path = args.output if args.output else args.input
+        
         try:
-            cleaned_df = cleanup_database(args.input, args.output, 
+            cleaned_df = cleanup_database(args.input, output_path, 
                                         verbose=not args.quiet, 
                                         fix_unknowns=not args.no_fix_unknowns,
                                         repair_missing=args.repair_missing)
             print(f"✓ Database cleanup completed!")
-            print(f"✓ Cleaned database saved to: {args.output}")
+            print(f"✓ Cleaned database saved to: {output_path}")
             return 0
         except Exception as e:
             print(f"Error during cleanup: {e}")

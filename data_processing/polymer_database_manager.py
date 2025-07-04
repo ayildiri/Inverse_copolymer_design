@@ -618,7 +618,9 @@ class PolymerDatabaseManager:
         
         # Order columns nicely
         merged_df = self._order_columns(merged_df)
-        
+
+        merged_df.to_csv(output_path, index=False)  
+                               
         if self.verbose:
             logger.info(f"Smart merge complete!")
             logger.info(f"Final dataset: {len(merged_df)} polymers")

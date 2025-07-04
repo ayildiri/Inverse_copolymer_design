@@ -708,6 +708,33 @@ class PolymerDatabaseManager:
                             return x.dropna().iloc[0] if len(x.dropna()) > 0 else np.nan
                     agg_dict[col] = safe_min
         
+        # Debug: Print merge strategy for each column
+        if self.verbose:
+            logger.info("\nMerge strategy for each column:")
+            logger.info("-" * 60)
+            strategy_summary = {'first': [], 'numeric': []}
+            
+            for col, func in agg_dict.items():
+                if func == 'first' or not callable(func):
+                    strategy_summary['first'].append(col)
+                else:
+                    strategy_summary['numeric'].append(col)
+            
+            logger.info(f"Columns using 'first' strategy ({len(strategy_summary['first'])} columns):")
+            if len(strategy_summary['first']) <= 20:
+                logger.info(f"  {strategy_summary['first']}")
+            else:
+                logger.info(f"  {strategy_summary['first'][:20]}...")
+                logger.info(f"  ... and {len(strategy_summary['first']) - 20} more")
+            
+            logger.info(f"\nColumns using '{merge_strategy.value}' strategy ({len(strategy_summary['numeric'])} columns):")
+            if len(strategy_summary['numeric']) <= 20:
+                logger.info(f"  {strategy_summary['numeric']}")
+            else:
+                logger.info(f"  {strategy_summary['numeric'][:20]}...")
+                logger.info(f"  ... and {len(strategy_summary['numeric']) - 20} more")
+            logger.info("-" * 60)
+        
         # Apply aggregation with error handling
         try:
             merged_df = grouped.agg(agg_dict).reset_index()

@@ -1723,35 +1723,33 @@ class PolymerDatabaseManager:
             is_homopolymer = (monb == mona)
 
             if is_homopolymer:
-                can_mona, can_monb = self.prepare_homopolymer(can_mona)
+                # For homopolymers, ensure we have two differently numbered units
+                if can_mona and '[*:' in can_mona:
+                    can_mona, can_monb = self.prepare_homopolymer(can_mona)
+                else:
+                    can_monb = can_mona
             else:
                 can_monb = self.canonicalize_smiles(monb)
 
             if can_mona is None or can_monb is None:
+                if self.verbose:
+                    logger.debug(f"Canonicalization failed: monoA={can_mona}, monoB={can_monb}")
                 return None
 
             # Check if monomers already have attachment points
-            has_attachment_a = '[*:' in can_mona
-            has_attachment_b = '[*:' in can_monb
+            has_attachment_a = '[*:' in can_mona if can_mona else False
+            has_attachment_b = '[*:' in can_monb if can_monb else False
             
             # If both already have attachment points, use them directly
             if has_attachment_a and has_attachment_b:
-                # Ensure proper numbering for homopolymers
-                if is_homopolymer:
-                    # Renumber second monomer attachment points
-                    mona_points = sorted([int(m.group(1)) for m in re.finditer(r'\[\*:(\d+)\]', can_mona)])
-                    if mona_points:
-                        max_point = max(mona_points)
-                        temp_monb = can_monb
-                        for point in sorted(mona_points, reverse=True):
-                            temp_monb = temp_monb.replace(f'[*:{point}]', f'[*:{point + max_point}]')
-                        can_monb = temp_monb
+                # Already handled in prepare_homopolymer for homopolymers
+                pass
                         
             # For traditional polymer processing (BOO/Br system), process attachment points
             elif '[*:' not in can_mona and '[*:' not in can_monb:
                 # Process using original termini removal system
-                mA = Chem.MolFromSmiles(mona)
-                mB = Chem.MolFromSmiles(monb)
+                mA = Chem.MolFromSmiles(can_mona)
+                mB = Chem.MolFromSmiles(can_monb)
                 
                 if mA is None or mB is None:
                     return None
@@ -1789,8 +1787,11 @@ class PolymerDatabaseManager:
                 can_mona, can_monb = smiA_proc, smiB_proc
 
             # Validate structure
-            is_valid, _ = self.check_polymer_validity(can_mona, can_monb)
+            is_valid, error_msg = self.check_polymer_validity(can_mona, can_monb)
             if not is_valid:
+                if self.verbose:
+                    logger.debug(f"Polymer validation failed: {error_msg}")
+                    logger.debug(f"MonoA: {can_mona}, MonoB: {can_monb}")
                 return None
 
             # Extract attachment point numbers
@@ -1802,7 +1803,12 @@ class PolymerDatabaseManager:
             stoich = f"{fracA:.3f}|{fracB:.3f}"
             
             if poly_type == 'alternating' or poly_type == 'alternating (homopolymer)':
-                edges = '<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5'
+                # For standard 2-attachment point monomers
+                if len(mona_points) == 2 and len(monb_points) == 2:
+                    edges = '<1-3:0.5:0.5<1-4:0.5:0.5<2-3:0.5:0.5<2-4:0.5:0.5'
+                else:
+                    # Generic alternating for any number of attachment points
+                    edges = self.create_polymer_attachment_scheme(is_homopolymer, mona_points, monb_points, (fracA, fracB))
             elif poly_type == 'block':
                 if selfedges:
                     edges = [(1, 2, 3/8, 3/8), (1, 1, 3/8, 3/8), (2, 2, 3/8, 3/8),
@@ -1827,6 +1833,8 @@ class PolymerDatabaseManager:
             
             # Basic validation
             if not poly_input or poly_input.count('|') != 2:
+                if self.verbose:
+                    logger.debug(f"Invalid poly_chemprop_input format: {poly_input}")
                 return None
                 
             return poly_input
@@ -1834,6 +1842,7 @@ class PolymerDatabaseManager:
         except Exception as e:
             if self.verbose:
                 logger.error(f"Error in make_poly_chemprop_input: {e}")
+                logger.debug(f"Input: monoA={mona}, monoB={monb}, poly_type={poly_type}")
             return None
 
     def _extract_monomers_from_poly_input(self, poly_input: str) -> Tuple[Optional[str], Optional[str]]:
@@ -2890,6 +2899,66 @@ def test_pi1070_format():
     
     return manager
 
+def debug_pi1070_issue():
+    """Debug why PI1070 monomers are failing"""
+    import pandas as pd
+    
+    # Test monomers from PI1070
+    test_monomers = [
+        "*C(C*)C(c1ccccc1)C",
+        "*C1CC(CC1)C*", 
+        "*C(C*)CCCCCC",
+        "*C(C*)CCCCCCCCC",
+        "*C(C*)C(CC)C"
+    ]
+    
+    print("Debugging PI1070 Monomer Processing:")
+    print("=" * 80)
+    
+    # Set up manager with verbose logging
+    import logging
+    logging.basicConfig(level=logging.DEBUG)
+    manager = PolymerDatabaseManager(verbose=True)
+    
+    for i, monomer in enumerate(test_monomers):
+        print(f"\n{i+1}. Testing monomer: {monomer}")
+        print("-" * 60)
+        
+        # Step 1: Canonicalize
+        canonical = manager.canonicalize_smiles(monomer, verbose_conversion=True)
+        print(f"   Canonicalized: {canonical}")
+        
+        if not canonical:
+            print("   ✗ Canonicalization failed!")
+            continue
+            
+        # Step 2: Check attachment points
+        import re
+        attach_points = re.findall(r'\[\*:(\d+)\]', canonical)
+        print(f"   Attachment points: {attach_points}")
+        
+        # Step 3: Prepare homopolymer
+        mona, monb = manager.prepare_homopolymer(canonical)
+        print(f"   MonoA: {mona}")
+        print(f"   MonoB: {monb}")
+        
+        # Step 4: Check validity
+        is_valid, msg = manager.check_polymer_validity(mona, monb)
+        print(f"   Validity check: {is_valid} - {msg}")
+        
+        # Step 5: Try to make poly_chemprop_input
+        for poly_type in ['alternating']:
+            poly_input = manager.make_poly_chemprop_input(
+                canonical, canonical, poly_type, 0.5
+            )
+            
+            if poly_input:
+                print(f"   ✓ {poly_type}: {poly_input[:100]}...")
+            else:
+                print(f"   ✗ {poly_type}: Failed to generate")
+                
+    return manager
+
 def cleanup_database(input_path: str, output_path: str, verbose: bool = True,
                     fix_unknowns: bool = True, repair_missing: bool = True) -> pd.DataFrame:
     """
@@ -3183,6 +3252,8 @@ Examples:
                        help='Detect dataset type and report what repairs would be made')
     parser.add_argument('--test-bare-asterisk', action='store_true',
                        help='Test conversion of bare asterisk (*) attachment points')
+    parser.add_argument('--debug-pi1070', action='store_true',
+                       help='Debug PI1070 monomer processing issues')
     parser.add_argument('--version', action='version', version=f'%(prog)s 3.0.0')
     
     args = parser.parse_args()
@@ -3190,6 +3261,11 @@ Examples:
     # Handle test bare asterisk mode
     if args.test_bare_asterisk:
         test_pi1070_format()
+        return 0
+    
+    # Handle debug PI1070 mode
+    if hasattr(args, 'debug_pi1070') and args.debug_pi1070:
+        debug_pi1070_issue()
         return 0
     
     # Handle smart merge mode (NEW!)

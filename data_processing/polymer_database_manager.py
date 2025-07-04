@@ -2406,59 +2406,59 @@ class PolymerDatabaseManager:
         return new_df
 
     def append_to_template(self, new_df: pd.DataFrame, output_path: str = None, 
-                  exclude_columns: List[str] = None) -> pd.DataFrame:
-    """
-    Enhanced append to template with better column management
-    """
-    if exclude_columns is None:
-        exclude_columns = []
-    
-    if self.template_df is None:
-        combined_df = new_df.copy()
-    else:
-        # If template exists and has poly_ids, ensure new_df continues from the highest ID
-        if 'poly_id' in self.template_df.columns and 'poly_id' in new_df.columns:
-            # Get existing IDs from template
-            existing_ids = set(self.template_df['poly_id'].astype(str).unique())
-            
-            # Regenerate IDs for new_df to continue from template's highest ID
-            new_df['poly_id'] = self.generate_poly_ids(new_df, existing_ids)
-            
-            # Align columns - preserves ALL columns from both datasets
-            all_columns = list(set(self.template_df.columns) | set(new_df.columns))
-            
-            # Add missing columns to both dataframes
-            for col in all_columns:
-                if col not in self.template_df.columns:
-                    self.template_df[col] = None
-                if col not in new_df.columns:
-                    new_df[col] = None
-            
-            # Order columns nicely
-            combined_df = pd.concat([self.template_df, new_df], ignore_index=True)
-            combined_df = self._order_columns(combined_df)
+                          exclude_columns: List[str] = None) -> pd.DataFrame:
+        """
+        Enhanced append to template with better column management
+        """
+        if exclude_columns is None:
+            exclude_columns = []
         
-        # Remove unwanted columns from final output
-        if exclude_columns:
-            columns_to_remove = [col for col in exclude_columns if col in combined_df.columns]
-            if columns_to_remove:
-                combined_df = combined_df.drop(columns=columns_to_remove)
+        if self.template_df is None:
+            combined_df = new_df.copy()
+        else:
+            # If template exists and has poly_ids, ensure new_df continues from the highest ID
+            if 'poly_id' in self.template_df.columns and 'poly_id' in new_df.columns:
+                # Get existing IDs from template
+                existing_ids = set(self.template_df['poly_id'].astype(str).unique())
+                
+                # Regenerate IDs for new_df to continue from template's highest ID
+                new_df['poly_id'] = self.generate_poly_ids(new_df, existing_ids)
+                
+                # Align columns - preserves ALL columns from both datasets
+                all_columns = list(set(self.template_df.columns) | set(new_df.columns))
+                
+                # Add missing columns to both dataframes
+                for col in all_columns:
+                    if col not in self.template_df.columns:
+                        self.template_df[col] = None
+                    if col not in new_df.columns:
+                        new_df[col] = None
+                
+                # Order columns nicely
+                combined_df = pd.concat([self.template_df, new_df], ignore_index=True)
+                combined_df = self._order_columns(combined_df)
+            
+            # Remove unwanted columns from final output
+            if exclude_columns:
+                columns_to_remove = [col for col in exclude_columns if col in combined_df.columns]
+                if columns_to_remove:
+                    combined_df = combined_df.drop(columns=columns_to_remove)
+                    if self.verbose:
+                        logger.info(f"Removed unwanted columns: {columns_to_remove}")
+            
+            # Fix any unknown values in the combined dataset
+            if self.fix_unknowns:
+                combined_df = self._fix_unknown_values(combined_df)
+            
+            if output_path:
+                combined_df.to_csv(output_path, index=False)
                 if self.verbose:
-                    logger.info(f"Removed unwanted columns: {columns_to_remove}")
-        
-        # Fix any unknown values in the combined dataset
-        if self.fix_unknowns:
-            combined_df = self._fix_unknown_values(combined_df)
-        
-        if output_path:
-            combined_df.to_csv(output_path, index=False)
+                    logger.info(f"Saved combined dataset to {output_path}")
+            
             if self.verbose:
-                logger.info(f"Saved combined dataset to {output_path}")
-        
-        if self.verbose:
-            logger.info(f"Combined dataset has {len(combined_df)} rows and {len(combined_df.columns)} columns")
-        
-        return combined_df
+                logger.info(f"Combined dataset has {len(combined_df)} rows and {len(combined_df.columns)} columns")
+            
+            return combined_df
 
     # ========================
     # Convenience Methods

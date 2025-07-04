@@ -1008,6 +1008,16 @@ class PolymerDatabaseManager:
         # Remove multiple consecutive empty parentheses
         cleaned = re.sub(r'\(\){2,}', '', cleaned)
         
+        # Fix incomplete stereochemistry (trailing slashes)
+        cleaned = re.sub(r'/$', '', cleaned)  # Remove trailing forward slash
+        cleaned = re.sub(r'\\$', '', cleaned)  # Remove trailing backslash
+        cleaned = re.sub(r'^/', '', cleaned)  # Remove leading forward slash
+        cleaned = re.sub(r'^\\', '', cleaned)  # Remove leading backslash
+        
+        # Fix empty parentheses in rings
+        cleaned = re.sub(r'(\d)\(\)([A-Za-z])', r'\1\2', cleaned)  # e.g., C1()C → C1C
+        cleaned = re.sub(r'([A-Za-z])\(\)(\d)', r'\1\2', cleaned)  # e.g., C()1 → C1
+        
         # Fix common aromatic ring corruptions
         if '()' in cleaned:
             # Simple aromatic patterns
@@ -1204,6 +1214,9 @@ class PolymerDatabaseManager:
         """
         Enhanced IUPAC name generation with better fallbacks
         """
+        # Temporarily suppress RDKit errors
+        self.set_rdkit_verbosity(False)
+        
         try:
             # Handle empty or invalid input
             if pd.isna(smiles) or smiles == '' or smiles == 'nan':
@@ -1244,6 +1257,10 @@ class PolymerDatabaseManager:
             if self.verbose:
                 logger.warning(f"Could not generate IUPAC name for {smiles}: {e}")
             return "Unknown_compound"
+        finally:
+            # Re-enable verbosity if it was on
+            if self.verbose:
+                self.set_rdkit_verbosity(True)
 
     def _lookup_common_polymer_names(self, smiles: str) -> Optional[str]:
         """
@@ -2350,11 +2367,18 @@ class PolymerDatabaseManager:
             if self.verbose:
                 logger.info("Generating ChemProp inputs...")
             
+            # Suppress RDKit errors during ChemProp generation
+            self.set_rdkit_verbosity(False)
+            
             new_df['master_chemprop_input'] = [
                 self.make_master_chemprop_input(sA, sB) 
                 for sA, sB in zip(new_df['monoA'], new_df['monoB'])
             ]
             
+            # Re-enable if verbose
+            if self.verbose:
+                self.set_rdkit_verbosity(True)
+                
             new_df['poly_chemprop_input'] = [
                 self.make_poly_chemprop_input(sA, sB, t, fA, selfedges=True)
                 for sA, sB, t, fA in zip(

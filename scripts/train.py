@@ -468,6 +468,13 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
     if epoch % 10 == 0:
         print(f"📚 Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
     
+    # 🔧 PROFILING: Initialize timing variables
+    t_data = 0
+    t_forward = 0
+    t_backward = 0
+    t_step = 0
+    batch_count = 0
+    
     # Iterate in batches over the training dataset.
     for i, batch in enumerate(order_batches):
         # CRITICAL FIX: Clear decoder state completely before each batch
@@ -478,6 +485,8 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         if i % args.accumulate_grad_batches == 0:
             optimizer.zero_grad()
 
+        # 🔧 PROFILING: Time data loading
+        t0 = time.time()
         
         if model_config['beta']=="schedule":
             # determine beta at time step t
@@ -503,8 +512,13 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         dest_is_origin_matrix.to(device)
         inc_edges_to_atom_matrix = dict_train_loader[str(batch)][2]
         inc_edges_to_atom_matrix.to(device)
+        
+        t_data += time.time() - t0
 
         try:
+            # 🔧 PROFILING: Time forward pass
+            t0 = time.time()
+            
             # FIXED: Handle both basic VAE and PP-guided VAE with teacher forcing
             # Pass teacher forcing ratio to the model
             result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
@@ -517,6 +531,8 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
             else:
                 raise ValueError(f"Unexpected number of return values from model: {len(result)}")
+            
+            t_forward += time.time() - t0
             
             # Check for unstable loss values before backpropagation
             if torch.isnan(loss).any() or torch.isinf(loss).any():
@@ -577,7 +593,12 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 if i == 0:  # Log first batch
                     print(f"   💎 Validity reward: {validity_reward:.4f}")
             
+            # 🔧 PROFILING: Time backward pass
+            t0 = time.time()
+            
             loss_with_penalty.backward()
+            
+            t_backward += time.time() - t0
             
             # Monitor gradient norms before clipping
             total_grad_norm = 0
@@ -593,9 +614,14 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             # Use configurable gradient clipping threshold
             torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_threshold)
 
+            # 🔧 PROFILING: Time optimizer step
+            t0 = time.time()
+            
             # Step optimizer only after accumulating gradients
             if (i + 1) % args.accumulate_grad_batches == 0:
                 optimizer.step()
+            
+            t_step += time.time() - t0
             
             # Store metrics
             ce_losses.append(recon_loss.item())
@@ -603,6 +629,20 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             kld_losses.append(kl_loss.item())
             accs.append(acc.item())
             mses.append(mse.item())
+            
+            batch_count += 1
+            
+            # 🔧 PROFILING: Print timing breakdown every 100 batches
+            if i % 100 == 0 and i > 0:
+                total_time = t_data + t_forward + t_backward + t_step
+                print(f"\n⏱️  Timing breakdown (last 100 batches, {total_time:.1f}s total):")
+                print(f"   Data loading: {t_data:.1f}s ({t_data/total_time*100:.1f}%)")
+                print(f"   Forward pass: {t_forward:.1f}s ({t_forward/total_time*100:.1f}%)")
+                print(f"   Backward pass: {t_backward:.1f}s ({t_backward/total_time*100:.1f}%)")
+                print(f"   Optimizer step: {t_step:.1f}s ({t_step/total_time*100:.1f}%)")
+                print(f"   Avg per batch: {total_time/100:.2f}s")
+                # Reset timers
+                t_data = t_forward = t_backward = t_step = 0
             
             # Log semi-supervised info for first batch of first epoch
             if args.training_stage == 1 and epoch == epoch_cp and i == 0:
@@ -658,7 +698,6 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
         global_step += 1
         
     return model, ce_losses, total_losses, kld_losses, accs, mses, global_step, monotonic_step
-
 
 def test(dict_loader):
     batches = list(range(len(dict_loader)))

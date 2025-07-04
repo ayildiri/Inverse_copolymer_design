@@ -612,11 +612,12 @@ class PolymerDatabaseManager:
         if fix_unknowns:
             merged_df = self._fix_unknown_values(merged_df)
         
+        # Regenerate poly_ids to ensure sequential numbering starting from 1
+        if 'poly_id' in merged_df.columns:
+            merged_df['poly_id'] = self.generate_poly_ids(merged_df, set())
+        
         # Order columns nicely
         merged_df = self._order_columns(merged_df)
-        
-        # Save merged dataset
-        merged_df.to_csv(output_path, index=False)
         
         if self.verbose:
             logger.info(f"Smart merge complete!")
@@ -1865,79 +1866,51 @@ class PolymerDatabaseManager:
         if existing_ids is None:
             existing_ids = set()
         
-        # Parse existing IDs to find the highest number and detect naming pattern
-        max_id = 0  # Start from 0 instead of -1
-        id_prefix = ""
-        id_format = "numeric"  # Default format
+        # Find the highest numeric ID from existing IDs
+        max_id = 0
         
         if existing_ids:
             for existing_id in existing_ids:
-                # Convert to string to handle numeric IDs
-                existing_id = str(existing_id)
                 try:
-                    # Handle different ID formats
-                    if existing_id.startswith('p_'):
-                        # Format: p_12345
-                        id_prefix = "p_"
-                        id_format = "p_prefix"
-                        num = int(existing_id.replace('p_', ''))
+                    # Convert to string and extract numeric part
+                    existing_id_str = str(existing_id)
+                    
+                    # Try to extract just the numeric part
+                    if existing_id_str.isdigit():
+                        num = int(existing_id_str)
                         max_id = max(max_id, num)
-                    elif '_' in existing_id:
-                        # Format: 12345_6 
-                        parts = existing_id.split('_')
-                        if len(parts) >= 2 and parts[0].isdigit():
-                            num = int(parts[0])
+                    else:
+                        # Try to extract numbers from the ID
+                        numbers = re.findall(r'\d+', existing_id_str)
+                        if numbers:
+                            # Take the first number found
+                            num = int(numbers[0])
                             max_id = max(max_id, num)
-                            id_format = "underscore"
-                    elif existing_id.isdigit():
-                        # Format: 12345
-                        num = int(existing_id)
-                        max_id = max(max_id, num)
-                        id_format = "numeric"
-                except (ValueError, AttributeError):
+                except:
                     continue
         
-        # Generate new IDs continuing from the highest found
+        # If no existing IDs, start from 1 (not 0)
+        if max_id == 0:
+            start_id = 1
+        else:
+            start_id = max_id + 1
+        
+        # Generate new sequential IDs
         poly_ids = []
-        unique_pairs = df[['monoA', 'monoB']].drop_duplicates()
+        current_id = start_id
         
-        # Start from the next number after max_id
-        current_id = max_id + 1
-        
-        for idx, (_, row) in enumerate(unique_pairs.iterrows()):
-            # Generate ID based on detected format
-            if id_format == "p_prefix":
-                new_id = f"p_{current_id}"
-            elif id_format == "underscore":
-                new_id = f"{current_id}_{idx}"
-            else:
-                new_id = str(current_id)
-            
-            # Ensure uniqueness
-            while new_id in existing_ids:
-                current_id += 1
-                if id_format == "p_prefix":
-                    new_id = f"p_{current_id}"
-                elif id_format == "underscore":
-                    new_id = f"{current_id}_{idx}"
-                else:
-                    new_id = str(current_id)
-            
-            poly_ids.append(new_id)
-            existing_ids.add(new_id)
+        # Generate IDs for each row (not just unique pairs)
+        for idx in range(len(df)):
+            poly_ids.append(str(current_id))
             current_id += 1
         
-        # Map back to original dataframe
-        pair_to_id = dict(zip(zip(unique_pairs['monoA'], unique_pairs['monoB']), poly_ids))
-        result_ids = [pair_to_id[(row['monoA'], row['monoB'])] for _, row in df.iterrows()]
-    
-        # Logging for debugging
         if self.verbose:
-            logger.info(f"Generated poly_ids continuing from {max_id} using format: {id_format}")
-            if poly_ids:
-                logger.info(f"New ID range: {poly_ids[0]} to {poly_ids[-1]}")
+            if existing_ids:
+                logger.info(f"Generated poly_ids continuing from {max_id}, new IDs: {start_id} to {current_id - 1}")
+            else:
+                logger.info(f"Generated new poly_ids: {start_id} to {current_id - 1}")
         
-        return result_ids
+        return poly_ids
 
     def expand_polymer_variants(self, df: pd.DataFrame, poly_types: List[str] = None, 
                               compositions: List[str] = None) -> pd.DataFrame:
@@ -2433,16 +2406,24 @@ class PolymerDatabaseManager:
         return new_df
 
     def append_to_template(self, new_df: pd.DataFrame, output_path: str = None, 
-                      exclude_columns: List[str] = None) -> pd.DataFrame:
-        """
-        Enhanced append to template with better column management
-        """
-        if exclude_columns is None:
-            exclude_columns = []
-        
-        if self.template_df is None:
-            combined_df = new_df.copy()
-        else:
+                  exclude_columns: List[str] = None) -> pd.DataFrame:
+    """
+    Enhanced append to template with better column management
+    """
+    if exclude_columns is None:
+        exclude_columns = []
+    
+    if self.template_df is None:
+        combined_df = new_df.copy()
+    else:
+        # If template exists and has poly_ids, ensure new_df continues from the highest ID
+        if 'poly_id' in self.template_df.columns and 'poly_id' in new_df.columns:
+            # Get existing IDs from template
+            existing_ids = set(self.template_df['poly_id'].astype(str).unique())
+            
+            # Regenerate IDs for new_df to continue from template's highest ID
+            new_df['poly_id'] = self.generate_poly_ids(new_df, existing_ids)
+            
             # Align columns - preserves ALL columns from both datasets
             all_columns = list(set(self.template_df.columns) | set(new_df.columns))
             

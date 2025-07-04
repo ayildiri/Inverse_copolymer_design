@@ -3121,6 +3121,15 @@ def main():
     """
     import argparse
     
+    # First, check if this is just a simple info command that doesn't need full parsing
+    if len(sys.argv) == 2 and sys.argv[1] in ['--test-bare-asterisk', '--debug-pi1070']:
+        if sys.argv[1] == '--test-bare-asterisk':
+            test_pi1070_format()
+            return 0
+        elif sys.argv[1] == '--debug-pi1070':
+            debug_pi1070_issue()
+            return 0
+    
     parser = argparse.ArgumentParser(
         description='Universal Polymer Database Manager v3.0 - Process ANY polymer dataset format with automatic repair',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3265,12 +3274,12 @@ Examples:
     args = parser.parse_args()
     
     # Handle test bare asterisk mode
-    if args.test_bare_asterisk:
+    if hasattr(args, 'test_bare_asterisk') and args.test_bare_asterisk:
         test_pi1070_format()
         return 0
     
     # Handle debug PI1070 mode
-    if args.debug_pi1070:
+    if hasattr(args, 'debug_pi1070') and args.debug_pi1070:
         debug_pi1070_issue()
         return 0
     

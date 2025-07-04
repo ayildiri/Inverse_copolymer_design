@@ -106,6 +106,19 @@ class PolymerDatabaseManager:
         self.fix_unknowns = fix_unknowns
         self.auto_repair = auto_repair
         
+        # Customizable identifier columns for merge operations
+        # These columns will always use 'first' strategy, not averaged
+        self.identifier_columns = {
+            # Structure and ID columns
+            'poly_id', 'poly_type', 'comp', 'monoA', 'monoB', 
+            'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input',
+            'fracA', 'fracB', 'polymer_ID', 'monomer_ID', 'id', 'ID',
+            'polymer_class', 'source', 'reference', 'notes', 'comments',
+            'tacticity', 'polymer_name', 'name', 'Name',
+            # Experimental conditions and molecular descriptors
+            'temp', 'press', 'DP', 'Mn', 'mol_weight_monomer'
+        }
+        
         if template_path and os.path.exists(template_path):
             self.template_df = pd.read_csv(template_path)
             if verbose:
@@ -178,6 +191,51 @@ class PolymerDatabaseManager:
             RDLogger.DisableLog('rdApp.*')
         else:
             RDLogger.EnableLog('rdApp.*')
+    
+    def customize_merge_behavior(self, columns_to_average: List[str] = None, 
+                                columns_to_keep_first: List[str] = None):
+        """
+        Customize which columns are averaged vs kept as first value during merge
+        
+        Args:
+            columns_to_average: List of column names that should be averaged (removed from identifier_columns)
+            columns_to_keep_first: List of column names that should keep first value (added to identifier_columns)
+            
+        Example:
+            # Make temperature and pressure get averaged instead of keeping first
+            manager.customize_merge_behavior(columns_to_average=['temp', 'press'])
+            
+            # Make certain properties keep first value instead of averaging
+            manager.customize_merge_behavior(columns_to_keep_first=['density', 'viscosity'])
+        """
+        if columns_to_average:
+            # Remove these columns from identifier set so they get averaged
+            for col in columns_to_average:
+                self.identifier_columns.discard(col)
+            if self.verbose:
+                logger.info(f"Columns set to average: {columns_to_average}")
+        
+        if columns_to_keep_first:
+            # Add these columns to identifier set so they keep first value
+            for col in columns_to_keep_first:
+                self.identifier_columns.add(col)
+            if self.verbose:
+                logger.info(f"Columns set to keep first: {columns_to_keep_first}")
+    
+    def reset_merge_behavior(self):
+        """Reset merge behavior to defaults"""
+        self.identifier_columns = {
+            # Structure and ID columns
+            'poly_id', 'poly_type', 'comp', 'monoA', 'monoB', 
+            'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input',
+            'fracA', 'fracB', 'polymer_ID', 'monomer_ID', 'id', 'ID',
+            'polymer_class', 'source', 'reference', 'notes', 'comments',
+            'tacticity', 'polymer_name', 'name', 'Name',
+            # Experimental conditions and molecular descriptors
+            'temp', 'press', 'DP', 'Mn', 'mol_weight_monomer'
+        }
+        if self.verbose:
+            logger.info("Reset merge behavior to defaults")
             
     # ========================
     # Dataset Type Detection and Repair
@@ -503,7 +561,8 @@ class PolymerDatabaseManager:
                            repair_missing: bool = True,
                            expand_monomers: bool = True,
                            remove_duplicates: bool = True,
-                           fix_unknowns: bool = True) -> pd.DataFrame:
+                           fix_unknowns: bool = True,
+                           custom_identifier_columns: set = None) -> pd.DataFrame:
         """
         Smart merge multiple polymer datasets of different types
         
@@ -515,6 +574,7 @@ class PolymerDatabaseManager:
             expand_monomers: Whether to expand monomer datasets to polymers
             remove_duplicates: Whether to remove duplicate polymers
             fix_unknowns: Whether to fix unknown values after merging
+            custom_identifier_columns: Optional custom set of columns to always use 'first' strategy
             
         Returns:
             Merged dataframe
@@ -605,7 +665,7 @@ class PolymerDatabaseManager:
         
         # Handle duplicates with smart merging
         if remove_duplicates and 'poly_chemprop_input' in combined_df.columns:
-            merged_df = self._smart_merge_duplicates(combined_df, merge_strategy)
+            merged_df = self._smart_merge_duplicates(combined_df, merge_strategy, custom_identifier_columns)
         else:
             merged_df = combined_df
         
@@ -632,9 +692,15 @@ class PolymerDatabaseManager:
         
         return merged_df
     
-    def _smart_merge_duplicates(self, df: pd.DataFrame, merge_strategy: MergeStrategy) -> pd.DataFrame:
+    def _smart_merge_duplicates(self, df: pd.DataFrame, merge_strategy: MergeStrategy,
+                                identifier_columns: set = None) -> pd.DataFrame:
         """
         Intelligently merge duplicate polymers using specified strategy
+        
+        Args:
+            df: DataFrame with potential duplicates
+            merge_strategy: Strategy for merging (first/last/mean/max/min)
+            identifier_columns: Optional custom set of columns to always use 'first' strategy
         """
         if self.verbose:
             logger.info(f"Merging duplicates using strategy: {merge_strategy.value}")
@@ -643,15 +709,10 @@ class PolymerDatabaseManager:
         grouped = df.groupby('poly_chemprop_input')
         
         # Extended list of identifier/metadata columns that should not be averaged
-        # FIXED: Added missing metadata columns
-        identifier_columns = {
-            'poly_id', 'poly_type', 'comp', 'monoA', 'monoB', 
-            'monoA_IUPAC', 'monoB_IUPAC', 'master_chemprop_input',
-            'fracA', 'fracB', 'polymer_ID', 'monomer_ID', 'id', 'ID',
-            'polymer_class', 'source', 'reference', 'notes', 'comments',
-            'tacticity', 'polymer_name', 'name', 'Name',
-            'temp', 'press', 'DP', 'Mn', 'mol_weight_monomer'  # Added missing metadata columns
-        }
+        # CUSTOMIZE THIS SET TO CONTROL MERGE BEHAVIOR
+        if identifier_columns is None:
+            # Use instance's default identifier columns
+            identifier_columns = self.identifier_columns
         
         # Define aggregation functions based on strategy
         agg_dict = {}
@@ -2750,7 +2811,9 @@ def fix_database_consistency(database_path: str, backup: bool = True) -> str:
 
 def merge_databases(database_paths: List[str], output_path: str, 
                    remove_duplicates: bool = True, repair_missing: bool = True,
-                   merge_strategy: str = "first") -> pd.DataFrame:
+                   merge_strategy: str = "first",
+                   columns_to_average: List[str] = None,
+                   columns_to_keep_first: List[str] = None) -> pd.DataFrame:
     """
     Merge multiple polymer databases into one
     
@@ -2760,11 +2823,21 @@ def merge_databases(database_paths: List[str], output_path: str,
         remove_duplicates: Whether to remove duplicate entries
         repair_missing: Whether to repair missing columns before merging
         merge_strategy: How to handle duplicates (first/last/mean/max/min)
+        columns_to_average: Columns that should be averaged during merge
+        columns_to_keep_first: Columns that should keep first value during merge
         
     Returns:
         Merged DataFrame
     """
     manager = PolymerDatabaseManager(verbose=True, fix_unknowns=True, auto_repair=repair_missing)
+    
+    # Apply custom merge behavior if specified
+    if columns_to_average or columns_to_keep_first:
+        manager.customize_merge_behavior(
+            columns_to_average=columns_to_average,
+            columns_to_keep_first=columns_to_keep_first
+        )
+    
     return manager.smart_merge_datasets(
         database_paths, 
         output_path, 
@@ -2856,6 +2929,12 @@ Examples:
   # Smart merge different dataset types (NEW!)
   !python polymer_database_manager.py --smart-merge dataset1.csv dataset2.csv dataset3.csv -o merged.csv
   
+  # Smart merge with custom column handling (NEW!)
+  !python polymer_database_manager.py --smart-merge data1.csv data2.csv -o merged.csv \
+      --merge-strategy mean \
+      --columns-to-average temp press \
+      --columns-to-keep-first density viscosity
+  
   # Process with automatic repair (NEW!)
   !python polymer_database_manager.py -i data.csv -o output.csv --repair-missing
   
@@ -2935,6 +3014,10 @@ Examples:
     parser.add_argument('--merge-strategy', choices=['first', 'last', 'mean', 'max', 'min'],
                        default='first',
                        help='Strategy for merging duplicate properties (default: first)')
+    parser.add_argument('--columns-to-average', nargs='+',
+                       help='Columns that should be averaged during merge (removes from identifier list)')
+    parser.add_argument('--columns-to-keep-first', nargs='+',
+                       help='Columns that should keep first value during merge (adds to identifier list)')
     
     # Target column specification
     parser.add_argument('--target-columns', nargs='+',
@@ -2986,6 +3069,14 @@ Examples:
         try:
             manager = PolymerDatabaseManager(verbose=not args.quiet, fix_unknowns=not args.no_fix_unknowns, 
                                            auto_repair=args.repair_missing)
+            
+            # Apply custom merge behavior if specified
+            if args.columns_to_average or args.columns_to_keep_first:
+                manager.customize_merge_behavior(
+                    columns_to_average=args.columns_to_average,
+                    columns_to_keep_first=args.columns_to_keep_first
+                )
+            
             merged_df = manager.smart_merge_datasets(
                 args.smart_merge,
                 args.output,
@@ -3026,10 +3117,15 @@ Examples:
             return 1
         
         try:
-            merged_df = merge_databases(args.merge, args.output, 
-                                      remove_duplicates=True,
-                                      repair_missing=args.repair_missing,
-                                      merge_strategy=args.merge_strategy)
+            merged_df = merge_databases(
+                args.merge, 
+                args.output, 
+                remove_duplicates=True,
+                repair_missing=args.repair_missing,
+                merge_strategy=args.merge_strategy,
+                columns_to_average=args.columns_to_average,
+                columns_to_keep_first=args.columns_to_keep_first
+            )
             print(f"✓ Databases merged successfully!")
             print(f"✓ Merged database saved to: {args.output}")
             return 0

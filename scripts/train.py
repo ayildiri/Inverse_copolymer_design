@@ -1159,9 +1159,6 @@ parser.add_argument("--freeze_decoder", action="store_true", default=False,
                     help="Freeze decoder during stage 2")
 parser.add_argument("--stage1_sample_weight", type=float, default=1.0,
                     help="Weight for sampling data with source properties in stage 1")
-parser.add_argument("--combined_dataset_path", type=str, 
-                    default="/content/drive/MyDrive/X_Materials_Organized_Files_V1/combined_polymer_database_2.csv",
-                    help="Path to combined dataset CSV")
 
 args = parser.parse_args()
 
@@ -1296,7 +1293,7 @@ if args.training_stage == 1:
     
     # Use safe data loading
     dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
-        csv_path=args.combined_dataset_path,
+        csv_path=None,
         stage=1,
         source_properties=args.source_properties,
         target_properties=args.target_properties,
@@ -1316,7 +1313,7 @@ else:  # Stage 2
     print(f"Stage 2: Loading data for fine-tuning on {args.target_properties}")
     
     dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
-        csv_path=args.combined_dataset_path,
+        csv_path=None,
         stage=2,
         source_properties=args.source_properties,
         target_properties=args.target_properties,

@@ -1912,7 +1912,7 @@ class G2S_VAE_Transfer(nn.Module):
                     rel_info['sources'],
                     target_prop,
                     device
-                )f
+                )
         
         # Enhanced property predictor for transfer learning
         self.PP_lin1 = Sequential(

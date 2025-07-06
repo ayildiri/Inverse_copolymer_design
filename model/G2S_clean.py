@@ -1238,65 +1238,6 @@ class SequenceDecoder(nn.Module):
                         weights[nr,i] *= multiplier
 
         return weights
-
-class PropertyRelationshipModule(nn.Module):
-    """Module to handle property relationships via equations"""
-    
-    def __init__(self, equation_str, source_props, target_prop, device):
-        super().__init__()
-        self.equation_str = equation_str
-        self.source_props = source_props
-        self.target_prop = target_prop
-        self.device = device
-        
-        # Parse equation to identify operations
-        self.parse_equation()
-        
-    def parse_equation(self):
-        """Parse equation string to create computation graph"""
-        # Store original equation for reference
-        self.original_equation = self.equation_str
-        
-        # Simple parser - can be extended for more complex equations
-        # Supports: +, -, *, /, abs(), exp(), log(), sqrt(), power()
-        self.equation_lambda = self._create_equation_function()
-        
-    def _create_equation_function(self):
-        """Create a function from equation string"""
-        # Replace property names with indexed variables for eval
-        equation = self.equation_str
-        for i, prop in enumerate(self.source_props):
-            equation = equation.replace(prop, f"props[{i}]")
-        
-        # Create safe evaluation function
-        def equation_func(props):
-            # Safe functions that can be used in equations
-            safe_dict = {
-                'abs': torch.abs,
-                'exp': torch.exp,
-                'log': torch.log,
-                'sqrt': torch.sqrt,
-                'pow': torch.pow,
-                'min': torch.min,
-                'max': torch.max,
-                'mean': torch.mean,
-                'tanh': torch.tanh,
-                'sigmoid': torch.sigmoid,
-            }
-            
-            # Add props to local scope
-            local_dict = {'props': props}
-            local_dict.update(safe_dict)
-            
-            try:
-                # Safe evaluation with limited scope
-                result = eval(equation, {"__builtins__": {}}, local_dict)
-                return result
-            except Exception as e:
-                print(f"Error evaluating equation {self.equation_str}: {e}")
-                return torch.zeros_like(props[0])
-        
-        return equation_func
     
     def forward(self, property_predictions):
         """
@@ -1431,17 +1372,132 @@ class G2S_VAE(nn.Module):
     
     def number_of_parameters(self):
         return(sum(p.numel() for p in self.parameters() if p.requires_grad))
+
+class PropertyRelationshipModule(nn.Module):
+    """Module to handle property relationships via equations"""
+    
+    def __init__(self, equation_str, source_props, target_prop, device):
+        super().__init__()
+        self.equation_str = equation_str
+        self.source_props = source_props
+        self.target_prop = target_prop
+        self.device = device
+        
+        # Parse equation to identify operations
+        self.parse_equation()
+        
+    def parse_equation(self):
+        """Parse equation string to create computation graph"""
+        # Store original equation for reference
+        self.original_equation = self.equation_str
+        
+        # Simple parser - can be extended for more complex equations
+        # Supports: +, -, *, /, abs(), exp(), log(), sqrt(), power()
+        self.equation_lambda = self._create_equation_function()
+        
+    def _create_equation_function(self):
+        """Create a function from equation string"""
+        # Replace property names with indexed variables for eval
+        equation = self.equation_str
+        for i, prop in enumerate(self.source_props):
+            equation = equation.replace(prop, f"props[{i}]")
+        
+        # Create safe evaluation function
+        def equation_func(props):
+            # Safe functions that can be used in equations
+            safe_dict = {
+                'abs': torch.abs,
+                'exp': torch.exp,
+                'log': torch.log,
+                'sqrt': torch.sqrt,
+                'pow': torch.pow,
+                'min': torch.min,
+                'max': torch.max,
+                'mean': torch.mean,
+                'tanh': torch.tanh,
+                'sigmoid': torch.sigmoid,
+            }
+            
+            # Add props to local scope
+            local_dict = {'props': props}
+            local_dict.update(safe_dict)
+            
+            try:
+                # Safe evaluation with limited scope
+                result = eval(equation, {"__builtins__": {}}, local_dict)
+                return result
+            except Exception as e:
+                print(f"Error evaluating equation {self.equation_str}: {e}")
+                return torch.zeros_like(props[0])
+        
+        return equation_func
+    
+    def forward(self, property_predictions):
+        """
+        Args:
+            property_predictions: dict of {property_name: tensor}
+        Returns:
+            predicted target property value
+        """
+        # Gather source property values
+        source_values = []
+        for prop in self.source_props:
+            if prop in property_predictions:
+                source_values.append(property_predictions[prop])
+            else:
+                raise ValueError(f"Source property {prop} not found in predictions")
+        
+        # Apply equation
+        result = self.equation_lambda(source_values)
+        return result
+
+def parse_property_relationships(relationship_strings):
+    """Parse command line relationship strings into structured format"""
+    relationships = {}
+    if relationship_strings is None:
+        return relationships
+        
+    for rel_str in relationship_strings:
+        # Format: "target=equation" e.g., "bandgap=abs(EA-IP)"
+        if '=' not in rel_str:
+            print(f"Warning: Invalid relationship format: {rel_str}")
+            continue
+            
+        target, equation = rel_str.split('=', 1)
+        target = target.strip()
+        equation = equation.strip()
+        
+        # Extract source properties from equation
+        # This is a simple extraction - looks for uppercase property names
+        import re
+        # Match property names (uppercase letters potentially followed by lowercase)
+        potential_props = re.findall(r'\b[A-Z][A-Za-z0-9_]*\b', equation)
+        source_props = [p for p in potential_props if p not in ['abs', 'exp', 'log', 'sqrt']]
+        
+        relationships[target] = {
+            'equation': equation,
+            'sources': source_props
+        }
+    
+    return relationships
     
 class G2S_VAE_PPguided(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim, embedding_dim, device, model_config, vocab, seed, loss_weights=None, add_latent=True):
         super().__init__()
         self.node_dim=node_dim
-        self.edge_dim=edge_dim
+        self.edge_dim=edge_dim    
+        self.hidden_dim=hidden_dim
+        self.device=device
+        self.seed=seed
+        self.eps = model_config['epsilon']
 
         # Property relationship modules
         self.property_relationships = model_config.get('property_relationships', {})
         self.relationship_weight = model_config.get('relationship_weight', 0.1)
         self.relationship_modules = nn.ModuleDict()
+        
+        # Store property names for relationship module
+        self.property_names = model_config.get('property_names', [])
         
         # Create relationship modules if specified
         if self.property_relationships:
@@ -1452,11 +1508,6 @@ class G2S_VAE_PPguided(nn.Module):
                     target_prop,
                     device
                 )
-        
-        self.hidden_dim=hidden_dim
-        self.device=device
-        self.seed=seed
-        self.eps = model_config['epsilon']
 
         try: 
             self.embedding_dim = model_config['embedding_dim']

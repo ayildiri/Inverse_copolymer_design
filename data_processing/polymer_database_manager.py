@@ -474,32 +474,65 @@ class PolymerDatabaseManager:
         
         connectivity = parts[2]
         
-        # Check against patterns
-        for poly_type, patterns in self.polymer_type_patterns.items():
-            for pattern in patterns:
-                if re.search(pattern, connectivity):
-                    return poly_type
+        # Use the enhanced detection method
+        return self._detect_polymer_type_from_connectivity(connectivity)
         
-        # Additional heuristic detection based on edge types
-        edges = re.findall(r'<(\d+)-(\d+):', connectivity)
-        if edges:
-            # Count self-edges (like 1-1, 2-2, etc.)
-            self_edges = sum(1 for e1, e2 in edges if e1 == e2)
-            total_edges = len(edges)
-            
-            # If only cross-monomer edges (no self-edges), likely alternating
-            if self_edges == 0 and total_edges == 4:
-                return "alternating"
-            # If high proportion of self-edges, likely block or random
-            elif self_edges >= 4:
-                # Check if it has all possible edges (random) or just some (block)
-                if total_edges >= 10:
-                    return "random"
-                else:
-                    return "block"
+    def _analyze_connectivity_pattern(self, connectivity: str) -> Dict[str, any]:
+        """
+        Analyze a connectivity pattern to extract key features
+        """
+        if not connectivity:
+            return {}
         
-        return "unknown"
-    
+        # Extract all edges and weights
+        edge_pattern = r'<(\d+)-(\d+):([0-9.]+):([0-9.]+)'
+        matches = re.findall(edge_pattern, connectivity)
+        
+        if not matches:
+            return {}
+        
+        edges = []
+        weights = []
+        
+        for match in matches:
+            n1, n2, w1, w2 = match
+            edges.append((int(n1), int(n2)))
+            weights.append(float(w1))
+        
+        # Analyze edge types
+        self_edges = [(n1, n2) for n1, n2 in edges if n1 == n2]
+        cross_edges = [(n1, n2) for n1, n2 in edges if n1 != n2]
+        
+        # Get unique weights
+        unique_weights = sorted(set(weights))
+        
+        # Get node groups
+        nodes = set()
+        for n1, n2 in edges:
+            nodes.add(n1)
+            nodes.add(n2)
+        
+        # Likely monomer A nodes: 1, 2
+        # Likely monomer B nodes: 3, 4 (or higher)
+        a_nodes = {n for n in nodes if n <= 2}
+        b_nodes = {n for n in nodes if n > 2}
+        
+        # Count edge types
+        aa_edges = [(n1, n2) for n1, n2 in edges if n1 in a_nodes and n2 in a_nodes]
+        bb_edges = [(n1, n2) for n1, n2 in edges if n1 in b_nodes and n2 in b_nodes]
+        ab_edges = [(n1, n2) for n1, n2 in edges if (n1 in a_nodes and n2 in b_nodes) or (n1 in b_nodes and n2 in a_nodes)]
+        
+        return {
+            'total_edges': len(edges),
+            'self_edges': len(self_edges),
+            'cross_edges': len(cross_edges),
+            'unique_weights': unique_weights,
+            'aa_edges': len(aa_edges),
+            'bb_edges': len(bb_edges),
+            'ab_edges': len(ab_edges),
+            'nodes': nodes
+        }
+        
     def _detect_comp_from_poly_input(self, poly_input: str) -> str:
         """
         Detect composition from poly_chemprop_input stoichiometry
@@ -1904,15 +1937,68 @@ class PolymerDatabaseManager:
 
     def _detect_polymer_type_from_connectivity(self, connectivity: str) -> str:
         """
-        Detect polymer type from connectivity pattern
+        Detect polymer type from connectivity pattern using smart heuristics
         """
         if not connectivity:
             return "unknown"
         
+        # First try the original regex patterns for backward compatibility
         for poly_type, patterns in self.polymer_type_patterns.items():
             for pattern in patterns:
                 if re.search(pattern, connectivity):
                     return poly_type
+        
+        # If regex patterns don't match, use smart analysis
+        analysis = self._analyze_connectivity_pattern(connectivity)
+        
+        if not analysis:
+            return "unknown"
+        
+        # Extract features
+        total_edges = analysis['total_edges']
+        self_edges = analysis['self_edges']
+        cross_edges = analysis['cross_edges']
+        unique_weights = analysis['unique_weights']
+        aa_edges = analysis['aa_edges']
+        bb_edges = analysis['bb_edges']
+        ab_edges = analysis['ab_edges']
+        
+        # ALTERNATING: Only cross-monomer connections (A-B edges)
+        if self_edges == 0 and ab_edges >= 4:
+            return "alternating"
+        
+        # RANDOM: All possible connections (A-A, B-B, A-B)
+        # Has many edges including self-edges
+        elif total_edges >= 10 and self_edges >= 4:
+            if aa_edges > 0 and bb_edges > 0 and ab_edges > 0:
+                return "random"
+            elif self_edges >= 2 and cross_edges >= 4:
+                return "random"
+        
+        # BLOCK: Preference for same-monomer connections
+        elif self_edges > 0:
+            if aa_edges > 0 and bb_edges > 0:
+                if len(unique_weights) > 1 or (len(unique_weights) == 1 and abs(unique_weights[0] - 0.375) < 0.01):
+                    return "block"
+            if self_edges >= 2 and ab_edges > 0:
+                return "block"
+        
+        # Additional heuristics based on weights
+        if len(unique_weights) == 1:
+            weight = unique_weights[0]
+            if abs(weight - 0.5) < 0.01 and ab_edges >= 4:
+                return "alternating"
+            elif abs(weight - 0.25) < 0.01 and total_edges >= 6:
+                return "random"
+            elif abs(weight - 0.375) < 0.01:
+                return "block"
+        
+        # Fallback heuristics
+        if self_edges > 0 and cross_edges > 0:
+            if total_edges >= 8:
+                return "random"
+            else:
+                return "block"
         
         return "unknown"
     

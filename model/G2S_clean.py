@@ -1617,14 +1617,15 @@ class G2S_VAE_PPguided(nn.Module):
         
         # ENHANCED: Increase validity weight significantly after warmup
         validity_weight = 0.1 if hasattr(self, '_batch_counter') and self._batch_counter < 1000 else 0.5
-
+        
         # Calculate relationship loss if applicable
         relationship_loss = torch.tensor(0.0, device=device)
         if self.property_relationships and self.training:
             # Get all property predictions
             property_preds = {}
             for i, prop_name in enumerate(self.property_names):
-                property_preds[prop_name] = y[:, i]
+                if i < y.shape[1]:  # Ensure we don't go out of bounds
+                    property_preds[prop_name] = y[:, i]
             
             # Calculate relationship losses
             for target_prop, rel_module in self.relationship_modules.items():
@@ -1642,11 +1643,11 @@ class G2S_VAE_PPguided(nn.Module):
                             rel_loss = F.mse_loss(predicted_target[mask], actual_target[mask])
                             relationship_loss += rel_loss
         
-        # Modified total loss calculation with stronger validity component
+        # Modified total loss calculation with relationship loss
         total_loss = recon_loss + self.beta*kl_loss + self.alpha*mse + validity_weight*validity_penalty + self.relationship_weight*relationship_loss
         
-        # Return the enhanced total loss (not the original calculation)
-        return total_loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+        # Return with additional relationship loss
+        return total_loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss
 
     def compute_validity_loss(self, predictions):
         """Enhanced validity loss with stronger penalties and rewards"""

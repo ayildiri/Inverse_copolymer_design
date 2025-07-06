@@ -103,14 +103,68 @@ def validate_data_vocab_consistency(dict_loader, vocab, dataset_name="dataset"):
             print(f"   ⚠️ No valid token IDs found - this might indicate a data structure issue")
     
     return max_token_found
+
+def get_property_attribute_mapping(property_names):
+    """
+    Create a dynamic mapping from property names to data attributes (y1, y2, y3, etc.)
     
-def load_transfer_data(csv_path, stage, source_properties, target_properties, 
-                      batch_size, tokenization, vocab, sample_weight=1.0, 
+    Common mappings:
+    - Position 0 (y1): First property
+    - Position 1 (y2): Second property  
+    - Position 2 (y3): Third property
+    - etc.
+    
+    Returns: dict mapping property name to attribute name
+    """
+    # Standard property mappings (for backward compatibility)
+    standard_mappings = {
+        'EA': 'y1',
+        'IP': 'y2', 
+        'bandgap': 'y3',
+        'e_homo': 'y1',
+        'e_lumo': 'y2',
+        'e_gap': 'y3',
+        'homo': 'y1',
+        'lumo': 'y2',
+        'gap': 'y3'
+    }
+    
+    mapping = {}
+    for i, prop_name in enumerate(property_names):
+        # Check if there's a standard mapping
+        if prop_name in standard_mappings:
+            mapping[prop_name] = standard_mappings[prop_name]
+        else:
+            # Otherwise use positional mapping
+            mapping[prop_name] = f'y{i+1}'
+    
+    return mapping
+    
+def load_transfer_data(csv_path=None, stage=1, source_properties=None, target_properties=None, 
+                      batch_size=32, tokenization="RT_tokenized", vocab=None, sample_weight=1.0, 
                       device='cuda', dataset_path=None):
     """
     Transfer learning data loading that works with stage-specific directories
-    ENHANCED with vocabulary validation
+    ENHANCED with vocabulary validation and flexible property support
+    
+    Args:
+        csv_path: Path to CSV file (optional, for future use)
+        stage: 1 for pretraining, 2 for fine-tuning
+        source_properties: List of property names used in pretraining
+        target_properties: List of property names for fine-tuning
+        batch_size: Batch size for data loading
+        tokenization: Tokenization method
+        vocab: Vocabulary dictionary
+        sample_weight: Weight for sampling labeled data in stage 1
+        device: Device to load data to
+        dataset_path: Custom dataset path
     """
+    
+    # Default to common properties if not specified
+    if source_properties is None:
+        source_properties = ['EA', 'IP']
+    if target_properties is None:
+        target_properties = ['bandgap']
     
     if dataset_path is None:
         # Default paths based on stage
@@ -125,8 +179,12 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
     print(f"🔤 Tokenization: {tokenization}")
     print(f"📚 Vocabulary size: {len(vocab)}")
     
+    # Get property mappings
+    all_properties = list(set(source_properties + target_properties))
+    property_mapping = get_property_attribute_mapping(all_properties)
+    
     if stage == 1:
-        print(f"🧬 Stage 1: Loading dataset with {source_properties}")
+        print(f"🧬 Stage 1: Loading dataset with properties: {source_properties}")
         
         # Files have been standardized without property suffixes
         train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
@@ -167,31 +225,39 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
             print(f"\n🔧 This is likely the cause of your embedding dimension mismatch!")
             raise
         
-        print(f"📊 Stage 1: Loaded {len(dict_train_loader)} training batches with properties {source_properties}")
+        print(f"📊 Stage 1: Loaded {len(dict_train_loader)} training batches")
         
         # For semi-supervised Stage 1, check data composition
         labeled_count = 0
         unlabeled_count = 0
         
+        # Get property attributes for source properties
+        source_attrs = [property_mapping.get(prop, f'y{i+1}') for i, prop in enumerate(source_properties)]
+        
         for batch_key in dict_train_loader:
             batch_data = dict_train_loader[batch_key][0]
             for i in range(batch_data.num_graphs):
-                if hasattr(batch_data, 'y1') and hasattr(batch_data, 'y2'):
-                    # Check if both EA and IP are non-NaN
-                    y1_val = batch_data.y1[i] if i < len(batch_data.y1) else float('nan')
-                    y2_val = batch_data.y2[i] if i < len(batch_data.y2) else float('nan')
-                    
-                    if not torch.isnan(y1_val) and not torch.isnan(y2_val):
-                        labeled_count += 1
+                is_labeled = True
+                
+                # Check if all source properties are non-NaN
+                for prop_attr in source_attrs:
+                    if hasattr(batch_data, prop_attr):
+                        prop_vals = getattr(batch_data, prop_attr)
+                        if i < len(prop_vals):
+                            if torch.isnan(prop_vals[i]):
+                                is_labeled = False
+                                break
                     else:
-                        unlabeled_count += 1
+                        is_labeled = False
+                        break
+                
+                if is_labeled:
+                    labeled_count += 1
                 else:
-                    # If properties don't exist, count as unlabeled
-                    unlabeled_count += batch_data.num_graphs
-                    break
+                    unlabeled_count += 1
         
         print(f"   📊 Training data composition:")
-        print(f"      Labeled (EA+IP): {labeled_count:,}")
+        print(f"      Labeled (all {source_properties}): {labeled_count:,}")
         print(f"      Unlabeled: {unlabeled_count:,}")
         print(f"      Total: {labeled_count + unlabeled_count:,}")
         
@@ -204,10 +270,10 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
         # Apply weighted sampling if requested
         if sample_weight != 1.0 and unlabeled_count > 0:
             print(f"\n   🎯 Applying weighted sampling with weight={sample_weight} for labeled data")
-            dict_train_loader = apply_weighted_sampling(dict_train_loader, sample_weight)
+            dict_train_loader = apply_weighted_sampling(dict_train_loader, sample_weight, source_properties, property_mapping)
             
             # Recount after weighted sampling
-            new_labeled, new_unlabeled = check_data_composition(dict_train_loader, 'y1', 'y2')
+            new_labeled, new_unlabeled = check_data_composition(dict_train_loader, source_properties, property_mapping)
             new_total = new_labeled + new_unlabeled
             print(f"   📊 After weighted sampling:")
             print(f"      Labeled: {new_labeled:,} ({new_labeled/new_total*100:.1f}%)")
@@ -215,17 +281,16 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
             print(f"      Total batches: {len(dict_train_loader)}")
         
         # Check validation and test set composition too
-        val_labeled, val_unlabeled = check_data_composition(dict_val_loader, 'y1', 'y2')
-        test_labeled, test_unlabeled = check_data_composition(dict_test_loader, 'y1', 'y2')
+        val_labeled, val_unlabeled = check_data_composition(dict_val_loader, source_properties, property_mapping)
+        test_labeled, test_unlabeled = check_data_composition(dict_test_loader, source_properties, property_mapping)
         
         print(f"\n   📊 Validation set: {val_labeled:,} labeled, {val_unlabeled:,} unlabeled")
         print(f"   📊 Test set: {test_labeled:,} labeled, {test_unlabeled:,} unlabeled")
         
     else:  # Stage 2
-        print(f"🧬 Stage 2: Loading dataset with {target_properties}")
+        print(f"🧬 Stage 2: Loading dataset with properties: {target_properties}")
         
-        # For Stage 2, files are named with bandgap pattern
-        # Files have been standardized without property suffixes
+        # For Stage 2, files are named with standard pattern
         train_loader_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
         val_loader_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}.pt')
         test_loader_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}.pt')
@@ -263,27 +328,39 @@ def load_transfer_data(csv_path, stage, source_properties, target_properties,
             print(f"❌ STAGE 2 VOCABULARY VALIDATION FAILED: {e}")
             raise
         
-        print(f"📊 Stage 2: Loaded {len(dict_train_loader)} training batches with property {target_properties}")
+        print(f"📊 Stage 2: Loaded {len(dict_train_loader)} training batches")
         
         # Check Stage 2 data composition
         labeled_count = 0
         unlabeled_count = 0
         
+        # Get property attributes for target properties
+        target_attrs = [property_mapping.get(prop, f'y{i+1}') for i, prop in enumerate(target_properties)]
+        
         for batch_key in dict_train_loader:
             batch_data = dict_train_loader[batch_key][0]
             for i in range(batch_data.num_graphs):
-                if hasattr(batch_data, 'y1'):
-                    y1_val = batch_data.y1[i] if i < len(batch_data.y1) else float('nan')
-                    if not torch.isnan(y1_val):
-                        labeled_count += 1
+                is_labeled = True
+                
+                # Check if all target properties are non-NaN
+                for prop_attr in target_attrs:
+                    if hasattr(batch_data, prop_attr):
+                        prop_vals = getattr(batch_data, prop_attr)
+                        if i < len(prop_vals):
+                            if torch.isnan(prop_vals[i]):
+                                is_labeled = False
+                                break
                     else:
-                        unlabeled_count += 1
+                        is_labeled = False
+                        break
+                
+                if is_labeled:
+                    labeled_count += 1
                 else:
-                    unlabeled_count += batch_data.num_graphs
-                    break
+                    unlabeled_count += 1
         
         print(f"   📊 Training data composition:")
-        print(f"      Labeled (bandgap): {labeled_count:,}")
+        print(f"      Labeled ({target_properties}): {labeled_count:,}")
         print(f"      Unlabeled: {unlabeled_count:,}")
         print(f"      Total: {labeled_count + unlabeled_count:,}")
         
@@ -352,10 +429,16 @@ def verify_tokenization_consistency(dict_loader, tokenization, vocab):
     
     print(f"✅ Checked {sample_count} sample sequences for tokenization consistency")
 
-def apply_weighted_sampling(dict_loader, sample_weight):
+def apply_weighted_sampling(dict_loader, sample_weight, properties, property_mapping):
     """
     Apply weighted sampling to oversample batches with more labeled data.
     This duplicates batches that have high labeled content.
+    
+    Args:
+        dict_loader: Data loader dictionary
+        sample_weight: Weight for oversampling labeled data
+        properties: List of property names to check
+        property_mapping: Mapping from property names to attributes
     """
     print(f"🎯 Applying weighted sampling with weight={sample_weight}...")
     
@@ -366,12 +449,23 @@ def apply_weighted_sampling(dict_loader, sample_weight):
         labeled_count = 0
         
         for i in range(batch_data.num_graphs):
-            if hasattr(batch_data, 'y1') and hasattr(batch_data, 'y2'):
-                y1_val = batch_data.y1[i] if i < len(batch_data.y1) else float('nan')
-                y2_val = batch_data.y2[i] if i < len(batch_data.y2) else float('nan')
-                
-                if not torch.isnan(y1_val) and not torch.isnan(y2_val):
-                    labeled_count += 1
+            is_labeled = True
+            
+            # Check if all properties are non-NaN
+            for prop in properties:
+                prop_attr = property_mapping.get(prop, f'y{properties.index(prop)+1}')
+                if hasattr(batch_data, prop_attr):
+                    prop_vals = getattr(batch_data, prop_attr)
+                    if i < len(prop_vals):
+                        if torch.isnan(prop_vals[i]):
+                            is_labeled = False
+                            break
+                else:
+                    is_labeled = False
+                    break
+            
+            if is_labeled:
+                labeled_count += 1
         
         labeled_ratio = labeled_count / batch_data.num_graphs
         batch_info.append((batch_key, labeled_ratio, labeled_count))
@@ -402,9 +496,14 @@ def apply_weighted_sampling(dict_loader, sample_weight):
     
     return new_dict_loader
 
-def check_data_composition(dict_loader, prop1='y1', prop2=None):
+def check_data_composition(dict_loader, properties, property_mapping):
     """
     Check how many labeled vs unlabeled molecules are in a data loader
+    
+    Args:
+        dict_loader: Data loader dictionary
+        properties: List of property names to check
+        property_mapping: Mapping from property names to attributes
     """
     labeled_count = 0
     unlabeled_count = 0
@@ -412,19 +511,20 @@ def check_data_composition(dict_loader, prop1='y1', prop2=None):
     for batch_key in dict_loader:
         batch_data = dict_loader[batch_key][0]
         for i in range(batch_data.num_graphs):
-            is_labeled = False
+            is_labeled = True
             
-            # Check first property
-            if hasattr(batch_data, prop1):
-                val1 = getattr(batch_data, prop1)[i] if i < len(getattr(batch_data, prop1)) else float('nan')
-                if not torch.isnan(val1):
-                    is_labeled = True
-                    
-                    # If second property specified, check it too
-                    if prop2 and hasattr(batch_data, prop2):
-                        val2 = getattr(batch_data, prop2)[i] if i < len(getattr(batch_data, prop2)) else float('nan')
-                        if torch.isnan(val2):
+            # Check if all properties are non-NaN
+            for prop in properties:
+                prop_attr = property_mapping.get(prop, f'y{properties.index(prop)+1}')
+                if hasattr(batch_data, prop_attr):
+                    prop_vals = getattr(batch_data, prop_attr)
+                    if i < len(prop_vals):
+                        if torch.isnan(prop_vals[i]):
                             is_labeled = False
+                            break
+                else:
+                    is_labeled = False
+                    break
             
             if is_labeled:
                 labeled_count += 1
@@ -436,68 +536,102 @@ def check_data_composition(dict_loader, prop1='y1', prop2=None):
 def prepare_stage1_properties(dict_loader, device):
     """
     Prepare properties for Stage 1 training
-    If we only have y1 (bandgap), create dummy y2 for now
+    If some properties are missing, create dummy values with NaN
     """
     modified_count = 0
     
     for batch_key in dict_loader:
         batch_data = dict_loader[batch_key][0]
         
-        # Check what properties exist
-        if hasattr(batch_data, 'y1') and not hasattr(batch_data, 'y2'):
-            # If only y1 exists, create dummy y2 with NaN values
-            batch_size = batch_data.y1.shape[0]
-            batch_data.y2 = torch.full((batch_size,), float('nan'), device=batch_data.y1.device)
-            if modified_count == 0:  # Only print once
-                print(f"📝 Note: Created dummy y2 for batches with only y1")
-            modified_count += 1
+        # Check what properties exist and add missing ones
+        # This ensures compatibility with models expecting certain properties
+        max_property_idx = 0
+        for attr in dir(batch_data):
+            if attr.startswith('y') and attr[1:].isdigit():
+                max_property_idx = max(max_property_idx, int(attr[1:]))
+        
+        # Ensure at least y1 and y2 exist (for backward compatibility)
+        if max_property_idx < 2:
+            for i in range(max_property_idx + 1, 3):
+                attr_name = f'y{i}'
+                if not hasattr(batch_data, attr_name):
+                    batch_size = batch_data.num_graphs
+                    setattr(batch_data, attr_name, torch.full((batch_size,), float('nan'), device=device))
+                    if modified_count == 0:  # Only print once
+                        print(f"📝 Note: Created dummy {attr_name} for batches with missing properties")
+                    modified_count += 1
     
     if modified_count > 0:
-        print(f"   ✏️ Modified {modified_count} batches to have y2 property")
+        print(f"   ✏️ Modified {modified_count} batches to have consistent properties")
     
     return dict_loader
 
-def analyze_batch_properties(batch_data, batch_idx=0):
+def analyze_batch_properties(batch_data, batch_idx=0, property_names=None):
     """
     Analyze property distribution in a single batch for debugging
+    
+    Args:
+        batch_data: Batch data object
+        batch_idx: Batch index for display
+        property_names: Optional list of property names for better display
     """
     print(f"\n🔍 Analyzing batch {batch_idx}:")
     print(f"   Num graphs: {batch_data.num_graphs}")
     
-    if hasattr(batch_data, 'y1'):
-        y1_valid = sum(~torch.isnan(batch_data.y1))
-        print(f"   y1 (EA) valid values: {y1_valid}/{len(batch_data.y1)}")
-    else:
-        print(f"   y1 (EA): NOT PRESENT")
+    # Check all y* attributes
+    property_attrs = []
+    for attr in sorted(dir(batch_data)):
+        if attr.startswith('y') and attr[1:].isdigit():
+            property_attrs.append(attr)
     
-    if hasattr(batch_data, 'y2'):
-        y2_valid = sum(~torch.isnan(batch_data.y2))
-        print(f"   y2 (IP) valid values: {y2_valid}/{len(batch_data.y2)}")
-    else:
-        print(f"   y2 (IP): NOT PRESENT")
-    
-    if hasattr(batch_data, 'y3'):
-        y3_valid = sum(~torch.isnan(batch_data.y3))
-        print(f"   y3 (bandgap) valid values: {y3_valid}/{len(batch_data.y3)}")
-    else:
-        print(f"   y3 (bandgap): NOT PRESENT")
+    for i, prop_attr in enumerate(property_attrs):
+        if hasattr(batch_data, prop_attr):
+            prop_vals = getattr(batch_data, prop_attr)
+            valid_count = sum(~torch.isnan(prop_vals))
+            
+            # Use property name if provided
+            if property_names and i < len(property_names):
+                prop_display = f"{prop_attr} ({property_names[i]})"
+            else:
+                prop_display = prop_attr
+                
+            print(f"   {prop_display} valid values: {valid_count}/{len(prop_vals)}")
+        else:
+            print(f"   {prop_attr}: NOT PRESENT")
 
-def verify_semi_supervised_setup(dict_train_loader, dict_val_loader, dict_test_loader, stage=1):
+def verify_semi_supervised_setup(dict_train_loader, dict_val_loader, dict_test_loader, stage=1, 
+                                 source_properties=None, target_properties=None):
     """
     Verify that semi-supervised learning is properly set up
+    
+    Args:
+        dict_train_loader: Training data loader
+        dict_val_loader: Validation data loader
+        dict_test_loader: Test data loader
+        stage: Training stage (1 or 2)
+        source_properties: List of source property names
+        target_properties: List of target property names
     """
     print(f"\n🔍 VERIFYING SEMI-SUPERVISED SETUP FOR STAGE {stage}")
     print("="*60)
     
+    # Determine which properties to check
+    if stage == 1:
+        properties_to_check = source_properties or ['EA', 'IP']
+    else:
+        properties_to_check = target_properties or ['bandgap']
+    
+    property_mapping = get_property_attribute_mapping(properties_to_check)
+    
     # Analyze first batch in detail
     if '0' in dict_train_loader:
         first_batch = dict_train_loader['0'][0]
-        analyze_batch_properties(first_batch, batch_idx=0)
+        analyze_batch_properties(first_batch, batch_idx=0, property_names=properties_to_check)
     
     # Summary statistics
-    train_labeled, train_unlabeled = check_data_composition(dict_train_loader, 'y1', 'y2' if stage == 1 else None)
-    val_labeled, val_unlabeled = check_data_composition(dict_val_loader, 'y1', 'y2' if stage == 1 else None)
-    test_labeled, test_unlabeled = check_data_composition(dict_test_loader, 'y1', 'y2' if stage == 1 else None)
+    train_labeled, train_unlabeled = check_data_composition(dict_train_loader, properties_to_check, property_mapping)
+    val_labeled, val_unlabeled = check_data_composition(dict_val_loader, properties_to_check, property_mapping)
+    test_labeled, test_unlabeled = check_data_composition(dict_test_loader, properties_to_check, property_mapping)
     
     total_molecules = (train_labeled + train_unlabeled + val_labeled + val_unlabeled + test_labeled + test_unlabeled)
     total_labeled = train_labeled + val_labeled + test_labeled
@@ -512,8 +646,10 @@ def verify_semi_supervised_setup(dict_train_loader, dict_val_loader, dict_test_l
         print(f"\n✅ Semi-supervised learning is properly configured!")
         print(f"   The model will learn polymer grammar from ALL {total_molecules:,} molecules")
         print(f"   Property prediction will use only the {total_labeled:,} labeled molecules")
+        print(f"   Properties being learned: {properties_to_check}")
     elif stage == 1:
         print(f"\n⚠️  No unlabeled data found - Stage 1 will run as supervised learning only")
+        print(f"   Properties being learned: {properties_to_check}")
     
     return {
         'train': {'labeled': train_labeled, 'unlabeled': train_unlabeled},

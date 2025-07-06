@@ -1134,6 +1134,12 @@ parser.add_argument("--target_properties", type=str, nargs='+', default=["bandga
                     help="Properties to predict in stage 2")
 parser.add_argument("--freeze_encoder", action="store_true", default=False,
                     help="Freeze encoder during stage 2")
+parser.add_argument("--property_relationships", type=str, nargs='+', default=None,
+                    help="Property relationships in format 'target=equation' e.g., 'bandgap=abs(EA-IP)'")
+parser.add_argument("--relationship_weight", type=float, default=0.1,
+                    help="Weight for property relationship loss")
+parser.add_argument("--enable_relationship_learning", action="store_true", default=False,
+                    help="Enable learning property relationships during training")
 parser.add_argument("--freeze_decoder", action="store_true", default=False,
                     help="Freeze decoder during stage 2")
 parser.add_argument("--stage1_sample_weight", type=float, default=1.0,

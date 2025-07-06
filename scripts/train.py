@@ -10,6 +10,7 @@ from model.G2S_clean import *
 from data_processing.data_utils import *
 # deep learning packages
 import torch
+from model.G2S_clean import parse_property_relationships
 import torch.nn as nn
 from statistics import mean
 import pickle
@@ -527,9 +528,10 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
                 mse = torch.tensor(0.0, device=device)  # Dummy MSE
                 y = torch.tensor(0.0, device=device)    # Dummy property prediction
+                relationship_loss = torch.tensor(0.0, device=device)  # No relationship loss
             elif len(result) == 9:  # PP-guided VAE without relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
-                relationship_loss = torch.tensor(0.0, device=device)
+                relationship_loss = torch.tensor(0.0, device=device)  # No relationship loss
             elif len(result) == 10:  # PP-guided VAE with relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss = result
             else:
@@ -635,6 +637,10 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             
             batch_count += 1
             
+            # Log relationship loss if using relationships
+            if property_relationships and i % 50 == 0 and relationship_loss.item() > 0:
+                print(f"   🔗 Relationship loss: {relationship_loss.item():.6f}")
+            
             # 🔧 PROFILING: Print timing breakdown every 100 batches
             if i % 100 == 0 and i > 0:
                 total_time = t_data + t_forward + t_backward + t_step
@@ -739,10 +745,6 @@ def test(dict_loader):
             kld_losses.append(kl_loss.item())
             accs.append(acc.item())
             mses.append(mse.item())
-            
-            # Log relationship loss if using relationships
-            if property_relationships and i % 10 == 0 and relationship_loss.item() > 0:
-                print(f"   🔗 Relationship loss: {relationship_loss.item():.6f}")
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
@@ -1256,14 +1258,25 @@ model_config = {
     # Add property configuration to model config
     'property_count': property_count,
     'property_names': property_names,
-    # Add property relationship configs
-    'property_relationships': property_relationships,
-    'relationship_weight': args.relationship_weight,
-    'enable_relationship_learning': args.enable_relationship_learning,
     # Add new regularization parameters
     'dropout_rate': args.dropout_rate,
     'weight_decay': args.weight_decay
 }
+
+# Parse property relationships if provided
+property_relationships = {}
+if args.property_relationships:
+    property_relationships = parse_property_relationships(args.property_relationships)
+    print(f"🔗 Property relationships configured:")
+    for target, rel_info in property_relationships.items():
+        print(f"   {target} = {rel_info['equation']} (sources: {rel_info['sources']})")
+
+# Update model config with relationship settings
+model_config['property_relationships'] = property_relationships
+model_config['relationship_weight'] = args.relationship_weight
+model_config['enable_relationship_learning'] = args.enable_relationship_learning
+
+
 batch_size = model_config['batch_size']
 epochs = model_config['epochs']
 hidden_dimension = model_config['hidden_dimension']

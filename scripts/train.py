@@ -745,8 +745,10 @@ def test(dict_loader):
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
                 mse = torch.tensor(0.0, device=device)  # Dummy MSE
                 y = torch.tensor(0.0, device=device)    # Dummy property prediction
-            elif len(result) == 9:  # PP-guided VAE
+            elif len(result) == 9:  # PP-guided VAE without relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
+            elif len(result) == 10:  # PP-guided VAE with relationships
+                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss = result
             else:
                 raise ValueError(f"Unexpected number of return values from model: {len(result)}")
 

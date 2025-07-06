@@ -523,6 +523,12 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             # FIXED: Handle both basic VAE and PP-guided VAE with teacher forcing
             # Pass teacher forcing ratio to the model
             result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
+            try:
+                # Try with teacher forcing first
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
+            except TypeError:
+                # Fallback to without teacher forcing for basic VAE
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
 
             if len(result) == 7:  # Basic G2S_VAE
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
@@ -638,7 +644,7 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             batch_count += 1
             
             # Log relationship loss if using relationships
-            if property_relationships and i % 50 == 0 and relationship_loss.item() > 0:
+            if model_config.get('property_relationships') and i % 50 == 0 and relationship_loss.item() > 0:
                 print(f"   🔗 Relationship loss: {relationship_loss.item():.6f}")
             
             # 🔧 PROFILING: Print timing breakdown every 100 batches

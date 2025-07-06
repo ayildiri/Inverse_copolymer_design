@@ -527,8 +527,11 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
                 mse = torch.tensor(0.0, device=device)  # Dummy MSE
                 y = torch.tensor(0.0, device=device)    # Dummy property prediction
-            elif len(result) == 9:  # PP-guided VAE
+            elif len(result) == 9:  # PP-guided VAE without relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
+                relationship_loss = torch.tensor(0.0, device=device)
+            elif len(result) == 10:  # PP-guided VAE with relationships
+                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss = result
             else:
                 raise ValueError(f"Unexpected number of return values from model: {len(result)}")
             
@@ -736,6 +739,10 @@ def test(dict_loader):
             kld_losses.append(kl_loss.item())
             accs.append(acc.item())
             mses.append(mse.item())
+            
+            # Log relationship loss if using relationships
+            if property_relationships and i % 10 == 0 and relationship_loss.item() > 0:
+                print(f"   🔗 Relationship loss: {relationship_loss.item():.6f}")
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
@@ -1249,6 +1256,10 @@ model_config = {
     # Add property configuration to model config
     'property_count': property_count,
     'property_names': property_names,
+    # Add property relationship configs
+    'property_relationships': property_relationships,
+    'relationship_weight': args.relationship_weight,
+    'enable_relationship_learning': args.enable_relationship_learning,
     # Add new regularization parameters
     'dropout_rate': args.dropout_rate,
     'weight_decay': args.weight_decay

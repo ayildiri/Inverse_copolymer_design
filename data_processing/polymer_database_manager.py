@@ -702,13 +702,26 @@ class PolymerDatabaseManager:
         else:
             merged_df = combined_df
         
-        # Fix unknown values if requested
+        # Fix unknown values if requested (this now includes poly_id)
         if fix_unknowns:
             merged_df = self._fix_unknown_values(merged_df)
         
-        # Regenerate poly_ids to ensure sequential numbering starting from 1
-        if 'poly_id' in merged_df.columns:
+        # Only regenerate poly_ids if not already fixed or if column doesn't exist
+        if 'poly_id' not in merged_df.columns:
             merged_df['poly_id'] = self.generate_poly_ids(merged_df, set())
+        elif not fix_unknowns:
+            # If we didn't fix unknowns, still need to handle invalid poly_ids
+            invalid_mask = (
+                merged_df['poly_id'].isna() | 
+                (merged_df['poly_id'] == 'unknown') | 
+                (merged_df['poly_id'] == 'Unknown') | 
+                (merged_df['poly_id'] == '') |
+                (merged_df['poly_id'] == 'nan')
+            )
+            
+            if invalid_mask.any():
+                # Regenerate all IDs to ensure consistency
+                merged_df['poly_id'] = self.generate_poly_ids(merged_df, set())
         
         # Order columns nicely
         merged_df = self._order_columns(merged_df)
@@ -2052,7 +2065,31 @@ class PolymerDatabaseManager:
             return df
         
         fixed_count = 0
-        
+
+        # Fix poly_id first - regenerate any unknown/invalid poly_ids
+        if 'poly_id' in df.columns:
+            # Check for unknown, empty, or non-string poly_ids
+            invalid_mask = (
+                df['poly_id'].isna() | 
+                (df['poly_id'] == 'unknown') | 
+                (df['poly_id'] == 'Unknown') | 
+                (df['poly_id'] == '') |
+                (df['poly_id'] == 'nan')
+            )
+            
+            if invalid_mask.any():
+                # Get existing valid IDs to continue from
+                valid_ids = df.loc[~invalid_mask, 'poly_id'].astype(str).unique()
+                existing_ids = set(valid_ids)
+                
+                # Generate new IDs only for invalid entries
+                new_ids = self.generate_poly_ids(df[invalid_mask], existing_ids)
+                df.loc[invalid_mask, 'poly_id'] = new_ids
+                fixed_count += invalid_mask.sum()
+                
+                if self.verbose:
+                    logger.info(f"Fixed {invalid_mask.sum()} invalid poly_id values")
+                    
         # FIXED: Use vectorized operations for better performance
         # Fix poly_type
         if 'poly_type' in df.columns and 'poly_chemprop_input' in df.columns:

@@ -276,7 +276,7 @@ def safe_model_creation(model_class, *args, **kwargs):
         raise
 
 def load_transfer_data_safely(csv_path, stage, source_properties, target_properties, 
-                              batch_size, tokenization, vocab, device, **kwargs):
+                              batch_size, tokenization, vocab, device, dataset_path=None, **kwargs):
     """Safely load transfer learning data with vocabulary validation"""
     
     print(f"🔄 Loading transfer learning data for stage {stage}")
@@ -296,6 +296,7 @@ def load_transfer_data_safely(csv_path, stage, source_properties, target_propert
             tokenization=tokenization,
             vocab=vocab,
             device=device,
+            dataset_path=dataset_path,  # FIXED: Pass the dataset_path
             **kwargs
         )
         
@@ -317,7 +318,10 @@ def load_transfer_data_safely(csv_path, stage, source_properties, target_propert
     except ImportError:
         print("❌ transfer_data_utils not found. Using standard data loading...")
         # Fallback to standard data loading
-        data_path_prefix = os.path.join(os.path.dirname(csv_path), f'dict_{{}}_loader_{tokenization}.pt')
+        if dataset_path:
+            data_path_prefix = os.path.join(dataset_path, f'dict_{{}}_loader_{tokenization}.pt')
+        else:
+            data_path_prefix = os.path.join(os.path.dirname(csv_path), f'dict_{{}}_loader_{tokenization}.pt')
         try:
             dict_train_loader = torch.load(data_path_prefix.format('train'))
             dict_val_loader = torch.load(data_path_prefix.format('val'))
@@ -1301,7 +1305,8 @@ if args.training_stage == 1:
         tokenization=tokenization,
         vocab=vocab,
         sample_weight=args.stage1_sample_weight,
-        device=device
+        device=device,
+        dataset_path=args.dataset_path  # FIXED: Pass the dataset_path argument
     )
     
     # Update property names for stage 1
@@ -1320,7 +1325,8 @@ else:  # Stage 2
         batch_size=batch_size,
         tokenization=tokenization,
         vocab=vocab,
-        device=device
+        device=device,
+        dataset_path=args.dataset_path  # FIXED: Pass the dataset_path argument
     )
     
     # Update property names for stage 2

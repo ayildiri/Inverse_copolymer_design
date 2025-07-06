@@ -1885,6 +1885,35 @@ class G2S_VAE_Transfer(nn.Module):
         self.alpha = model_config['max_alpha'] if model_config['alpha'] == "fixed" else 0.0
         self.beta = 1.0 if model_config["beta"] != "schedule" else 1.0
         
+        # Store pretrained property predictor for source properties
+        if pretrained_model is not None and hasattr(pretrained_model, 'PP_lin1'):
+            self.source_PP_lin1 = pretrained_model.PP_lin1
+            self.source_PP_lin2 = pretrained_model.PP_lin2
+            self.source_property_count = len(self.source_properties)
+            
+            # Freeze source property predictor
+            for param in self.source_PP_lin1.parameters():
+                param.requires_grad = False
+            for param in self.source_PP_lin2.parameters():
+                param.requires_grad = False
+                
+            print(f"Loaded frozen property predictor for {self.source_properties}")
+        
+        # Property relationship modules
+        self.property_relationships = model_config.get('property_relationships', {})
+        self.relationship_weight = model_config.get('relationship_weight', 0.1)
+        self.relationship_modules = nn.ModuleDict()
+        
+        # Create relationship modules if specified
+        if self.property_relationships:
+            for target_prop, rel_info in self.property_relationships.items():
+                self.relationship_modules[target_prop] = PropertyRelationshipModule(
+                    rel_info['equation'],
+                    rel_info['sources'],
+                    target_prop,
+                    device
+                )f
+        
         # Enhanced property predictor for transfer learning
         self.PP_lin1 = Sequential(
             Linear(embedding_dim, self.pp_ffn_hidden),
@@ -1923,16 +1952,30 @@ class G2S_VAE_Transfer(nn.Module):
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
     
-        # Property predictions with better architecture
+        # Predict source properties using frozen pretrained predictor
+        source_predictions = {}
+        if hasattr(self, 'source_PP_lin1'):
+            with torch.no_grad():  # No gradients for source predictions
+                source_hidden = self.source_PP_lin1(z)
+                source_y = self.source_PP_lin2(source_hidden)
+                
+                # Map predictions to property names
+                for i, prop_name in enumerate(self.source_properties):
+                    if i < source_y.shape[1]:
+                        source_predictions[prop_name] = source_y[:, i].detach()
+        
+        # Predict target properties with new predictor
         pp_hidden = self.PP_lin1(z)
         y = self.PP_lin2(pp_hidden)
         
         # Get true values for target properties
         y_true_list = []
+        property_predictions = {}
+        
         for i, prop_name in enumerate(self.target_properties):
             # Map property names to batch attributes
             prop_attr_map = {
-                'EA': 'y1', 'IP': 'y2', 'bandgap': 'y3',  # Adjust based on your setup
+                'EA': 'y1', 'IP': 'y2', 'bandgap': 'y3',
                 # Add more mappings as needed
             }
             
@@ -1942,14 +1985,41 @@ class G2S_VAE_Transfer(nn.Module):
             else:
                 y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
             y_true_list.append(y_prop)
+            
+            # Store target predictions
+            if i < y.shape[1]:
+                property_predictions[prop_name] = y[:, i]
         
         y_true = torch.cat(y_true_list, dim=1)
         mse = self.masked_mse(y_true, y)
-    
+        
+        # Calculate relationship loss using source predictions
+        relationship_loss = torch.tensor(0.0, device=device)
+        if self.property_relationships and self.training:
+            # Combine source and target predictions
+            all_predictions = {**source_predictions, **property_predictions}
+            
+            for target_prop, rel_module in self.relationship_modules.items():
+                if target_prop in property_predictions:
+                    rel_info = self.property_relationships[target_prop]
+                    # Check if all source properties are available
+                    if all(src in all_predictions for src in rel_info['sources']):
+                        # Predict target using relationship
+                        predicted_target = rel_module(all_predictions)
+                        actual_target = property_predictions[target_prop]
+                        
+                        # Calculate relationship guidance loss
+                        # This encourages the target prediction to align with the relationship
+                        rel_loss = F.mse_loss(actual_target, predicted_target.detach())
+                        relationship_loss += rel_loss
+        
         # Decode
         recon_loss, acc, predictions, target = self.Decoder(batch_list, z)
+        
+        # Total loss with relationship guidance
+        total_loss = recon_loss + self.beta*kl_loss + self.alpha*mse + self.relationship_weight*relationship_loss
     
-        return recon_loss + self.beta*kl_loss + self.alpha*mse, recon_loss, kl_loss, mse, acc, predictions, target, z, y
+        return total_loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss
     
     def masked_mse(self, y_true, y_pred):
         mask = ~torch.isnan(y_true)

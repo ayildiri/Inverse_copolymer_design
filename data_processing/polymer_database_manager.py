@@ -1937,18 +1937,12 @@ class PolymerDatabaseManager:
 
     def _detect_polymer_type_from_connectivity(self, connectivity: str) -> str:
         """
-        Detect polymer type from connectivity pattern using smart heuristics
+        FIXED VERSION: Detect polymer type from connectivity pattern using smart heuristics
         """
         if not connectivity:
             return "unknown"
         
-        # First try the original regex patterns for backward compatibility
-        for poly_type, patterns in self.polymer_type_patterns.items():
-            for pattern in patterns:
-                if re.search(pattern, connectivity):
-                    return poly_type
-        
-        # If regex patterns don't match, use smart analysis
+        # Analyze the connectivity pattern
         analysis = self._analyze_connectivity_pattern(connectivity)
         
         if not analysis:
@@ -1963,42 +1957,61 @@ class PolymerDatabaseManager:
         bb_edges = analysis['bb_edges']
         ab_edges = analysis['ab_edges']
         
-        # ALTERNATING: Only cross-monomer connections (A-B edges)
-        if self_edges == 0 and ab_edges >= 4:
+        # DEBUG: Log the analysis for troubleshooting
+        if self.verbose and total_edges > 0:
+            logger.debug(f"Connectivity analysis: edges={total_edges}, self={self_edges}, weights={unique_weights}")
+        
+        # ALTERNATING: Only cross-monomer connections (A-B edges), NO self-edges
+        if self_edges == 0:
+            # No self-edges means alternating polymer
             return "alternating"
         
-        # RANDOM: All possible connections (A-A, B-B, A-B)
-        # Has many edges including self-edges
-        elif total_edges >= 10 and self_edges >= 4:
-            if aa_edges > 0 and bb_edges > 0 and ab_edges > 0:
-                return "random"
-            elif self_edges >= 2 and cross_edges >= 4:
+        # BLOCK: Has self-edges with characteristic weights
+        # Block polymers typically have weights around 0.375 (3/8) and 0.125 (1/8)
+        has_block_weights = False
+        for w in unique_weights:
+            if abs(w - 0.375) < 0.01 or abs(w - 0.125) < 0.01 or abs(w - 0.75) < 0.01:
+                has_block_weights = True
+                break
+        
+        if self_edges > 0 and has_block_weights:
+            return "block"
+        
+        # RANDOM: Many edges with uniform weights
+        # Random polymers typically have all possible connections with equal weights
+        if total_edges >= 10:
+            # Check if weights are uniform (all same or very similar)
+            if len(unique_weights) == 1:
+                weight = unique_weights[0]
+                if abs(weight - 0.25) < 0.01 or abs(weight - 0.1) < 0.01:
+                    return "random"
+            # Also check if it has characteristics of random (many connections)
+            elif self_edges >= 4 and ab_edges >= 4:
                 return "random"
         
-        # BLOCK: Preference for same-monomer connections
+        # Additional detection based on specific patterns
+        if total_edges == 10 and len(unique_weights) <= 2:
+            # 10 edges is characteristic of random polymer
+            return "random"
+        
+        # More flexible block detection
+        if self_edges >= 2 and total_edges >= 6 and total_edges < 10:
+            # Has self-edges but not too many total edges
+            return "block"
+        
+        # Edge count based detection
+        if self_edges == 0 and total_edges == 4:
+            return "alternating"
+        elif self_edges > 0 and total_edges <= 6:
+            return "block"
+        elif total_edges >= 8:
+            return "random"
+        
+        # Final fallback
+        if self_edges == 0:
+            return "alternating"
         elif self_edges > 0:
-            if aa_edges > 0 and bb_edges > 0:
-                if len(unique_weights) > 1 or (len(unique_weights) == 1 and abs(unique_weights[0] - 0.375) < 0.01):
-                    return "block"
-            if self_edges >= 2 and ab_edges > 0:
-                return "block"
-        
-        # Additional heuristics based on weights
-        if len(unique_weights) == 1:
-            weight = unique_weights[0]
-            if abs(weight - 0.5) < 0.01 and ab_edges >= 4:
-                return "alternating"
-            elif abs(weight - 0.25) < 0.01 and total_edges >= 6:
-                return "random"
-            elif abs(weight - 0.375) < 0.01:
-                return "block"
-        
-        # Fallback heuristics
-        if self_edges > 0 and cross_edges > 0:
-            if total_edges >= 8:
-                return "random"
-            else:
-                return "block"
+            return "block"
         
         return "unknown"
     

@@ -3,6 +3,7 @@ import numpy as np
 import networkx as nx
 #import igraph
 import torch
+import re
 #from torch.autograd import Variable
 from torch.distributions import Bernoulli, Categorical
 from torch_geometric.nn import MessagePassing, global_mean_pool
@@ -1238,55 +1239,6 @@ class SequenceDecoder(nn.Module):
                         weights[nr,i] *= multiplier
 
         return weights
-    
-    def forward(self, property_predictions):
-        """
-        Args:
-            property_predictions: dict of {property_name: tensor}
-        Returns:
-            predicted target property value
-        """
-        # Gather source property values
-        source_values = []
-        for prop in self.source_props:
-            if prop in property_predictions:
-                source_values.append(property_predictions[prop])
-            else:
-                raise ValueError(f"Source property {prop} not found in predictions")
-        
-        # Apply equation
-        result = self.equation_lambda(source_values)
-        return result
-
-def parse_property_relationships(relationship_strings):
-    """Parse command line relationship strings into structured format"""
-    relationships = {}
-    if relationship_strings is None:
-        return relationships
-        
-    for rel_str in relationship_strings:
-        # Format: "target=equation" e.g., "bandgap=abs(EA-IP)"
-        if '=' not in rel_str:
-            print(f"Warning: Invalid relationship format: {rel_str}")
-            continue
-            
-        target, equation = rel_str.split('=', 1)
-        target = target.strip()
-        equation = equation.strip()
-        
-        # Extract source properties from equation
-        # This is a simple extraction - looks for uppercase property names
-        import re
-        # Match property names (uppercase letters potentially followed by lowercase)
-        potential_props = re.findall(r'\b[A-Z][A-Za-z0-9_]*\b', equation)
-        source_props = [p for p in potential_props if p not in ['abs', 'exp', 'log', 'sqrt']]
-        
-        relationships[target] = {
-            'equation': equation,
-            'sources': source_props
-        }
-    
-    return relationships
 
 class G2S_VAE(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim, embedding_dim, device, model_config, vocab, seed, loss_weights=None, add_latent=True):

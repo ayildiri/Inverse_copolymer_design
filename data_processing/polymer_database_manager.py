@@ -1166,7 +1166,216 @@ class PolymerDatabaseManager:
                     return None
         except:
             return None
+    # Add these enhanced methods to your PolymerDatabaseManager class
 
+    def validate_and_fix_smiles(self, smiles: str) -> Tuple[str, bool]:
+        """
+        Validate SMILES and attempt to fix common issues
+        
+        Returns:
+            Tuple of (fixed_smiles, is_valid)
+        """
+        if not smiles or pd.isna(smiles):
+            return None, False
+        
+        smiles = str(smiles).strip()
+        
+        # Count parentheses
+        open_count = smiles.count('(')
+        close_count = smiles.count(')')
+        
+        # Fix truncated SMILES by adding missing closing parentheses
+        if open_count > close_count:
+            smiles += ')' * (open_count - close_count)
+            if self.verbose:
+                logger.info(f"Fixed truncated SMILES by adding {open_count - close_count} closing parentheses")
+        
+        # Fix common syntax errors
+        # Fix C4=O( pattern -> C4(=O)
+        smiles = re.sub(r'([A-Za-z]\d+)=O\(', r'\1(=O)', smiles)
+        
+        # Fix =O( at the end -> (=O)
+        smiles = re.sub(r'=O\($', '(=O)', smiles)
+        
+        # Validate with RDKit
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is not None:
+                return smiles, True
+            else:
+                return smiles, False
+        except:
+            return smiles, False
+    
+    def enhanced_detect_polymer_type(self, connectivity: str) -> str:
+        """
+        Enhanced polymer type detection with more flexible pattern matching
+        """
+        if not connectivity:
+            return "unknown"
+        
+        # Count edge types
+        edges = re.findall(r'<(\d+)-(\d+):', connectivity)
+        if not edges:
+            return "unknown"
+        
+        # Create edge sets
+        self_edges = set()
+        cross_edges = set()
+        
+        for n1, n2 in edges:
+            n1, n2 = int(n1), int(n2)
+            if n1 == n2:
+                self_edges.add((n1, n2))
+            else:
+                # Normalize cross edges (smaller number first)
+                cross_edges.add((min(n1, n2), max(n1, n2)))
+        
+        # Decision logic
+        if len(self_edges) == 0:
+            # No self-edges = alternating
+            return "alternating"
+        
+        elif len(self_edges) >= 4:
+            # Many self-edges (1-1, 2-2, 3-3, 4-4) = random
+            return "random"
+        
+        elif len(self_edges) > 0 and len(self_edges) < 4:
+            # Some self-edges but not all = block
+            return "block"
+        
+        # Fallback to edge count
+        total_edges = len(edges)
+        if total_edges == 4 and len(self_edges) == 0:
+            return "alternating"
+        elif total_edges >= 10:
+            return "random"
+        elif total_edges >= 6:
+            return "block"
+        
+        return "unknown"
+    
+    def fix_dataset_issues(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Comprehensive fix for dataset issues including truncated SMILES and unknown poly_types
+        """
+        fixed_df = df.copy()
+        fixes_made = {
+            'truncated_smiles': 0,
+            'invalid_smiles': 0,
+            'unknown_poly_types': 0,
+            'missing_poly_inputs': 0
+        }
+        
+        if self.verbose:
+            logger.info("Starting comprehensive dataset fix...")
+        
+        # 1. Fix truncated/invalid SMILES
+        for col in ['monoA', 'monoB']:
+            if col in fixed_df.columns:
+                for idx, smiles in enumerate(fixed_df[col]):
+                    if pd.notna(smiles) and smiles:
+                        fixed_smiles, is_valid = self.validate_and_fix_smiles(smiles)
+                        if fixed_smiles != smiles:
+                            fixed_df.at[idx, col] = fixed_smiles
+                            fixes_made['truncated_smiles'] += 1
+                        if not is_valid:
+                            fixes_made['invalid_smiles'] += 1
+        
+        # 2. Re-canonicalize SMILES after fixes
+        if 'monoA' in fixed_df.columns:
+            fixed_df['monoA'] = fixed_df['monoA'].apply(
+                lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else None
+            )
+        
+        if 'monoB' in fixed_df.columns:
+            fixed_df['monoB'] = fixed_df['monoB'].apply(
+                lambda x: self.canonicalize_smiles(str(x)) if pd.notna(x) else None
+            )
+        
+        # 3. Regenerate IUPAC names for fixed SMILES
+        if 'monoA_IUPAC' in fixed_df.columns:
+            mask = fixed_df['monoA_IUPAC'] == 'Invalid_SMILES'
+            if mask.any():
+                fixed_df.loc[mask, 'monoA_IUPAC'] = fixed_df.loc[mask, 'monoA'].apply(self.get_iupac_name)
+        
+        if 'monoB_IUPAC' in fixed_df.columns:
+            mask = fixed_df['monoB_IUPAC'] == 'Invalid_SMILES'
+            if mask.any():
+                fixed_df.loc[mask, 'monoB_IUPAC'] = fixed_df.loc[mask, 'monoB'].apply(self.get_iupac_name)
+        
+        # 4. Fix unknown poly_types using enhanced detection
+        if 'poly_type' in fixed_df.columns and 'poly_chemprop_input' in fixed_df.columns:
+            unknown_mask = fixed_df['poly_type'].isin(['unknown', 'Unknown', None, ''])
+            
+            for idx in fixed_df[unknown_mask].index:
+                poly_input = fixed_df.at[idx, 'poly_chemprop_input']
+                if pd.notna(poly_input):
+                    parts = str(poly_input).split('|')
+                    if len(parts) >= 4:  # monomers|fracA|fracB|connectivity
+                        connectivity = parts[3]
+                        detected_type = self.enhanced_detect_polymer_type(connectivity)
+                        if detected_type != "unknown":
+                            fixed_df.at[idx, 'poly_type'] = detected_type
+                            fixes_made['unknown_poly_types'] += 1
+        
+        # 5. Regenerate poly_chemprop_input for rows with valid monomers but missing/invalid poly_input
+        if all(col in fixed_df.columns for col in ['monoA', 'monoB', 'poly_type', 'fracA']):
+            missing_mask = fixed_df['poly_chemprop_input'].isna()
+            
+            for idx in fixed_df[missing_mask].index:
+                monoA = fixed_df.at[idx, 'monoA']
+                monoB = fixed_df.at[idx, 'monoB'] 
+                poly_type = fixed_df.at[idx, 'poly_type']
+                fracA = fixed_df.at[idx, 'fracA']
+                
+                if all(pd.notna(x) for x in [monoA, monoB, poly_type, fracA]):
+                    poly_input = self.make_poly_chemprop_input(monoA, monoB, poly_type, fracA)
+                    if poly_input:
+                        fixed_df.at[idx, 'poly_chemprop_input'] = poly_input
+                        fixes_made['missing_poly_inputs'] += 1
+        
+        # Report fixes
+        if self.verbose:
+            logger.info("Dataset fixes completed:")
+            for fix_type, count in fixes_made.items():
+                if count > 0:
+                    logger.info(f"  - {fix_type}: {count} fixes")
+        
+        return fixed_df
+    
+    # Enhanced function to use after smart merge
+    def post_merge_cleanup(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Comprehensive cleanup after merging datasets
+        """
+        if self.verbose:
+            logger.info("Running post-merge cleanup...")
+        
+        # 1. Fix dataset issues
+        df = self.fix_dataset_issues(df)
+        
+        # 2. Remove rows with unfixable issues
+        initial_count = len(df)
+        
+        # Remove rows where both monomers are invalid
+        if all(col in df.columns for col in ['monoA', 'monoB']):
+            valid_mask = df['monoA'].notna() | df['monoB'].notna()
+            df = df[valid_mask]
+        
+        # Remove rows without poly_chemprop_input
+        if 'poly_chemprop_input' in df.columns:
+            df = df[df['poly_chemprop_input'].notna()]
+        
+        final_count = len(df)
+        if initial_count != final_count and self.verbose:
+            logger.info(f"Removed {initial_count - final_count} unfixable rows")
+        
+        # 3. Final sequential poly_id regeneration
+        df['poly_id'] = range(1, len(df) + 1)
+        
+        return df
+    
     def _fix_double_bonds(self, smiles: str) -> str:
         """Fix common double bond issues"""
         fixed = smiles
@@ -2018,81 +2227,8 @@ class PolymerDatabaseManager:
         """
         FIXED VERSION: Detect polymer type from connectivity pattern using smart heuristics
         """
-        if not connectivity:
-            return "unknown"
-        
-        # Analyze the connectivity pattern
-        analysis = self._analyze_connectivity_pattern(connectivity)
-        
-        if not analysis:
-            return "unknown"
-        
-        # Extract features
-        total_edges = analysis['total_edges']
-        self_edges = analysis['self_edges']
-        cross_edges = analysis['cross_edges']
-        unique_weights = analysis['unique_weights']
-        aa_edges = analysis['aa_edges']
-        bb_edges = analysis['bb_edges']
-        ab_edges = analysis['ab_edges']
-        
-        # DEBUG: Log the analysis for troubleshooting
-        if self.verbose and total_edges > 0:
-            logger.debug(f"Connectivity analysis: edges={total_edges}, self={self_edges}, weights={unique_weights}")
-        
-        # ALTERNATING: Only cross-monomer connections (A-B edges), NO self-edges
-        if self_edges == 0:
-            # No self-edges means alternating polymer
-            return "alternating"
-        
-        # BLOCK: Has self-edges with characteristic weights
-        # Block polymers typically have weights around 0.375 (3/8) and 0.125 (1/8)
-        has_block_weights = False
-        for w in unique_weights:
-            if abs(w - 0.375) < 0.01 or abs(w - 0.125) < 0.01 or abs(w - 0.75) < 0.01:
-                has_block_weights = True
-                break
-        
-        if self_edges > 0 and has_block_weights:
-            return "block"
-        
-        # RANDOM: Many edges with uniform weights
-        # Random polymers typically have all possible connections with equal weights
-        if total_edges >= 10:
-            # Check if weights are uniform (all same or very similar)
-            if len(unique_weights) == 1:
-                weight = unique_weights[0]
-                if abs(weight - 0.25) < 0.01 or abs(weight - 0.1) < 0.01:
-                    return "random"
-            # Also check if it has characteristics of random (many connections)
-            elif self_edges >= 4 and ab_edges >= 4:
-                return "random"
-        
-        # Additional detection based on specific patterns
-        if total_edges == 10 and len(unique_weights) <= 2:
-            # 10 edges is characteristic of random polymer
-            return "random"
-        
-        # More flexible block detection
-        if self_edges >= 2 and total_edges >= 6 and total_edges < 10:
-            # Has self-edges but not too many total edges
-            return "block"
-        
-        # Edge count based detection
-        if self_edges == 0 and total_edges == 4:
-            return "alternating"
-        elif self_edges > 0 and total_edges <= 6:
-            return "block"
-        elif total_edges >= 8:
-            return "random"
-        
-        # Final fallback
-        if self_edges == 0:
-            return "alternating"
-        elif self_edges > 0:
-            return "block"
-        
-        return "unknown"
+        # Use the new enhanced method instead
+        return self.enhanced_detect_polymer_type(connectivity)
     
     def _detect_composition_from_stoichiometry(self, stoich: str) -> str:
         """
@@ -3989,6 +4125,63 @@ def run_interactive_mode():
     
     return combined_df
 
+def fix_existing_database(database_path: str, output_path: str = None):
+    """
+    Fix an existing database with truncated SMILES and unknown poly_types
+    """
+    if output_path is None:
+        output_path = database_path.replace('.csv', '_fixed.csv')
+    
+    # Load database
+    df = pd.read_csv(database_path)
+    print(f"Loaded database with {len(df)} rows")
+    
+    # Count issues before fixing
+    issues_before = {
+        'invalid_smiles': 0,
+        'unknown_poly_types': 0
+    }
+    
+    if 'monoA_IUPAC' in df.columns:
+        issues_before['invalid_smiles'] += (df['monoA_IUPAC'] == 'Invalid_SMILES').sum()
+    if 'monoB_IUPAC' in df.columns:
+        issues_before['invalid_smiles'] += (df['monoB_IUPAC'] == 'Invalid_SMILES').sum()
+    if 'poly_type' in df.columns:
+        issues_before['unknown_poly_types'] = df['poly_type'].isin(['unknown', 'Unknown']).sum()
+    
+    print(f"\nIssues before fixing:")
+    print(f"  - Invalid SMILES: {issues_before['invalid_smiles']}")
+    print(f"  - Unknown poly_types: {issues_before['unknown_poly_types']}")
+    
+    # Initialize manager and fix
+    manager = PolymerDatabaseManager(verbose=True)
+    fixed_df = manager.fix_dataset_issues(df)
+    fixed_df = manager.post_merge_cleanup(fixed_df)
+    
+    # Count issues after fixing
+    issues_after = {
+        'invalid_smiles': 0,
+        'unknown_poly_types': 0
+    }
+    
+    if 'monoA_IUPAC' in fixed_df.columns:
+        issues_after['invalid_smiles'] += (fixed_df['monoA_IUPAC'] == 'Invalid_SMILES').sum()
+    if 'monoB_IUPAC' in fixed_df.columns:
+        issues_after['invalid_smiles'] += (fixed_df['monoB_IUPAC'] == 'Invalid_SMILES').sum()
+    if 'poly_type' in fixed_df.columns:
+        issues_after['unknown_poly_types'] = fixed_df['poly_type'].isin(['unknown', 'Unknown']).sum()
+    
+    print(f"\nIssues after fixing:")
+    print(f"  - Invalid SMILES: {issues_after['invalid_smiles']} (fixed {issues_before['invalid_smiles'] - issues_after['invalid_smiles']})")
+    print(f"  - Unknown poly_types: {issues_after['unknown_poly_types']} (fixed {issues_before['unknown_poly_types'] - issues_after['unknown_poly_types']})")
+    
+    # Save fixed database
+    fixed_df.to_csv(output_path, index=False)
+    print(f"\nFixed database saved to: {output_path}")
+    print(f"Final row count: {len(fixed_df)}")
+    
+    return fixed_df
+    
 # Version info
 __version__ = "3.0.0"
 __author__ = "Universal Polymer Database Toolkit"

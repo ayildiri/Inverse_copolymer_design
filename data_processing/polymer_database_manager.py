@@ -590,12 +590,12 @@ class PolymerDatabaseManager:
     # ========================
     
     def smart_merge_datasets(self, dataset_paths: List[str], output_path: str,
-                           merge_strategy: Union[str, MergeStrategy] = MergeStrategy.FIRST,
-                           repair_missing: bool = True,
-                           expand_monomers: bool = True,
-                           remove_duplicates: bool = True,
-                           fix_unknowns: bool = True,
-                           custom_identifier_columns: set = None) -> pd.DataFrame:
+                       merge_strategy: Union[str, MergeStrategy] = MergeStrategy.FIRST,
+                       repair_missing: bool = True,
+                       expand_monomers: bool = True,
+                       remove_duplicates: bool = True,
+                       fix_unknowns: bool = True,
+                       custom_identifier_columns: set = None) -> pd.DataFrame:
         """
         Smart merge multiple polymer datasets of different types
         
@@ -702,35 +702,101 @@ class PolymerDatabaseManager:
         else:
             merged_df = combined_df
         
-        # Fix unknown values if requested (this now includes poly_id)
-        if fix_unknowns:
-            merged_df = self._fix_unknown_values(merged_df)
+        # ALWAYS regenerate poly_ids for clean sequential numbering from 1
+        if self.verbose:
+            logger.info("Regenerating all poly_ids for clean sequential numbering...")
         
-        # Only regenerate poly_ids if not already fixed or if column doesn't exist
-        if 'poly_id' not in merged_df.columns:
-            merged_df['poly_id'] = self.generate_poly_ids(merged_df, set())
-        elif not fix_unknowns:
-            # If we didn't fix unknowns, still need to handle invalid poly_ids
-            invalid_mask = (
-                merged_df['poly_id'].isna() | 
-                (merged_df['poly_id'] == 'unknown') | 
-                (merged_df['poly_id'] == 'Unknown') | 
-                (merged_df['poly_id'] == '') |
-                (merged_df['poly_id'] == 'nan')
-            )
+        # First, order by existing poly_id if possible to maintain some ordering
+        if 'poly_id' in merged_df.columns:
+            # Try to extract numeric values for sorting
+            def extract_numeric(poly_id):
+                try:
+                    poly_id_str = str(poly_id)
+                    if poly_id_str.lower() in ['unknown', 'nan', 'none', '']:
+                        return float('inf')  # Put unknowns at the end
+                    
+                    # Handle underscore formats
+                    if '_' in poly_id_str:
+                        parts = poly_id_str.split('_')
+                        for part in reversed(parts):
+                            if part.isdigit():
+                                return int(part)
+                    
+                    if poly_id_str.isdigit():
+                        return int(poly_id_str)
+                    
+                    # Extract any number
+                    numbers = re.findall(r'\d+', poly_id_str)
+                    if numbers:
+                        return max(int(n) for n in numbers)
+                    
+                    return float('inf')
+                except:
+                    return float('inf')
             
-            if invalid_mask.any():
-                # Regenerate all IDs to ensure consistency
-                merged_df['poly_id'] = self.generate_poly_ids(merged_df, set())
+            # Sort by extracted numeric value
+            merged_df['_sort_key'] = merged_df['poly_id'].apply(extract_numeric)
+            merged_df = merged_df.sort_values('_sort_key').drop('_sort_key', axis=1)
+        
+        # ALWAYS regenerate poly_ids starting from 1
+        merged_df['poly_id'] = self.generate_poly_ids(merged_df, set())
+        
+        if self.verbose:
+            logger.info(f"Generated sequential poly_ids from 1 to {len(merged_df)}")
+        
+        # Fix other unknown values if requested
+        if fix_unknowns:
+            # Create a copy to fix unknowns
+            fixed_df = merged_df.copy()
+            
+            # Fix unknowns in poly_type, comp, and IUPAC columns
+            # Fix poly_type
+            if 'poly_type' in fixed_df.columns and 'poly_chemprop_input' in fixed_df.columns:
+                unknown_mask = fixed_df['poly_type'].isin(['unknown', 'Unknown', None, '']) | fixed_df['poly_type'].isna()
+                
+                if unknown_mask.any():
+                    def extract_and_detect_poly_type(poly_input):
+                        if pd.notna(poly_input):
+                            parts = str(poly_input).split('|')
+                            if len(parts) >= 3:
+                                connectivity = parts[2]
+                                return self._detect_polymer_type_from_connectivity(connectivity)
+                        return "unknown"
+                    
+                    detected_types = fixed_df.loc[unknown_mask, 'poly_chemprop_input'].apply(extract_and_detect_poly_type)
+                    fixed_mask = detected_types != "unknown"
+                    fixed_df.loc[unknown_mask & fixed_mask, 'poly_type'] = detected_types[fixed_mask]
+            
+            # Fix comp
+            if 'comp' in fixed_df.columns and 'poly_chemprop_input' in fixed_df.columns:
+                unknown_mask = fixed_df['comp'].isin(['unknown', 'Unknown', None, '']) | fixed_df['comp'].isna()
+                
+                if unknown_mask.any():
+                    def extract_and_detect_comp(poly_input):
+                        if pd.notna(poly_input):
+                            parts = str(poly_input).split('|')
+                            if len(parts) >= 2:
+                                stoich = parts[1]
+                                return self._detect_composition_from_stoichiometry(stoich)
+                        return "unknown"
+                    
+                    detected_comps = fixed_df.loc[unknown_mask, 'poly_chemprop_input'].apply(extract_and_detect_comp)
+                    fixed_mask = detected_comps != "unknown"
+                    fixed_df.loc[unknown_mask & fixed_mask, 'comp'] = detected_comps[fixed_mask]
+            
+            # Keep our regenerated poly_ids
+            fixed_df['poly_id'] = merged_df['poly_id']
+            merged_df = fixed_df
         
         # Order columns nicely
         merged_df = self._order_columns(merged_df)
-
+    
         merged_df.to_csv(output_path, index=False)  
                                
         if self.verbose:
             logger.info(f"Smart merge complete!")
             logger.info(f"Final dataset: {len(merged_df)} polymers")
+            logger.info(f"Poly IDs: Sequential from 1 to {len(merged_df)}")
             logger.info(f"Saved to: {output_path}")
             
             # Report property coverage
@@ -2059,39 +2125,58 @@ class PolymerDatabaseManager:
     
     def _fix_unknown_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Fix unknown values in poly_type, comp, and IUPAC names
+        Fix unknown values in poly_type, comp, IUPAC names, and poly_id
         """
         if not self.fix_unknowns:
             return df
         
         fixed_count = 0
-
-        # Fix poly_id first - regenerate any unknown/invalid poly_ids
+        
+        # Fix poly_id FIRST - regenerate any unknown/invalid poly_ids
         if 'poly_id' in df.columns:
-            # Check for unknown, empty, or non-string poly_ids
+            # Check for unknown, empty, or invalid poly_ids (convert to string for comparison)
+            df['poly_id'] = df['poly_id'].astype(str)  # Ensure string type for comparison
+            
             invalid_mask = (
                 df['poly_id'].isna() | 
                 (df['poly_id'] == 'unknown') | 
                 (df['poly_id'] == 'Unknown') | 
                 (df['poly_id'] == '') |
-                (df['poly_id'] == 'nan')
+                (df['poly_id'] == 'nan') |
+                (df['poly_id'] == 'None') |
+                (df['poly_id'] == 'NaN')
             )
             
             if invalid_mask.any():
-                # Get existing valid IDs to continue from
-                valid_ids = df.loc[~invalid_mask, 'poly_id'].astype(str).unique()
-                existing_ids = set(valid_ids)
+                if self.verbose:
+                    logger.info(f"Found {invalid_mask.sum()} invalid poly_id values to fix")
                 
-                # Generate new IDs only for invalid entries
-                new_ids = self.generate_poly_ids(df[invalid_mask], existing_ids)
-                df.loc[invalid_mask, 'poly_id'] = new_ids
-                fixed_count += invalid_mask.sum()
+                # Get existing valid IDs to continue from
+                valid_mask = ~invalid_mask
+                if valid_mask.any():
+                    valid_ids = df.loc[valid_mask, 'poly_id'].astype(str).unique()
+                    # Filter out any that might still be invalid
+                    valid_ids = [pid for pid in valid_ids if pid not in ['unknown', 'Unknown', '', 'nan', 'None', 'NaN']]
+                    existing_ids = set(valid_ids)
+                else:
+                    # All IDs are invalid, start fresh
+                    existing_ids = set()
+                
+                # Generate new IDs for all rows (to ensure sequential)
+                if invalid_mask.all():
+                    # All are invalid - regenerate entire column
+                    df['poly_id'] = self.generate_poly_ids(df, set())
+                    fixed_count += len(df)
+                else:
+                    # Only some are invalid - generate for those
+                    new_ids = self.generate_poly_ids(df[invalid_mask], existing_ids)
+                    df.loc[invalid_mask, 'poly_id'] = new_ids
+                    fixed_count += invalid_mask.sum()
                 
                 if self.verbose:
                     logger.info(f"Fixed {invalid_mask.sum()} invalid poly_id values")
-                    
+        
         # FIXED: Use vectorized operations for better performance
-        # Fix poly_type
         if 'poly_type' in df.columns and 'poly_chemprop_input' in df.columns:
             unknown_mask = df['poly_type'].isin(['unknown', 'Unknown', None, '']) | df['poly_type'].isna()
             
@@ -2173,16 +2258,27 @@ class PolymerDatabaseManager:
                     # Convert to string and extract numeric part
                     existing_id_str = str(existing_id)
                     
-                    # Try to extract just the numeric part
-                    if existing_id_str.isdigit():
+                    # Skip invalid IDs
+                    if existing_id_str.lower() in ['unknown', 'nan', 'none', '']:
+                        continue
+                    
+                    # Handle underscore formats like "1_435" - extract last number
+                    if '_' in existing_id_str:
+                        parts = existing_id_str.split('_')
+                        for part in reversed(parts):
+                            if part.isdigit():
+                                num = int(part)
+                                max_id = max(max_id, num)
+                                break
+                    elif existing_id_str.isdigit():
                         num = int(existing_id_str)
                         max_id = max(max_id, num)
                     else:
-                        # Try to extract numbers from the ID
+                        # Try to extract any number
                         numbers = re.findall(r'\d+', existing_id_str)
                         if numbers:
-                            # Take the first number found
-                            num = int(numbers[0])
+                            # Take the largest number found
+                            num = max(int(n) for n in numbers)
                             max_id = max(max_id, num)
                 except:
                     continue

@@ -1492,7 +1492,7 @@ class G2S_VAE_PPguided(nn.Module):
         self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, self.property_count)).to(device)
         self.dropout = nn.Dropout(0.2)
 
-    def sample(self, mean, log_var, eps_scale=0.01):
+    def sample(self, mean, log_var, eps_scale=1):
         
         if self.training:
             std = log_var.mul(0.5).exp_()
@@ -1518,12 +1518,7 @@ class G2S_VAE_PPguided(nn.Module):
         # Calculate raw KLD
         kl_loss_raw = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())
         kl_loss = kl_loss_raw / (len(batch_list.ptr-1))
-        
-        # Soft annealing instead of hard clamp
-        if kl_loss > 100:
-            # Gradually reduce instead of hard cutoff
-            kl_loss = 100 + torch.tanh((kl_loss - 100) / 100) * 20  # Soft ceiling around 120
-        
+     
         # Debug print every 100 batches
         if hasattr(self, '_batch_counter'):
             self._batch_counter += 1
@@ -1739,7 +1734,7 @@ class G2S_VAE_PPguideddisabled(nn.Module):
         self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, self.property_count)).to(device)
         self.dropout = nn.Dropout(0.2)
 
-    def sample(self, mean, log_var, eps_scale=0.01):
+    def sample(self, mean, log_var, eps_scale=1):
         
         if self.training:
             std = log_var.mul(0.5).exp_()
@@ -1935,7 +1930,7 @@ class G2S_VAE_Transfer(nn.Module):
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
     
     # Use the same forward, sample, and inference methods as G2S_VAE_PPguided
-    def sample(self, mean, log_var, eps_scale=0.01):
+    def sample(self, mean, log_var, eps_scale=1):
         if self.training:
             std = log_var.mul(0.5).exp_()
             eps = torch.randn_like(std) * eps_scale

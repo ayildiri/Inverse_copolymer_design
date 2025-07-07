@@ -790,8 +790,13 @@ class PolymerDatabaseManager:
         
         # Order columns nicely
         merged_df = self._order_columns(merged_df)
-    
-        merged_df.to_csv(output_path, index=False)  
+        
+        # Apply comprehensive fixes for truncated SMILES and unknown poly_types
+        if self.verbose:
+            logger.info("Applying comprehensive dataset fixes...")
+        merged_df = self.post_merge_cleanup(merged_df)
+        
+        merged_df.to_csv(output_path, index=False)
                                
         if self.verbose:
             logger.info(f"Smart merge complete!")

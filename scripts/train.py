@@ -4,6 +4,7 @@ sys.path.append(main_dir_path)
 
 import time
 from datetime import datetime
+import json
 import random
 #from G2S import *
 from model.G2S_clean import *
@@ -1694,6 +1695,113 @@ if resume_from_checkpoint:
     # ADD THIS: Debug logging for CSV
     print(f"[RESUME] Resuming from epoch {epoch_cp} (will continue from epoch {epoch_cp + 1})")
     print(f"[RESUME] Checkpoint directory: {directory_path}")
+    
+    # NEW: Automatic parameter change detection and logging
+    if 'model_config' in checkpoint:
+        old_config = checkpoint['model_config']
+        
+        # Define all tunable hyperparameters with their command line argument names
+        tunable_params = {
+            'max_beta': args.max_beta,
+            'max_alpha': args.max_alpha,
+            'epsilon': args.epsilon,
+            'learning_rate': args.learning_rate,
+            'dropout_rate': args.dropout_rate,
+            'weight_decay': args.weight_decay,
+            'batch_size': args.batch_size,
+            'decoder_num_layers': args.dec_layers,
+            'embedding_dim': args.embedding_dim,
+            'hidden_dimension': model_config['hidden_dimension'],
+            'loss': args.loss,
+            'beta': args.beta,
+            'alpha': args.alpha,
+            'gradient_clip_threshold': args.gradient_clip_threshold,
+            'lr_decay_factor': args.lr_decay_factor,
+            'min_lr': args.min_lr,
+            'scheduler_patience': args.scheduler_patience,
+            'es_patience': args.es_patience,
+            'accumulate_grad_batches': args.accumulate_grad_batches,
+            'kld_spike_threshold': args.kld_spike_threshold,
+            'warmup_epochs': args.warmup_epochs,
+            'validation_freq': args.validation_freq,
+            'checkpoint_freq': args.checkpoint_freq,
+        }
+        
+        # Check for changes
+        param_changes = {}
+        for param_name, new_value in tunable_params.items():
+            # Check if parameter exists in old config
+            if param_name in old_config:
+                old_value = old_config[param_name]
+                if old_value != new_value:
+                    param_changes[param_name] = (old_value, new_value)
+            else:
+                # Parameter didn't exist in old config (newly added)
+                param_changes[param_name] = (None, new_value)
+        
+        # Log changes if any
+        if param_changes:
+            print("\n🔧 HYPERPARAMETER CHANGES DETECTED:")
+            print("-" * 50)
+            
+            # Save to file
+            param_log_file = os.path.join(directory_path, 'hyperparameter_changes.log')
+            with open(param_log_file, 'a') as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"Resume at epoch {epoch_cp + 1} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Checkpoint: {checkpoint_file}\n")
+                f.write(f"{'-'*60}\n")
+                
+                for param, (old, new) in param_changes.items():
+                    change_str = f"{param}: {old} → {new}"
+                    print(f"  {change_str}")
+                    f.write(f"{change_str}\n")
+                
+                f.write(f"{'='*60}\n")
+            
+            print("-" * 50)
+            print(f"Changes logged to: {param_log_file}\n")
+            
+            # Also save a JSON version for programmatic access
+            import json
+            json_log_file = os.path.join(directory_path, 'hyperparameter_history.json')
+            
+            # Load existing history or create new
+            if os.path.exists(json_log_file):
+                with open(json_log_file, 'r') as f:
+                    param_history = json.load(f)
+            else:
+                param_history = []
+            
+            # Add new entry
+            param_history.append({
+                'epoch': epoch_cp + 1,
+                'timestamp': datetime.now().isoformat(),
+                'checkpoint': checkpoint_file,
+                'changes': param_changes
+            })
+            
+            # Save updated history
+            with open(json_log_file, 'w') as f:
+                json.dump(param_history, f, indent=2)
+        else:
+            print("\n✅ No hyperparameter changes detected - continuing with same configuration")
+    
+    # Update model config with new parameters for future checkpoints
+    model_config.update({
+        'max_beta': args.max_beta,
+        'max_alpha': args.max_alpha,
+        'epsilon': args.epsilon,
+        'learning_rate': args.learning_rate,
+        'dropout_rate': args.dropout_rate,
+        'weight_decay': args.weight_decay,
+        'batch_size': args.batch_size,
+        'decoder_num_layers': args.dec_layers,
+        'loss': args.loss,
+        'beta': args.beta,
+        'alpha': args.alpha,
+        'es_patience': args.es_patience,
+    })
     
     # Check if CSV exists and log its status
     csv_file = os.path.join(directory_path, 'training_log.csv')

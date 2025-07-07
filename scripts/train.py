@@ -561,6 +561,23 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 print(f"WARNING: Skipping batch {i} due to instability (KLD: {kl_loss.item():.2f})")
                 optimizer.zero_grad()  # Clear any accumulated gradients
                 continue
+            
+            # CRITICAL: Clamp KLD to prevent saturation at 120
+            if kl_loss.item() > 100:  # If KLD is approaching saturation
+                # Reduce beta temporarily to help recovery
+                original_beta = model.beta
+                model.beta = model.beta * 0.1  # Reduce beta by 90%
+                print(f"WARNING: KLD saturation detected ({kl_loss.item():.2f}). Temporarily reducing beta from {original_beta:.6f} to {model.beta:.6f}")
+                
+                # Recompute loss with reduced beta
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+                if len(result) == 7:  # Basic VAE
+                    loss, recon_loss, kl_loss, acc, predictions, target, z = result
+                    mse = torch.tensor(0.0, device=device)
+                elif len(result) == 9:  # PP-guided VAE
+                    loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
+                elif len(result) == 10:  # PP-guided VAE with relationships
+                    loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss = result
 
             # Check if KLD spike indicates instability
             if i > 0 and kl_loss.item() > args.kld_spike_threshold * np.mean(kld_losses[-min(10, len(kld_losses)):]):
@@ -645,6 +662,10 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             kld_losses.append(kl_loss.item())
             accs.append(acc.item())
             mses.append(mse.item())
+            
+            # Adaptive beta adjustment to prevent KLD saturation
+            if model_config['beta'] == "schedule" and i % 50 == 0:  # Check every 50 batches
+                adaptive_beta_adjustment(model, kl_loss, kld_losses, model_config['max_beta'])
             
             batch_count += 1
             
@@ -1559,12 +1580,12 @@ def smoother_beta_schedule(n_iter, warmup_epochs, max_beta=0.5):
     """Smoother transition after warmup"""
     warmup_steps = warmup_epochs * (num_train_graphs / batch_size)
     
-    # Very gradual increase after warmup
-    warmup = np.zeros(int(warmup_steps))
+    # CHANGED: Small non-zero beta during warmup to prevent KLD explosion
+    warmup = np.ones(int(warmup_steps)) * (max_beta * 0.001)  # 0.1% of max_beta during warmup
     
-    # Smooth sigmoid transition instead of sharp increase
-    transition_steps = int(n_iter * 0.2)  # 20% for transition
-    transition = max_beta / (1 + np.exp(-10 * (np.arange(transition_steps) - transition_steps/2) / transition_steps))
+    # CHANGED: Gentler sigmoid transition
+    transition_steps = int(n_iter * 0.3)  # 30% for transition (was 20%)
+    transition = max_beta / (1 + np.exp(-5 * (np.arange(transition_steps) - transition_steps/2) / transition_steps))  # -5 instead of -10 for gentler curve
     
     # Rest of training
     remaining = int(n_iter - warmup_steps - transition_steps)
@@ -1575,7 +1596,25 @@ def smoother_beta_schedule(n_iter, warmup_epochs, max_beta=0.5):
     
     return np.concatenate([warmup, transition, rest])
 
-
+def adaptive_beta_adjustment(model, kl_loss, kld_losses, max_beta):
+    """Dynamically adjust beta based on KLD behavior"""
+    if len(kld_losses) > 10:
+        recent_kld_mean = np.mean(kld_losses[-10:])
+        
+        # If KLD is saturating (stable around 120)
+        if 110 < recent_kld_mean < 130 and 110 < kl_loss.item() < 130:
+            # Gradually increase beta to break out of saturation
+            new_beta = min(model.beta * 1.5, max_beta)
+            if new_beta != model.beta:
+                print(f"📈 KLD saturation detected. Increasing beta: {model.beta:.6f} → {new_beta:.6f}")
+                model.beta = new_beta
+        
+        # If KLD is too low (under-regularized)
+        elif recent_kld_mean < 1.0:
+            new_beta = model.beta * 0.9  # Reduce beta slightly
+            print(f"📉 KLD too low. Reducing beta: {model.beta:.6f} → {new_beta:.6f}")
+            model.beta = new_beta
+            
 # Beta schedule initialization
 if model_config['beta'] == "schedule":
     if args.AE_Warmup:

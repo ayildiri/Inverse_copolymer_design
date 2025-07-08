@@ -576,10 +576,14 @@ class SequenceDecoder(nn.Module):
             # Extract SMILES part (before first |)
             smiles_part = smiles_string.split('|')[0] if '|' in smiles_string else smiles_string
             
+            # CRITICAL FIX: Clean the polymer notation
+            import re
+            smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+            
             # Check chemical validity with RDKit
-            if '.' in smiles_part:
+            if '.' in smiles_clean:
                 # Handle copolymer (multiple monomers)
-                monomers = smiles_part.split('.')
+                monomers = smiles_clean.split('.')
                 for monomer in monomers:
                     if monomer.strip():
                         mol = Chem.MolFromSmiles(monomer)
@@ -588,7 +592,7 @@ class SequenceDecoder(nn.Module):
                 return True
             else:
                 # Single monomer
-                mol = Chem.MolFromSmiles(smiles_part)
+                mol = Chem.MolFromSmiles(smiles_clean)
                 return mol is not None
                 
         except Exception:
@@ -1601,6 +1605,14 @@ class G2S_VAE_PPguided(nn.Module):
         validity_penalty = 0.0
         batch_size = len(predictions)
         
+        # Import RDKit if available for chemical checks
+        try:
+            from rdkit import Chem
+            import re
+            rdkit_available = True
+        except ImportError:
+            rdkit_available = False
+        
         for pred in predictions:
             try:
                 # Convert prediction to string
@@ -1633,6 +1645,33 @@ class G2S_VAE_PPguided(nn.Module):
                         validity_penalty += 1.0  # Increased from 0.5
                     if smiles_string.count('[') != smiles_string.count(']'):
                         validity_penalty += 1.0  # Increased from 0.5
+                    
+                    # Chemical validity check (bonus for RDKit-valid structures)
+                    if rdkit_available and '|' in smiles_string:
+                        smiles_part = smiles_string.split('|')[0]
+                        try:
+                            # CRITICAL FIX: Clean the polymer notation
+                            smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                            
+                            if '.' in smiles_clean:
+                                # Copolymer
+                                monomers = smiles_clean.split('.')
+                                all_valid = True
+                                for monomer in monomers:
+                                    if monomer.strip():
+                                        mol = Chem.MolFromSmiles(monomer)
+                                        if mol is None:
+                                            all_valid = False
+                                            break
+                                if all_valid:
+                                    validity_penalty -= 1.0  # REWARD for RDKit-valid chemistry
+                            else:
+                                # Single monomer
+                                mol = Chem.MolFromSmiles(smiles_clean)
+                                if mol is not None:
+                                    validity_penalty -= 1.0  # REWARD for RDKit-valid chemistry
+                        except:
+                            pass
                         
                     # REWARDS for good format (negative penalty)
                     if len(smiles_string) > 30 and '|' in smiles_string:

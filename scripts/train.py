@@ -596,6 +596,14 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             validity_reward = 0.0  # Initialize outside
             if epoch > 20 and i % 20 == 0:  # Check periodically
                 with torch.no_grad():
+                    # Import RDKit if available
+                    try:
+                        from rdkit import Chem
+                        import re
+                        rdkit_available = True
+                    except ImportError:
+                        rdkit_available = False
+                    
                     # Generate a few samples
                     z_sample = z[:min(5, z.size(0))]
                     try:
@@ -613,6 +621,33 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                                 validity_reward += 0.02
                             if '[*:' in smiles and '<' in smiles:
                                 validity_reward += 0.02
+                            
+                            # Chemical validity reward (NEW)
+                            if rdkit_available and '|' in smiles:
+                                smiles_part = smiles.split('|')[0]
+                                try:
+                                    # CRITICAL FIX: Clean the polymer notation
+                                    smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                    
+                                    if '.' in smiles_clean:
+                                        # Copolymer
+                                        monomers = smiles_clean.split('.')
+                                        all_valid = True
+                                        for monomer in monomers:
+                                            if monomer.strip():
+                                                mol = Chem.MolFromSmiles(monomer)
+                                                if mol is None:
+                                                    all_valid = False
+                                                    break
+                                        if all_valid:
+                                            validity_reward += 0.04  # REWARD for RDKit-valid chemistry
+                                    else:
+                                        # Single monomer
+                                        mol = Chem.MolFromSmiles(smiles_clean)
+                                        if mol is not None:
+                                            validity_reward += 0.04  # REWARD for RDKit-valid chemistry
+                                except:
+                                    pass
                         
                         # Apply as bonus (negative loss)
                         validity_reward = validity_reward / len(sample_preds)
@@ -927,15 +962,16 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                             if rdkit_available and '|' in smiles_string:
                                 smiles_part = smiles_string.split('|')[0]
                                 try:
-                                    if '.' in smiles_part:
+                                    # CRITICAL FIX: Clean the polymer notation
+                                    smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                    
+                                    if '.' in smiles_clean:
                                         # Copolymer
-                                        monomers = smiles_part.split('.')
+                                        monomers = smiles_clean.split('.')
                                         all_valid = True
                                         for monomer in monomers:
                                             if monomer.strip():
-                                                # CRITICAL FIX: Replace [*:n] with * for RDKit
-                                                monomer_clean = re.sub(r'\[\*:\d+\]', '*', monomer)
-                                                mol = Chem.MolFromSmiles(monomer_clean)
+                                                mol = Chem.MolFromSmiles(monomer)
                                                 if mol is None:
                                                     all_valid = False
                                                     break
@@ -943,8 +979,6 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                                             rdkit_valid_count += 1
                                     else:
                                         # Single monomer
-                                        # CRITICAL FIX: Replace [*:n] with * for RDKit
-                                        smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
                                         mol = Chem.MolFromSmiles(smiles_clean)
                                         if mol is not None:
                                             rdkit_valid_count += 1

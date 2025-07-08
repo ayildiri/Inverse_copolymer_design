@@ -1214,51 +1214,63 @@ class PolymerDatabaseManager:
     
     def enhanced_detect_polymer_type(self, connectivity: str) -> str:
         """
-        Enhanced polymer type detection with more flexible pattern matching
+        Enhanced polymer type detection with weight analysis
         """
         if not connectivity:
             return "unknown"
         
-        # Count edge types
-        edges = re.findall(r'<(\d+)-(\d+):', connectivity)
-        if not edges:
+        # Extract edges with weights
+        edge_pattern = r'<(\d+)-(\d+):([0-9.]+):([0-9.]+)'
+        matches = re.findall(edge_pattern, connectivity)
+        if not matches:
             return "unknown"
         
-        # Create edge sets
-        self_edges = set()
-        cross_edges = set()
+        # Analyze edge types and weights
+        self_edges = []
+        cross_edges = []
+        weights = []
         
-        for n1, n2 in edges:
+        for n1, n2, w1, w2 in matches:
             n1, n2 = int(n1), int(n2)
+            weight = float(w1)  # Use first weight
+            weights.append(weight)
+            
             if n1 == n2:
-                self_edges.add((n1, n2))
+                self_edges.append((n1, n2, weight))
             else:
-                # Normalize cross edges (smaller number first)
-                cross_edges.add((min(n1, n2), max(n1, n2)))
+                cross_edges.append((n1, n2, weight))
         
-        # Decision logic
+        # Get unique weights
+        unique_weights = sorted(set(weights))
+        
+        # Decision logic based on patterns AND weights
         if len(self_edges) == 0:
             # No self-edges = alternating
             return "alternating"
         
-        elif len(self_edges) >= 4:
-            # Many self-edges (1-1, 2-2, 3-3, 4-4) = random
+        # Check if all weights are equal (random pattern)
+        if len(unique_weights) == 1:
+            # All weights equal = random
             return "random"
         
-        elif len(self_edges) > 0 and len(self_edges) < 4:
-            # Some self-edges but not all = block
-            return "block"
+        # Check for block pattern: high weights on self-edges, low on cross-edges
+        if len(unique_weights) == 2 and len(self_edges) > 0:
+            high_weight = max(unique_weights)
+            low_weight = min(unique_weights)
+            
+            # Check if self-edges have high weights
+            self_edge_weights = [w for _, _, w in self_edges]
+            cross_edge_weights = [w for _, _, w in cross_edges]
+            
+            if (all(w == high_weight for w in self_edge_weights) and 
+                all(w == low_weight for w in cross_edge_weights)):
+                return "block"
         
-        # Fallback to edge count
-        total_edges = len(edges)
-        if total_edges == 4 and len(self_edges) == 0:
-            return "alternating"
-        elif total_edges >= 10:
+        # Complex patterns with multiple weights
+        if len(self_edges) >= 4:
             return "random"
-        elif total_edges >= 6:
+        else:
             return "block"
-        
-        return "unknown"
     
     def fix_dataset_issues(self, df: pd.DataFrame) -> pd.DataFrame:
         """

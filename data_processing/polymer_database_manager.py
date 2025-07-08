@@ -1749,10 +1749,7 @@ class PolymerDatabaseManager:
         """
         # Common polymer monomer names
         common_names = {
-            'CCc1ccc(CC)cc1': 'diethylbenzene',
-            'c1ccc2c(c1)cccc2': 'naphthalene',
-            'CC(C)c1ccc(C(C)C)cc1': 'diisopropylbenzene',
-            'Nc1ccccc1': 'aniline',
+            # Basic hydrocarbons (existing)
             'CCC': 'propane',
             'CCCC': 'butane',
             'CCCCC': 'pentane',
@@ -1762,18 +1759,119 @@ class PolymerDatabaseManager:
             'CC(CC)C': 'isopentane',
             'CC': 'ethane',
             'C': 'methane',
+            
+            # Simple aromatics (existing + new)
             'c1ccccc1': 'benzene',
+            'Cc1ccccc1': 'toluene',
+            'CCc1ccccc1': 'ethylbenzene',
+            'CC(C)c1ccccc1': 'cumene',
+            'c1ccc2c(c1)cccc2': 'naphthalene',
+            
+            # Disubstituted benzenes (existing + new)
+            'CCc1ccc(CC)cc1': 'diethylbenzene',
+            'CC(C)c1ccc(C(C)C)cc1': 'diisopropylbenzene',
             'CC(C)(C)c1ccc(C(C)(C)C)cc1': 'di-tert-butylbenzene',
+            'Cc1ccc(C)cc1': 'p-xylene',
+            'Cc1cccc(C)c1': 'm-xylene',
+            'Cc1ccccc1C': 'o-xylene',
+            
+            # Halogenated aromatics
+            'Fc1ccccc1': 'fluorobenzene',
+            'Fc1ccc(F)cc1': 'p-difluorobenzene',
+            'Fc1cc(F)ccc1': 'm-difluorobenzene',
+            'Fc1c(F)cccc1': 'o-difluorobenzene',
+            'Clc1ccccc1': 'chlorobenzene',
+            'Clc1ccc(Cl)cc1': 'p-dichlorobenzene',
+            'Brc1ccccc1': 'bromobenzene',
+            'Brc1ccc(Br)cc1': 'p-dibromobenzene',
+            'FC(F)(F)c1ccccc1': 'trifluorotoluene',
+            'c1cc(F)c(F)cc1': '1,4-difluorobenzene',
+            
+            # Nitrogen-containing aromatics
+            'Nc1ccccc1': 'aniline',
+            'Nc1ccc(N)cc1': 'p-phenylenediamine',
+            'Nc1cc(N)ccc1': 'm-phenylenediamine',
+            'Nc1c(N)cccc1': 'o-phenylenediamine',
+            'CNc1ccccc1': 'N-methylaniline',
+            'c1ccncc1': 'pyridine',
+            'c1cncnc1': 'pyrimidine',
+            'c1nccnc1': 'pyrazine',
+            'c1c[nH]cn1': 'imidazole',
+            'c1cc[nH]c1': 'pyrrole',
+            
+            # Oxygen-containing aromatics
             'Oc1ccccc1': 'phenol',
-            'Nc1cc(N)ccc1': 'diaminobenzene',
-            'Fc1ccc(F)cc1': 'difluorobenzene',
-            'Clc1ccc(Cl)cc1': 'dichlorobenzene',
-            'Brc1ccc(Br)cc1': 'dibromobenzene',
+            'COc1ccccc1': 'anisole',
+            'Oc1ccc(O)cc1': 'hydroquinone',
+            'Oc1cc(O)ccc1': 'resorcinol',
+            'Oc1c(O)cccc1': 'catechol',
+            'O=Cc1ccccc1': 'benzaldehyde',
+            'CC(=O)c1ccccc1': 'acetophenone',
+            'C(=O)(O)c1ccccc1': 'benzoic_acid',
+            'COC(=O)c1ccccc1': 'methyl_benzoate',
+            
+            # Multi-ring systems
             'c1ccc(cc1)c2ccccc2': 'biphenyl',
             'c1ccc(cc1)Cc2ccccc2': 'diphenylmethane',
             'c1ccc(cc1)C(c2ccccc2)c3ccccc3': 'triphenylmethane',
             'c1cc2cc3ccccc3cc2cc1': 'anthracene',
             'c1ccc2cc3ccccc3cc2c1': 'phenanthrene',
+            'c1ccc2[nH]c3ccccc3c2c1': 'carbazole',
+            
+            # Heterocycles
+            'c1ccoc1': 'furan',
+            'c1ccsc1': 'thiophene',
+            'c1ccc2occc2c1': 'benzofuran',
+            'c1ccc2sccc2c1': 'benzothiophene',
+            'c1ccc2[nH]ccc2c1': 'indole',
+            'C1CCOC1': 'tetrahydrofuran',
+            'C1CCNCC1': 'piperidine',
+            'C1COCCN1': 'morpholine',
+            
+            # Polymer-specific monomers
+            'COC(=O)Cc1ccccc1': 'methyl_phenylacetate',
+            'C=Cc1ccccc1': 'styrene',
+            'C=C(C)c1ccccc1': 'alpha-methylstyrene',
+            'C=CC(=O)OC': 'methyl_acrylate',
+            'C=C(C)C(=O)OC': 'methyl_methacrylate',
+            'C=CC(=O)O': 'acrylic_acid',
+            'C=C(C)C(=O)O': 'methacrylic_acid',
+            'C=CCN': 'allylamine',
+            'C=CC#N': 'acrylonitrile',
+            'C=CCl': 'vinyl_chloride',
+            'C=C(Cl)Cl': 'vinylidene_chloride',
+            'C=CF': 'vinyl_fluoride',
+            'C=C(F)F': 'vinylidene_fluoride',
+            'FC(F)=C(F)F': 'tetrafluoroethylene',
+            
+            # Specific heterocyclic monomers
+            'Nc1cc2ccccc2cn1': 'isoquinolin-3-amine',
+            'Clc1nc(Cl)ncn1': '2,4-dichloropyrimidine',
+            'c1cnc2[nH]ccc2c1': '7-azaindole',
+            'c1cc2cncc3ccc(cc1)c23': 'phenanthroline',
+            
+            # Sulfur-containing
+            'Sc1ccccc1': 'thiophenol',
+            'CS(=O)(=O)c1ccccc1': 'methyl_phenyl_sulfone',
+            'c1ccc(cc1)S(=O)(=O)c2ccccc2': 'diphenyl_sulfone',
+            
+            # Common polymer building blocks
+            'O=C1CCC(=O)N1': 'succinimide',
+            'O=C1CCCC(=O)N1': 'glutarimide',
+            'O=C1OC(=O)c2ccccc21': 'phthalic_anhydride',
+            'CC(C)(C)OC(=O)Nc1ccccc1': 'boc-aniline',
+            'O=C(O)CCCC(=O)O': 'adipic_acid',
+            'O=C(O)c1ccc(C(=O)O)cc1': 'terephthalic_acid',
+            'NCCCCCCn': 'hexamethylenediamine',
+            
+            # Silicon-containing (for silicone polymers)
+            'C[Si](C)(C)Cl': 'trimethylsilyl_chloride',
+            'C[Si](C)(Cl)Cl': 'dimethyldichlorosilane',
+            
+            # Additional fluorinated monomers
+            'FC(F)(F)c1ccc(C(F)(F)F)cc1': 'bis(trifluoromethyl)benzene',
+            'FC(F)(F)Oc1ccccc1': 'trifluoromethoxybenzene',
+            'Fc1c(F)c(F)c(F)c(F)c1F': 'hexafluorobenzene',
         }
         
         return common_names.get(smiles)
@@ -1800,75 +1898,108 @@ class PolymerDatabaseManager:
         Enhanced descriptive name generation based on molecular features
         """
         try:
-            # Basic descriptive naming based on functional groups and structure
-            name_parts = []
+            # Get molecular formula first
+            formula = CalcMolFormula(mol)
             
-            # Check for rings
+            # Count key atoms
+            atom_counts = {}
+            for atom in mol.GetAtoms():
+                symbol = atom.GetSymbol()
+                atom_counts[symbol] = atom_counts.get(symbol, 0) + 1
+            
+            # Identify ring systems
             ring_info = mol.GetRingInfo()
             num_rings = ring_info.NumRings()
             
+            # Build more specific name
+            name_parts = []
+            
+            # Add substituent info for common patterns
+            if 'F' in atom_counts and atom_counts.get('F', 0) >= 2:
+                name_parts.append(f"{atom_counts['F']}F")
+            if 'Cl' in atom_counts:
+                name_parts.append(f"{atom_counts['Cl']}Cl")
+            if 'Br' in atom_counts:
+                name_parts.append(f"{atom_counts['Br']}Br")
+            
+            # Identify specific ring patterns
             if num_rings > 0:
-                # Check for aromatic rings
                 aromatic_atoms = [atom for atom in mol.GetAtoms() if atom.GetIsAromatic()]
                 if aromatic_atoms:
-                    if num_rings == 1 and len(aromatic_atoms) == 6:
-                        name_parts.append("benzene")
-                    elif num_rings == 2:
-                        name_parts.append("naphthalene")
-                    elif num_rings == 3:
-                        name_parts.append("anthracene")
-                    else:
-                        name_parts.append(f"aromatic_{num_rings}ring")
+                    aromatic_rings = sum(1 for ring in ring_info.AtomRings() 
+                                       if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring))
+                    
+                    if aromatic_rings == 1 and len(list(ring_info.AtomRings())[0]) == 6:
+                        # Check for specific substituted benzenes
+                        if 'N' in atom_counts and atom_counts['N'] >= 2:
+                            base = "pyrimidine" if any(ring for ring in ring_info.AtomRings() 
+                                                     if sum(1 for idx in ring if mol.GetAtomWithIdx(idx).GetSymbol() == 'N') >= 2) else "diaminobenzene"
+                        elif 'N' in atom_counts and atom_counts['N'] == 1:
+                            base = "aminobenzene"
+                        elif 'O' in atom_counts and 'C(=O)' in smiles:
+                            if 'OC' in smiles or 'CO' in smiles:
+                                base = "benzoate"
+                            else:
+                                base = "benzoic_acid"
+                        else:
+                            base = "benzene"
+                        name_parts.append(base)
+                    
+                    elif aromatic_rings == 2:
+                        # Check for naphthalene vs biphenyl
+                        if any(len(ring) == 10 for ring in ring_info.AtomRings()):
+                            base = "naphthalene"
+                        else:
+                            base = "biphenyl"
+                        name_parts.append(base)
+                    
+                    elif aromatic_rings >= 3:
+                        name_parts.append(f"polyaromatic_{aromatic_rings}ring")
                 else:
-                    name_parts.append(f"cyclic_{num_rings}ring")
-            else:
-                # Aliphatic compound
-                carbon_count = sum(1 for atom in mol.GetAtoms() if atom.GetSymbol() == 'C')
-                if carbon_count <= 10:
-                    alkane_names = {1: "methane", 2: "ethane", 3: "propane", 4: "butane", 
-                                  5: "pentane", 6: "hexane", 7: "heptane", 8: "octane",
-                                  9: "nonane", 10: "decane"}
-                    base_name = alkane_names.get(carbon_count, f"C{carbon_count}_alkane")
-                    name_parts.append(base_name)
-                else:
-                    name_parts.append(f"C{carbon_count}_alkane")
+                    # Non-aromatic rings
+                    name_parts.append(f"alicyclic_{num_rings}ring")
             
-            # Check for functional groups
+            # Add functional groups with more specificity
             functional_groups = []
             
-            # Enhanced functional group SMARTS patterns
+            # Enhanced functional group patterns
             fg_patterns = {
-                'amine': '[NX3;H2,H1;!$(NC=O)]',
-                'alcohol': '[OX2H]',
+                'primary_amine': '[NX3;H2;!$(NC=O)]',
+                'secondary_amine': '[NX3;H1;!$(NC=O)]',
+                'tertiary_amine': '[NX3;H0;!$(NC=O)]',
                 'carboxylic_acid': '[CX3](=O)[OX2H1]',
                 'ester': '[#6][CX3](=O)[OX2H0][#6]',
-                'nitro': '[NX3+](=O)[O-]',
-                'sulfonyl': '[SX4](=O)(=O)',
-                'fluoride': '[F]',
-                'chloride': '[Cl]',
-                'bromide': '[Br]',
-                'iodide': '[I]',
-                'nitrile': '[CX2]#[NX1]',
-                'thiol': '[SH]',
-                'ether': '[OD2]([#6])[#6]',
-                'ketone': '[CX3](=O)[#6]',
+                'amide': '[NX3][CX3](=[OX1])[#6]',
+                'nitrile': '[NX1]#[CX2]',
                 'aldehyde': '[CX3H1](=O)',
+                'ketone': '[#6][CX3](=O)[#6]',
+                'ether': '[OD2]([#6])[#6]',
+                'phenol': '[OX2H][cX3]:[c]',
+                'thiol': '[#16X2H]',
+                'sulfone': '[#16X4](=[OX1])(=[OX1])',
+                'nitro': '[$([NX3](=O)=O),$([NX3+](=O)[O-])][!#8]',
+                'azide': '[NX2]=[NX2+]=[NX1-]',
+                'alkyne': '[CX2]#[CX2]',
+                'alkene': '[CX3]=[CX3]',
             }
             
             for fg_name, pattern in fg_patterns.items():
                 if mol.HasSubstructMatch(Chem.MolFromSmarts(pattern)):
                     functional_groups.append(fg_name)
             
-            if functional_groups:
-                name_parts.extend(functional_groups[:3])  # Limit to 3 functional groups
-            
-            if name_parts:
-                return "_".join(name_parts) + "_derivative"
-            
-            # Final fallback
-            formula = CalcMolFormula(mol)
-            return f"compound_{formula}"
-            
+            # Combine parts intelligently
+            if name_parts and functional_groups:
+                # Use formula for uniqueness
+                return f"{name_parts[0]}_{formula}_{'_'.join(functional_groups[:2])}"
+            elif name_parts:
+                return f"{name_parts[0]}_{formula}"
+            elif functional_groups:
+                carbon_count = atom_counts.get('C', 0)
+                return f"C{carbon_count}_{'_'.join(functional_groups[:3])}"
+            else:
+                # Final fallback with formula
+                return f"polymer_{formula}"
+                
         except:
             return None
 

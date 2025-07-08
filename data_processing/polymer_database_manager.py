@@ -1684,6 +1684,12 @@ class PolymerDatabaseManager:
             clean_smiles = re.sub(r'\[\*\]', '', clean_smiles)
             clean_smiles = re.sub(r'\*', '', clean_smiles)
             
+            # IMPORTANT: Remove empty parentheses that result from removing attachment points
+            clean_smiles = re.sub(r'\(\)', '', clean_smiles)
+            # Also handle cases where there might be nested empty parentheses
+            while '()' in clean_smiles:
+                clean_smiles = clean_smiles.replace('()', '')
+            
             # Fix incomplete stereochemistry
             clean_smiles = re.sub(r'/C\(=C\\', 'C(=C', clean_smiles)
             clean_smiles = re.sub(r'\\C\(=C/', 'C(=C', clean_smiles)

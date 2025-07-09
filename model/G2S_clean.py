@@ -37,6 +37,17 @@ from onmt.translate import BeamSearch, GNMTGlobalScorer, GreedySearch
 from data_processing.data_utils import *
 
 
+def strip_polymer_notation(smiles_string):
+    """Strip polymer notation to get monomer-only SMILES"""
+    if '|' in smiles_string:
+        # Extract just the SMILES part before the first |
+        monomer_part = smiles_string.split('|')[0]
+        # Also remove attachment points for pure monomer training
+        import re
+        monomer_clean = re.sub(r'\[\*:\d+\]', '', monomer_part)
+        return monomer_clean
+    return smiles_string
+
 class Lin_layer_MP(torch.nn.Module):
     '''
     Linear NN used in the weighted edge centered MP from scratch

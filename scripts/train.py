@@ -397,7 +397,83 @@ def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
     except Exception as e:
         print(f"Warning: Token processing failed: {e}")
         return ""
+
+def strip_polymer_notation(smiles_string):
+    """Strip polymer notation to get monomer-only SMILES"""
+    if '|' in smiles_string:
+        # Extract just the SMILES part before the first |
+        monomer_part = smiles_string.split('|')[0]
+        # Remove attachment points
+        import re
+        monomer_clean = re.sub(r'\[\*:\d+\]', '', monomer_part)
+        return monomer_clean
+    return smiles_string
+
+def create_monomer_data_loader(original_loader, vocab, tokenization):
+    """Create a data loader with monomer-only SMILES for pretraining"""
+    import copy
+    from torch_geometric.data import Data, Batch
+    
+    monomer_loader = {}
+    
+    for batch_key, batch_data in original_loader.items():
+        data_batch = batch_data[0]
+        dest_matrix = batch_data[1]
+        inc_matrix = batch_data[2]
         
+        # Create new data batch with monomer-only target sequences
+        new_data_list = []
+        
+        # Process each graph in the batch
+        for i in range(data_batch.num_graphs):
+            # Get original graph data
+            graph_data = Data()
+            
+            # Copy node and edge features
+            if i == 0:
+                start_idx = 0
+            else:
+                start_idx = data_batch.ptr[i].item()
+            end_idx = data_batch.ptr[i+1].item()
+            
+            graph_data.x = data_batch.x[start_idx:end_idx]
+            
+            # Get edge indices for this graph
+            edge_mask = (data_batch.edge_index[0] >= start_idx) & (data_batch.edge_index[0] < end_idx)
+            graph_data.edge_index = data_batch.edge_index[:, edge_mask] - start_idx
+            graph_data.edge_attr = data_batch.edge_attr[edge_mask]
+            
+            # Process target sequence to monomer-only
+            original_tokens = data_batch.tgt_token_ids[i]
+            tokens = tokenids_to_vocab(original_tokens, vocab)
+            smiles = combine_tokens(tokens, tokenization=tokenization)
+            
+            # Strip polymer notation
+            monomer_smiles = strip_polymer_notation(smiles)
+            
+            # Convert back to tokens
+            monomer_tokens = get_seq_features_from_line(
+                monomer_smiles.split(), vocab=vocab, max_tgt_len=256
+            )[0]
+            
+            graph_data.tgt_token_ids = monomer_tokens
+            
+            # Copy other attributes
+            if hasattr(data_batch, 'W_atoms'):
+                graph_data.W_atoms = data_batch.W_atoms[start_idx:end_idx]
+            if hasattr(data_batch, 'y1'):
+                graph_data.y1 = data_batch.y1[i:i+1]
+            if hasattr(data_batch, 'y2'):
+                graph_data.y2 = data_batch.y2[i:i+1]
+            
+            new_data_list.append(graph_data)
+        
+        # Create new batch
+        new_batch = Batch.from_data_list(new_data_list)
+        monomer_loader[batch_key] = [new_batch, dest_matrix, inc_matrix]
+    
+    return monomer_loader
+
 class EarlyStopping:
     def __init__(self, dir, patience):
         self.patience = patience
@@ -1212,6 +1288,8 @@ parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Numb
 # Transfer learning arguments
 parser.add_argument("--training_stage", type=int, default=1, choices=[1, 2],
                     help="Stage 1: Pretrain on all data, Stage 2: Fine-tune on target property")
+parser.add_argument("--monomer_pretrain_epochs", type=int, default=15,
+                    help="Number of epochs for monomer pretraining (stage 0)")
 parser.add_argument("--pretrained_model_path", type=str, default=None,
                     help="Path to pretrained model for stage 2")
 parser.add_argument("--source_properties", type=str, nargs='+', default=["EA", "IP"],
@@ -1230,6 +1308,7 @@ parser.add_argument("--freeze_decoder", action="store_true", default=False,
                     help="Freeze decoder during stage 2")
 parser.add_argument("--stage1_sample_weight", type=float, default=1.0,
                     help="Weight for sampling data with source properties in stage 1")
+
 
 args = parser.parse_args()
 
@@ -1358,7 +1437,34 @@ embedding_dim = model_config['embedding_dim']
 loss = model_config['loss']
 
 # %% Call data
-if args.training_stage == 1:
+if args.training_stage == 0:
+    # Stage 0: Monomer pretraining
+    print(f"Stage 0: Loading data for monomer pretraining")
+    
+    # Load regular data first
+    dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
+        csv_path=None,
+        stage=1,  # Use stage 1 data
+        source_properties=args.source_properties,
+        target_properties=args.target_properties,
+        batch_size=batch_size,
+        tokenization=tokenization,
+        vocab=vocab,
+        device=device,
+        dataset_path=args.dataset_path
+    )
+    
+    # Convert to monomer-only data
+    print("Converting to monomer-only sequences...")
+    dict_train_loader = create_monomer_data_loader(dict_train_loader, vocab, tokenization)
+    dict_val_loader = create_monomer_data_loader(dict_val_loader, vocab, tokenization)
+    dict_test_loader = create_monomer_data_loader(dict_test_loader, vocab, tokenization)
+    
+    # Override epochs for monomer pretraining
+    epochs = args.monomer_pretrain_epochs
+    print(f"Will run monomer pretraining for {epochs} epochs")
+    
+elif args.training_stage == 1:
     # Stage 1: Load all available data
     print(f"Stage 1: Loading combined dataset for pretraining on {args.source_properties}")
     

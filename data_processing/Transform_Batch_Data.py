@@ -89,10 +89,22 @@ if args.semi_supervised and property_names == ['EA', 'IP']:
     
     original_size = len(df)
     
-    # Create masks for different data types
-    has_ea_ip = df['EA (eV)'].notna() & df['IP (eV)'].notna()
-    has_bandgap_only = df['bandgap_eV'].notna() & df['EA (eV)'].isna() & df['IP (eV)'].isna()
-    is_unlabeled = df['EA (eV)'].isna() & df['IP (eV)'].isna() & df['bandgap_eV'].isna()
+    # Create masks for different data types using property_columns
+    has_ea_ip = df[property_columns[0]].notna() & df[property_columns[1]].notna()
+    
+    # Find bandgap column dynamically (could be 'bandgap_eV', 'bandgap_chain', etc.)
+    bandgap_col = None
+    for col in df.columns:
+        if 'bandgap' in col.lower():
+            bandgap_col = col
+            break
+    
+    if bandgap_col:
+        has_bandgap_only = df[bandgap_col].notna() & df[property_columns[0]].isna() & df[property_columns[1]].isna()
+        is_unlabeled = df[property_columns[0]].isna() & df[property_columns[1]].isna() & df[bandgap_col].isna()
+    else:
+        has_bandgap_only = pd.Series([False] * len(df))
+        is_unlabeled = df[property_columns[0]].isna() & df[property_columns[1]].isna()
     
     # Stage 1 includes: EA/IP labeled + completely unlabeled
     # Excludes: bandgap-only molecules
@@ -116,8 +128,8 @@ if property_names == ['bandgap'] and not args.semi_supervised:
     
     original_size = len(df)
     
-    # For Stage 2, only include molecules with bandgap labels
-    has_bandgap = df['bandgap_eV'].notna()
+    # For Stage 2, only include molecules with bandgap labels using the provided column
+    has_bandgap = df[property_columns[0]].notna()
     
     # Apply the mask
     df = df[has_bandgap].copy()

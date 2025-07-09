@@ -1019,8 +1019,26 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                 # Use the new enhanced method for better validity
                 predictions = model.Decoder.inference_with_retries(z_random, max_retries=3, temperature_range=(0.7, 0.9))
             else:
-                # Fall back to standard inference
-                result = model.inference(data=z_random, device=device, sample=False, log_var=None)
+                # Use beam search for better quality validation
+                if hasattr(model.Decoder, 'constrained_beam_search'):
+                    # Use beam search for half the samples
+                    beam_predictions = []
+                    for i in range(num_samples // 2):
+                        z_single = z_random[i:i+1]
+                        beam_pred = model.Decoder.constrained_beam_search(z_single, beam_size=8, temperature=0.8)
+                        beam_predictions.append((beam_pred, 0.0))
+                    
+                    # Use regular inference for the other half
+                    z_remaining = z_random[num_samples // 2:]
+                    result = model.inference(data=z_remaining, device=device, sample=False, log_var=None)
+                    remaining_predictions = result[0] if len(result) >= 4 else result[0] if result else []
+                    
+                    # Combine predictions
+                    predictions = beam_predictions + remaining_predictions
+                else:
+                    # Fall back to standard inference
+                    result = model.inference(data=z_random, device=device, sample=False, log_var=None)
+                    predictions = result[0] if len(result) >= 4 else result[0] if result else None
                 
                 if len(result) >= 4:
                     predictions, _, _, _ = result[:4]

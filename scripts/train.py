@@ -1596,7 +1596,7 @@ print(model)
 n_iter = int(20 * num_train_graphs/batch_size) # 20 epochs
 # Beta scheduling function from Optimus paper 
 # Beta scheduling function from Optimus paper 
-def two_stage_beta_schedule(n_iter, warmup_ratio=0.4, max_beta):
+def two_stage_beta_schedule(n_iter, max_beta, warmup_ratio=0.4):
     """Two-stage beta: low for reconstruction, then increase for generation"""
     warmup_steps = int(n_iter * warmup_ratio)
     
@@ -1685,7 +1685,7 @@ if model_config['beta'] == "schedule":
         # Pass max_beta explicitly from config
         beta_schedule = smoother_beta_schedule(n_iter=n_iter, warmup_epochs=args.warmup_epochs, max_beta=model_config['max_beta'])
     else:
-        beta_schedule = two_stage_beta_schedule(n_iter=n_iter, max_beta=model_config['max_beta'])
+        beta_schedule = two_stage_beta_schedule(n_iter=n_iter, max_beta=model_config['max_beta'], warmup_ratio=0.4)
 elif model_config['beta'] == "normalVAE":
     beta_schedule = np.ones(1)
 

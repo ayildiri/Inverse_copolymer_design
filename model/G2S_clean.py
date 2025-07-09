@@ -384,7 +384,7 @@ class SequenceDecoder(nn.Module):
         
         return smiles
         
-    def constrained_beam_search(self, z, beam_size=3, temperature=0.8):
+    def constrained_beam_search(self, z, beam_size=5, temperature=0.8):
         """Generate with format constraints and chemical validity"""
         batch_size = z.size(0)
         device = z.device
@@ -461,7 +461,7 @@ class SequenceDecoder(nn.Module):
         
         return final_sequences
         
-    def sample_with_temperature(self, logits, temperature=1.0, top_k=50, top_p=0.95):
+    def sample_with_temperature(self, logits, temperature=1.0, top_k=5, top_p=0.95):
         """Sample from logits with temperature and top-k/top-p filtering"""
         # Apply temperature
         logits = logits / max(temperature, 0.1)  # Prevent division by zero
@@ -1050,7 +1050,7 @@ class SequenceDecoder(nn.Module):
                         
                 # Sample next token with temperature
                 next_token = self.sample_with_temperature(
-                    logits, temperature=temperature, top_k=50, top_p=0.95)
+                    logits, temperature=temperature, top_k=5, top_p=0.95)
                 
                 generated = torch.cat([generated, next_token], dim=1)
                 

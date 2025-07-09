@@ -34,6 +34,8 @@ parser.add_argument("--output_dir", type=str, default=None,
                     help="Directory to save output files (defaults to main_dir_path/data)")
 parser.add_argument("--semi_supervised", action="store_true", default=False,
                     help="Enable semi-supervised mode for Stage 1 (includes unlabeled data)")
+parser.add_argument("--exclude_properties", type=str, nargs='*', default=[],
+                    help="Property columns to exclude in semi-supervised mode (e.g., bandgap_chain)")
 
 args = parser.parse_args()
 
@@ -83,61 +85,77 @@ if missing_columns:
     raise ValueError(f"Missing property columns in CSV: {missing_columns}")
 
 # Semi-supervised filtering for Stage 1
-if args.semi_supervised and property_names == ['EA', 'IP']:
-    print("\n🔄 SEMI-SUPERVISED MODE ENABLED FOR STAGE 1")
+if args.semi_supervised:
+    print("\n🔄 SEMI-SUPERVISED MODE ENABLED")
     print("="*60)
     
     original_size = len(df)
     
-    # Create masks for different data types using property_columns
-    has_ea_ip = df[property_columns[0]].notna() & df[property_columns[1]].notna()
+    # Create mask for molecules with the target properties
+    has_target_properties = pd.Series([True] * len(df))
+    for col in property_columns:
+        has_target_properties &= df[col].notna()
     
-    # Find bandgap column dynamically (could be 'bandgap_eV', 'bandgap_chain', etc.)
-    bandgap_col = None
-    for col in df.columns:
-        if 'bandgap' in col.lower():
-            bandgap_col = col
-            break
+    # Create mask for molecules with ONLY excluded properties
+    has_only_excluded = pd.Series([False] * len(df))
+    if args.exclude_properties:
+        # Check if molecule has any excluded property but none of the target properties
+        has_excluded = pd.Series([False] * len(df))
+        for excl_col in args.exclude_properties:
+            if excl_col in df.columns:
+                has_excluded |= df[excl_col].notna()
+        
+        all_target_missing = pd.Series([True] * len(df))
+        for col in property_columns:
+            all_target_missing &= df[col].isna()
+        
+        has_only_excluded = has_excluded & all_target_missing
     
-    if bandgap_col:
-        has_bandgap_only = df[bandgap_col].notna() & df[property_columns[0]].isna() & df[property_columns[1]].isna()
-        is_unlabeled = df[property_columns[0]].isna() & df[property_columns[1]].isna() & df[bandgap_col].isna()
-    else:
-        has_bandgap_only = pd.Series([False] * len(df))
-        is_unlabeled = df[property_columns[0]].isna() & df[property_columns[1]].isna()
+    # Create mask for completely unlabeled molecules
+    is_unlabeled = pd.Series([True] * len(df))
+    # Check all property columns (target + excluded)
+    all_prop_cols = list(property_columns) + (args.exclude_properties if args.exclude_properties else [])
+    for col in all_prop_cols:
+        if col in df.columns:
+            is_unlabeled &= df[col].isna()
     
-    # Stage 1 includes: EA/IP labeled + completely unlabeled
-    # Excludes: bandgap-only molecules
-    stage1_mask = has_ea_ip | is_unlabeled
+    # Stage 1 includes: target property labeled + completely unlabeled
+    # Excludes: molecules with ONLY excluded properties
+    stage1_mask = has_target_properties | is_unlabeled
     
     # Apply the mask
-    df = df[stage1_mask].copy()
+    df_filtered = df[stage1_mask].copy()
     
-    print(f"📊 Data composition for Stage 1:")
+    print(f"📊 Data composition:")
     print(f"   Original dataset size: {original_size:,}")
-    print(f"   With EA/IP labels: {has_ea_ip.sum():,}")
+    print(f"   With {'/'.join(property_names)} labels: {has_target_properties.sum():,}")
     print(f"   Completely unlabeled: {is_unlabeled.sum():,}")
-    print(f"   Bandgap-only (excluded): {has_bandgap_only.sum():,}")
-    print(f"   ✅ Stage 1 dataset size: {len(df):,}")
+    if args.exclude_properties:
+        print(f"   With only {'/'.join(args.exclude_properties)} (excluded): {has_only_excluded.sum():,}")
+    print(f"   ✅ Filtered dataset size: {len(df_filtered):,}")
     print("="*60)
+    
+    df = df_filtered
 
-# Stage 2 filtering - for bandgap, exclude unlabeled molecules
-if property_names == ['bandgap'] and not args.semi_supervised:
-    print("\n🎯 STAGE 2 MODE: Filtering for bandgap-labeled molecules only")
+# Supervised filtering - exclude unlabeled molecules for supervised learning
+if not args.semi_supervised:
+    print(f"\n🎯 SUPERVISED MODE: Filtering for {'/'.join(property_names)}-labeled molecules only")
     print("="*60)
     
     original_size = len(df)
     
-    # For Stage 2, only include molecules with bandgap labels using the provided column
-    has_bandgap = df[property_columns[0]].notna()
+    # Only include molecules that have ALL requested property labels
+    has_all_labels = pd.Series([True] * len(df))
+    for prop_col in property_columns:
+        has_all_labels &= df[prop_col].notna()
     
     # Apply the mask
-    df = df[has_bandgap].copy()
+    df = df[has_all_labels].copy()
     
-    print(f"📊 Data composition for Stage 2:")
+    print(f"📊 Data composition:")
     print(f"   Original dataset size: {original_size:,}")
-    print(f"   With bandgap labels: {has_bandgap.sum():,}")
-    print(f"   ✅ Stage 2 dataset size: {len(df):,}")
+    print(f"   With all {'/'.join(property_names)} labels: {has_all_labels.sum():,}")
+    print(f"   ✅ Filtered dataset size: {len(df):,}")
     print("="*60)
 
 # %% Lets create PyG data objects

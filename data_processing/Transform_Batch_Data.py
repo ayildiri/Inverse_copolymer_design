@@ -259,8 +259,8 @@ if not args.input_file and augment == "original":
     mon_combs = []
     monB_list = []
     stoichiometry_connectivity_combs = []
-    for i in range(len(df.loc[:, 'poly_chemprop_input'])):
-        poly_input = df.loc[i, 'poly_chemprop_input']
+    for i in range(len(df)):
+        poly_input = df.iloc[i]['poly_chemprop_input']
         
         # Property extraction is no longer needed here as we're just doing train/test split
         mon_combs.append(".".join(poly_input.split("|")[0].split('.')))
@@ -428,8 +428,8 @@ else:
         
         # Extract monomer combinations to ensure similar monomers don't appear in both train and test
         mon_combs = []
-        for i in range(len(df.loc[:, 'poly_chemprop_input'])):
-            poly_input = df.loc[i, 'poly_chemprop_input']
+        for i in range(len(df)):
+            poly_input = df.iloc[i]['poly_chemprop_input']
             mon_combs.append(".".join(poly_input.split("|")[0].split('.')))
 
         mon_combs = list(set(mon_combs))

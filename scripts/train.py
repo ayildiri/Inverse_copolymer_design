@@ -562,14 +562,16 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 continue
             
             # CRITICAL: Clamp KLD to prevent saturation at 120
-            if kl_loss.item() > 100:  # If KLD is approaching saturation
-                # Reduce beta temporarily to help recovery
+            # CRITICAL: Handle extreme KLD values
+            if kl_loss.item() > 300 and model.beta < 0.0001:  # Very high KLD with very low beta
+                # This suggests we need MORE regularization, not less
                 original_beta = model.beta
-                model.beta = model.beta * 0.1  # Reduce beta by 90%
-                print(f"WARNING: KLD saturation detected ({kl_loss.item():.2f}). Temporarily reducing beta from {original_beta:.6f} to {model.beta:.6f}")
+                model.beta = min(model.beta * 10, max_beta)  # Increase beta significantly
+                print(f"WARNING: High KLD with low beta detected ({kl_loss.item():.2f}). Increasing beta from {original_beta:.6f} to {model.beta:.6f}")
                 
-                # Recompute loss with reduced beta
-                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+                # Recompute loss with increased beta
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
+                
                 if len(result) == 7:  # Basic VAE
                     loss, recon_loss, kl_loss, acc, predictions, target, z = result
                     mse = torch.tensor(0.0, device=device)
@@ -1614,7 +1616,7 @@ def smoother_beta_schedule(n_iter, warmup_epochs, max_beta=0.5):
     warmup_steps = warmup_epochs * (num_train_graphs / batch_size)
     
     # CHANGED: Small non-zero beta during warmup to prevent KLD explosion
-    warmup = np.ones(int(warmup_steps)) * (max_beta * 0.001)  # 0.1% of max_beta during warmup
+    warmup = np.ones(int(warmup_steps)) * (max_beta * 0.01)   
     
     # CHANGED: Gentler sigmoid transition
     transition_steps = int(n_iter * 0.3)  # 30% for transition (was 20%)
@@ -1633,19 +1635,31 @@ def adaptive_beta_adjustment(model, kl_loss, kld_losses, max_beta):
     """Dynamically adjust beta based on KLD behavior"""
     if len(kld_losses) > 10:
         recent_kld_mean = np.mean(kld_losses[-10:])
+        recent_kld_std = np.std(kld_losses[-10:])
         
-        # If KLD is saturating (stable around 120)
-        if 110 < recent_kld_mean < 130 and 110 < kl_loss.item() < 130:
-            # Gradually increase beta to break out of saturation
-            new_beta = min(model.beta * 1.5, max_beta)
+        # Detect saturation: KLD is stable (low std) and high
+        # Saturation means the KLD has plateaued at some value
+        is_stable = recent_kld_std < recent_kld_mean * 0.1  # Less than 10% variation
+        
+        # If KLD is stable and above a reasonable threshold
+        if is_stable and recent_kld_mean > 100:
+            # KLD is saturating - need to increase beta to encourage more regularization
+            new_beta = min(model.beta * 2.0, max_beta)  # More aggressive increase
             if new_beta != model.beta:
-                print(f"📈 KLD saturation detected. Increasing beta: {model.beta:.6f} → {new_beta:.6f}")
+                print(f"📈 KLD saturation detected at {recent_kld_mean:.1f}. Increasing beta: {model.beta:.6f} → {new_beta:.6f}")
                 model.beta = new_beta
         
+        # If KLD is growing too fast (prevent explosion)
+        elif kl_loss.item() > recent_kld_mean * 1.5:
+            # Slight reduction to control growth
+            new_beta = model.beta * 0.95
+            print(f"⚠️ KLD spike detected ({kl_loss.item():.1f} vs mean {recent_kld_mean:.1f}). Adjusting beta: {model.beta:.6f} → {new_beta:.6f}")
+            model.beta = new_beta
+        
         # If KLD is too low (under-regularized)
-        elif recent_kld_mean < 1.0:
-            new_beta = model.beta * 0.9  # Reduce beta slightly
-            print(f"📉 KLD too low. Reducing beta: {model.beta:.6f} → {new_beta:.6f}")
+        elif recent_kld_mean < 10.0:
+            new_beta = min(model.beta * 1.1, max_beta)  # Increase beta
+            print(f"📉 KLD too low ({recent_kld_mean:.1f}). Increasing beta: {model.beta:.6f} → {new_beta:.6f}")
             model.beta = new_beta
             
 # Beta schedule initialization

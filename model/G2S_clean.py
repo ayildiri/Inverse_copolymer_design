@@ -1169,8 +1169,13 @@ class SequenceDecoder(nn.Module):
             for retry in range(max_retries):
                 temp = np.random.uniform(*temperature_range)
                 
-                # Try format-guided generation
-                if retry % 2 == 0 and hasattr(self, 'generate_with_format_guidance'):
+                # Try different generation strategies
+                if retry % 3 == 0 and hasattr(self, 'constrained_beam_search'):
+                    # Use beam search with larger beam size
+                    beam_pred = self.constrained_beam_search(z_single, beam_size=8, temperature=temp)
+                    pred = (beam_pred[0], 0.0) if beam_pred else None
+                elif retry % 3 == 1 and hasattr(self, 'generate_with_format_guidance'):
+                    # Try format-guided generation
                     generated = self.generate_with_format_guidance(z_single, temperature=temp)
                     pred = (generated[0].tolist(), 0.0)
                 else:
@@ -1190,12 +1195,14 @@ class SequenceDecoder(nn.Module):
                         score += 1
                     if smiles.count('|') == 3:
                         score += 2
+                    if '<' in smiles and '-' in smiles:
+                        score += 1  # Bonus for connectivity notation
                     
                     if score > best_score:
                         best_score = score
                         best_pred = pred
                     
-                    if score >= 4:  # Good enough
+                    if score >= 5:  # Good enough (increased threshold)
                         break
             
             best_predictions.append(best_pred if best_pred else ([], 0.0))

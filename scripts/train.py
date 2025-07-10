@@ -535,19 +535,17 @@ class EarlyStopping:
         if self.best_score is None:
             self.best_score = val_loss
             torch.save(model_dict, os.path.join(self.save_dir,"model_best_loss.pt"))
-            #torch.save(model.state_dict(), self.save_dir + "/model_best_loss.pth")
-            return True  # Indicate that a new best model was saved
+            return True
         elif val_loss > self.best_score:
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
-            return False  # No improvement
+            return False
         else:
             self.best_score = val_loss
             torch.save(model_dict, os.path.join(self.save_dir,"model_best_loss.pt"))
-            #torch.save(model.state_dict(), self.save_dir + "/model_best_loss.pth")
             self.counter = 0
-            return True  # Indicate that a new best model was saved
+            return True
 
 class EarlyStoppingWithValidity:
     def __init__(self, dir, patience, validity_weight=0.3):
@@ -576,6 +574,59 @@ class EarlyStoppingWithValidity:
             if self.counter >= self.patience:
                 self.early_stop = True
             return False
+
+def check_latent_clustering(model, dict_val_loader, device):
+    """Check if latent space is organizing by monomer types"""
+    from sklearn.metrics import silhouette_score
+    import numpy as np
+    
+    model.eval()
+    z_vectors = []
+    monomer_labels = []
+    
+    # Process a subset of validation data
+    max_batches = 10  # Limit for speed
+    
+    with torch.no_grad():
+        for i, batch_key in enumerate(list(dict_val_loader.keys())[:max_batches]):
+            data = dict_val_loader[batch_key][0]
+            data.to(device)
+            dest_matrix = dict_val_loader[batch_key][1]
+            dest_matrix.to(device)
+            inc_matrix = dict_val_loader[batch_key][2]
+            inc_matrix.to(device)
+            
+            # Encode to latent space
+            if hasattr(model, 'Encoder'):
+                h_mean, h_var = model.Encoder(data, dest_matrix, inc_matrix, device)
+                if not model.hidden_dim == model.embedding_dim:
+                    h_mean = model.lincompress(h_mean)
+                z = h_mean  # Use mean for clustering
+                
+                z_vectors.append(z.cpu().numpy())
+                
+                # Extract monomer info from SMILES
+                # For Stage 0, we can use the first few tokens as a proxy for monomer type
+                for j in range(data.num_graphs):
+                    if hasattr(data, 'tgt_token_ids'):
+                        # Get first 10 non-special tokens as monomer fingerprint
+                        tokens = data.tgt_token_ids[j][:20]
+                        monomer_id = hash(tuple(tokens.tolist()))
+                        monomer_labels.append(monomer_id % 10)  # Simple clustering into 10 groups
+    
+    model.train()
+    
+    if len(z_vectors) > 0 and len(monomer_labels) > 30:  # Need enough samples
+        z_all = np.vstack(z_vectors)
+        labels_all = np.array(monomer_labels[:len(z_all)])
+        
+        # Calculate silhouette score (higher = better clustering)
+        try:
+            score = silhouette_score(z_all, labels_all)
+            return score
+        except:
+            return 0.0
+    return 0.0
 
 def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold, epoch, total_epochs):
     # shuffle batches every epoch
@@ -950,7 +1001,7 @@ def test(dict_loader):
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
-def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False, generation_validity=None, rdkit_validity=None):
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False, generation_validity=None, rdkit_validity=None, clustering_score=None):
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
     
@@ -959,6 +1010,10 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
     headers = ['epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 
                'generation_validity', 'rdkit_validity']
+    
+    # Add clustering score header for Stage 0
+    if clustering_score is not None:
+        headers.append('clustering_score')
     
     if os.path.exists(csv_file):
         with open(csv_file, 'r') as f:
@@ -981,7 +1036,7 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
             writer.writerow(row)
         
         # Write current epoch
-        writer.writerow({
+        row_data = {
             'epoch': epoch,
             'train_loss_mean': train_metrics['loss'],
             'train_kld_mean': train_metrics['kld'],
@@ -993,7 +1048,13 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
             'val_mse_mean': val_metrics['mse'],
             'generation_validity': generation_validity if generation_validity is not None else 0.0,
             'rdkit_validity': rdkit_validity if rdkit_validity is not None else 0.0
-        })
+        }
+        
+        # Add clustering score if provided
+        if clustering_score is not None:
+            row_data['clustering_score'] = clustering_score
+            
+        writer.writerow(row_data)
     
     # Update or create flag file
     with open(flag_file, 'w') as f:
@@ -2285,10 +2346,25 @@ for epoch in range(epoch_cp, epochs):
     # Test generation validity every epoch (or at least when validation runs)
     generation_validity = 0.0
     rdkit_validity = 0.0
+    clustering_score = 0.0
     if (epoch + 1) % args.validation_freq == 0:  # Test when validation runs
         print(f"🧪 Testing generation quality...")
         generation_validity, rdkit_validity = validate_generation_quality(model, vocab, device, num_samples=args.validation_samples)
         print(f"📊 Format validity: {generation_validity:.1%}, Chemical validity: {rdkit_validity:.1%}")
+        
+        # Check latent space clustering (especially useful for Stage 0)
+        if args.training_stage == 0 and (epoch + 1) % 5 == 0:  # Every 5 epochs for Stage 0
+            print(f"🔬 Checking latent space organization...")
+            clustering_score = check_latent_clustering(model, dict_val_loader, device)
+            print(f"📊 Latent clustering score: {clustering_score:.3f} (higher = better monomer separation)")
+            
+            # Good clustering typically > 0.3
+            if clustering_score > 0.3:
+                print(f"✅ Good latent space organization emerging!")
+            elif clustering_score > 0.1:
+                print(f"🟡 Latent space starting to organize")
+            else:
+                print(f"⏳ Latent space still organizing...")
         
         # Add checkpoint saving based on validity
         if generation_validity > 0.15:  # Save when validity is decent
@@ -2381,7 +2457,15 @@ for epoch in range(epoch_cp, epochs):
     if (epoch + 1) % args.validation_freq == 0:
         train_metrics = {'loss': train_loss, 'kld': train_kld_loss, 'acc': train_acc, 'mse': train_mse}
         val_metrics = {'loss': val_loss, 'kld': val_kld_loss, 'acc': val_acc, 'mse': val_mse}
-        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, resume_from_checkpoint, generation_validity, rdkit_validity)
+        
+        # Pass clustering score for Stage 0
+        extra_metrics = {}
+        if args.training_stage == 0 and clustering_score > 0:
+            extra_metrics['clustering_score'] = clustering_score
+            
+        save_epoch_metrics_to_csv(epoch + 1, train_metrics, val_metrics, directory_path, 
+                                  resume_from_checkpoint, generation_validity, rdkit_validity, 
+                                  **extra_metrics)
 
     # Save loss dictionaries periodically to avoid data loss
     if (epoch + 1) % args.checkpoint_freq == 0 or epoch == epochs - 1:

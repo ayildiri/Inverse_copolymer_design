@@ -628,6 +628,51 @@ def check_latent_clustering(model, dict_val_loader, device):
             return 0.0
     return 0.0
 
+def debug_stage0_generation(model, vocab, device, num_samples=10):
+    """Debug what Stage 0 is actually generating"""
+    model.eval()
+    print("\n🔍 Stage 0 Generation Debug:")
+    print("-" * 50)
+    
+    # Import RDKit if available
+    try:
+        from rdkit import Chem
+        RDKIT_AVAILABLE = True
+    except ImportError:
+        RDKIT_AVAILABLE = False
+    
+    with torch.no_grad():
+        z = torch.randn(num_samples, model.embedding_dim, device=device)
+        predictions = model.Decoder.inference(z, temperature=1.0)
+        
+        for i, pred in enumerate(predictions[:5]):
+            tokens = tokenids_to_vocab(pred[0], vocab)
+            smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+            
+            # Check monomer validity
+            is_valid_monomer = (
+                len(smiles) > 3 and
+                smiles.count('(') == smiles.count(')') and
+                smiles.count('[') == smiles.count(']') and
+                any(c in smiles for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's']) and
+                '|' not in smiles and '[*' not in smiles
+            )
+            
+            # Try RDKit validation
+            rdkit_valid = False
+            if RDKIT_AVAILABLE:
+                try:
+                    mol = Chem.MolFromSmiles(smiles)
+                    rdkit_valid = mol is not None
+                except:
+                    pass
+            
+            print(f"Sample {i+1}: {smiles[:50]}{'...' if len(smiles) > 50 else ''}")
+            print(f"  Length: {len(smiles)}, Format valid: {is_valid_monomer}, RDKit valid: {rdkit_valid}")
+            print(f"  Has polymer notation: {'|' in smiles or '[*' in smiles}")
+    
+    model.train()
+
 def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold, epoch, total_epochs):
     # shuffle batches every epoch
     order_batches = list(range(len(dict_train_loader)))
@@ -1104,7 +1149,7 @@ def save_loss_dicts(train_loss_dict, val_loss_dict, directory_path):
     except Exception as e:
         print(f"[ERROR] Could not save val_loss.pkl: {e}")
 
-def validate_generation_quality(model, vocab, device, num_samples=100):
+def validate_generation_quality(model, vocab, device, num_samples=100, stage=None):
     """Test generation quality with both format and chemical validity"""
     model.eval()
     format_valid_count = 0
@@ -1163,40 +1208,67 @@ def validate_generation_quality(model, vocab, device, num_samples=100):
                         pred_tokens = predictions[i][0]
                         smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
                         
-                        # Format validity check
-                        if (len(smiles_string) > 10 and 
-                            '|' in smiles_string and
-                            '[*:' in smiles_string and
-                            smiles_string.count('(') == smiles_string.count(')') and
-                            smiles_string.count('[') == smiles_string.count(']')):
+                        # Stage-specific format validity check
+                        if stage == 0:  # Monomer validation
+                            # For monomers: just check basic SMILES validity
+                            format_valid = (
+                                len(smiles_string) > 3 and  # At least "C" or "CC"
+                                smiles_string.count('(') == smiles_string.count(')') and
+                                smiles_string.count('[') == smiles_string.count(']') and
+                                # Basic chemistry characters
+                                any(c in smiles_string for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's']) and
+                                # No polymer notation
+                                '|' not in smiles_string and
+                                '[*' not in smiles_string
+                            )
+                        else:  # Stage 1 & 2: Full polymer validation
+                            format_valid = (
+                                len(smiles_string) > 10 and 
+                                '|' in smiles_string and
+                                '[*:' in smiles_string and
+                                smiles_string.count('(') == smiles_string.count(')') and
+                                smiles_string.count('[') == smiles_string.count(']')
+                            )
+                        
+                        if format_valid:
                             format_valid_count += 1
                             
-                            # Chemical validity check with RDKit
-                            if rdkit_available and '|' in smiles_string:
-                                smiles_part = smiles_string.split('|')[0]
-                                try:
-                                    # CRITICAL FIX: Clean the polymer notation
-                                    smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
-                                    
-                                    if '.' in smiles_clean:
-                                        # Copolymer
-                                        monomers = smiles_clean.split('.')
-                                        all_valid = True
-                                        for monomer in monomers:
-                                            if monomer.strip():
-                                                mol = Chem.MolFromSmiles(monomer)
-                                                if mol is None:
-                                                    all_valid = False
-                                                    break
-                                        if all_valid:
-                                            rdkit_valid_count += 1
-                                    else:
-                                        # Single monomer
-                                        mol = Chem.MolFromSmiles(smiles_clean)
+                            # Chemical validity check
+                            if rdkit_available:
+                                if stage == 0:  # Monomer chemical validity
+                                    try:
+                                        # Direct SMILES validation for monomers
+                                        mol = Chem.MolFromSmiles(smiles_string)
                                         if mol is not None:
                                             rdkit_valid_count += 1
-                                except:
-                                    pass
+                                    except:
+                                        pass
+                                else:  # Polymer chemical validity (Stage 1 & 2)
+                                    if '|' in smiles_string:
+                                        smiles_part = smiles_string.split('|')[0]
+                                        try:
+                                            # CRITICAL FIX: Clean the polymer notation
+                                            smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                            
+                                            if '.' in smiles_clean:
+                                                # Copolymer
+                                                monomers = smiles_clean.split('.')
+                                                all_valid = True
+                                                for monomer in monomers:
+                                                    if monomer.strip():
+                                                        mol = Chem.MolFromSmiles(monomer)
+                                                        if mol is None:
+                                                            all_valid = False
+                                                            break
+                                                if all_valid:
+                                                    rdkit_valid_count += 1
+                                            else:
+                                                # Single monomer
+                                                mol = Chem.MolFromSmiles(smiles_clean)
+                                                if mol is not None:
+                                                    rdkit_valid_count += 1
+                                        except:
+                                            pass
                 except:
                     continue
                     
@@ -2349,8 +2421,14 @@ for epoch in range(epoch_cp, epochs):
     clustering_score = 0.0
     if (epoch + 1) % args.validation_freq == 0:  # Test when validation runs
         print(f"🧪 Testing generation quality...")
-        generation_validity, rdkit_validity = validate_generation_quality(model, vocab, device, num_samples=args.validation_samples)
+        generation_validity, rdkit_validity = validate_generation_quality(
+            model, vocab, device, num_samples=args.validation_samples, stage=args.training_stage
+        )
         print(f"📊 Format validity: {generation_validity:.1%}, Chemical validity: {rdkit_validity:.1%}")
+        
+        # Debug what's actually being generated in Stage 0
+        if args.training_stage == 0 and generation_validity == 0 and (epoch + 1) % 2 == 0:
+            debug_stage0_generation(model, vocab, device, num_samples=10)
         
         # Check latent space clustering (especially useful for Stage 0)
         if args.training_stage == 0 and (epoch + 1) % 5 == 0:  # Every 5 epochs for Stage 0
@@ -2365,6 +2443,10 @@ for epoch in range(epoch_cp, epochs):
                 print(f"🟡 Latent space starting to organize")
             else:
                 print(f"⏳ Latent space still organizing...")
+        
+        # Debug Stage 0 generation to see what's being generated
+        if args.training_stage == 0 and (epoch + 1) % 2 == 0:  # Every 2 epochs
+            debug_stage0_generation(model, vocab, device, num_samples=10)
         
         # Add checkpoint saving based on validity
         if generation_validity > 0.15:  # Save when validity is decent

@@ -1863,26 +1863,28 @@ data_augment="old"
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
-# Always create model_name subdirectory for consistency
-if args.save_dir is not None:
-    directory_path = os.path.join(args.save_dir, model_name)
-else:
-    directory_path = os.path.join(main_dir_path, 'Checkpoints/', model_name)
-
-# For resuming, validate that we're in the correct model directory
+# Determine directory path based on whether we're resuming or starting fresh
 if args.resume_from_checkpoint is not None:
-    # Extract model directory from checkpoint path if needed
+    # When resuming, ALWAYS use the directory containing the checkpoint
     checkpoint_dir = os.path.dirname(args.resume_from_checkpoint)
+    # Check if the checkpoint is directly in a Model_ directory
     if os.path.basename(checkpoint_dir).startswith('Model_'):
-        # We're already in a model directory, use it
         directory_path = checkpoint_dir
-    elif os.path.exists(directory_path):
-        # Use the computed directory path
-        print(f"[INFO] Resuming training in directory: {directory_path}")
     else:
-        # Create the model directory if it doesn't exist
-        os.makedirs(directory_path, exist_ok=True)
-        print(f"[INFO] Created model directory: {directory_path}")
+        # Checkpoint might be in a subdirectory, go up one level
+        parent_dir = os.path.dirname(checkpoint_dir)
+        if os.path.basename(parent_dir).startswith('Model_'):
+            directory_path = parent_dir
+        else:
+            # Fallback: use the checkpoint directory itself
+            directory_path = checkpoint_dir
+    print(f"[INFO] Resuming training in existing directory: {directory_path}")
+else:
+    # Starting fresh - create new model directory
+    if args.save_dir is not None:
+        directory_path = os.path.join(args.save_dir, model_name)
+    else:
+        directory_path = os.path.join(main_dir_path, 'Checkpoints/', model_name)
 
 # Create directory with all parent directories
 os.makedirs(directory_path, exist_ok=True)

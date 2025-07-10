@@ -414,11 +414,6 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     import copy
     from torch_geometric.data import Data, Batch
     
-    # Import tokenizer if needed
-    if tokenization == "RT_tokenized":
-        from data_processing.regex_tokenizer import RegexTokenizer
-        tokenizer = RegexTokenizer()
-    
     monomer_loader = {}
     
     for batch_key, batch_data in original_loader.items():
@@ -449,26 +444,53 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             graph_data.edge_attr = data_batch.edge_attr[edge_mask]
             
             # Process target sequence to monomer-only
-            original_tokens = data_batch.tgt_token_ids[i]
-            tokens = tokenids_to_vocab(original_tokens, vocab)
-            smiles = combine_tokens(tokens, tokenization=tokenization)
+            original_token_ids = data_batch.tgt_token_ids[i]
             
-            # Strip polymer notation
-            monomer_smiles = strip_polymer_notation(smiles)
+            # Convert to tokens
+            tokens = []
+            for token_id in original_token_ids:
+                if token_id < len(vocab):
+                    token = list(vocab.keys())[list(vocab.values()).index(token_id)]
+                    tokens.append(token)
             
-            # Convert back to tokens - need to tokenize properly first
-            if tokenization == "RT_tokenized":
-                monomer_tokenized = tokenizer.tokenize(monomer_smiles)
-            else:
-                # For oldtok, simple character-based tokenization
-                monomer_tokenized = list(monomer_smiles)
+            # Remove polymer-specific tokens at the token level
+            monomer_tokens = []
+            skip_until_pipe = False
             
-            # Now convert tokenized SMILES to token IDs
-            monomer_tokens = get_seq_features_from_line(
-                monomer_tokenized, vocab=vocab, max_tgt_len=256
-            )[0]
+            for token in tokens:
+                # Skip special tokens
+                if token in ['_PAD', '_SOS', '_EOS', '_UNK']:
+                    continue
+                    
+                # Skip polymer notation sections (after | symbol)
+                if token == '|':
+                    skip_until_pipe = True
+                    break  # Stop processing after first pipe
+                    
+                # Skip attachment point tokens
+                if token.startswith('[*:') or token == '[*]':
+                    continue
+                    
+                # Keep regular chemistry tokens
+                monomer_tokens.append(token)
             
-            graph_data.tgt_token_ids = monomer_tokens
+            # Convert back to token IDs
+            monomer_token_ids = []
+            
+            # Add SOS token
+            if '_SOS' in vocab:
+                monomer_token_ids.append(vocab['_SOS'])
+            
+            # Add monomer tokens
+            for token in monomer_tokens:
+                if token in vocab:
+                    monomer_token_ids.append(vocab[token])
+            
+            # Add EOS token
+            if '_EOS' in vocab:
+                monomer_token_ids.append(vocab['_EOS'])
+            
+            graph_data.tgt_token_ids = monomer_token_ids
             
             # Copy other attributes
             if hasattr(data_batch, 'W_atoms'):

@@ -414,6 +414,11 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     import copy
     from torch_geometric.data import Data, Batch
     
+    # Import tokenizer if needed
+    if tokenization == "RT_tokenized":
+        from data_processing.regex_tokenizer import RegexTokenizer
+        tokenizer = RegexTokenizer()
+    
     monomer_loader = {}
     
     for batch_key, batch_data in original_loader.items():
@@ -451,9 +456,16 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             # Strip polymer notation
             monomer_smiles = strip_polymer_notation(smiles)
             
-            # Convert back to tokens
+            # Convert back to tokens - need to tokenize properly first
+            if tokenization == "RT_tokenized":
+                monomer_tokenized = tokenizer.tokenize(monomer_smiles)
+            else:
+                # For oldtok, simple character-based tokenization
+                monomer_tokenized = list(monomer_smiles)
+            
+            # Now convert tokenized SMILES to token IDs
             monomer_tokens = get_seq_features_from_line(
-                monomer_smiles.split(), vocab=vocab, max_tgt_len=256
+                monomer_tokenized, vocab=vocab, max_tgt_len=256
             )[0]
             
             graph_data.tgt_token_ids = monomer_tokens

@@ -1304,8 +1304,8 @@ parser.add_argument("--kld_spike_threshold", type=float, default=5.0, help="Thre
 parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Number of batches to accumulate gradients")
 
 # Transfer learning arguments
-parser.add_argument("--training_stage", type=int, default=1, choices=[1, 2],
-                    help="Stage 1: Pretrain on all data, Stage 2: Fine-tune on target property")
+parser.add_argument("--training_stage", type=int, default=1, choices=[0, 1, 2],
+                    help="Stage 0: Monomer pretraining, Stage 1: Pretrain on all data, Stage 2: Fine-tune on target property")
 parser.add_argument("--monomer_pretrain_epochs", type=int, default=15,
                     help="Number of epochs for monomer pretraining (stage 0)")
 parser.add_argument("--pretrained_model_path", type=str, default=None,

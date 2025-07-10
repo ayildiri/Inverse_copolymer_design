@@ -448,19 +448,23 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             
             # Convert to tokens
             tokens = []
+            inv_vocab = {v: k for k, v in vocab.items()}
             for token_id in original_token_ids:
-                if token_id < len(vocab):
-                    token = list(vocab.keys())[list(vocab.values()).index(token_id)]
-                    tokens.append(token)
+                if token_id in inv_vocab:
+                    tokens.append(inv_vocab[token_id])
             
             # Remove polymer-specific tokens at the token level
             monomer_tokens = []
             skip_until_pipe = False
             
             for token in tokens:
-                # Skip special tokens
-                if token in ['_PAD', '_SOS', '_EOS', '_UNK']:
+                # Skip special tokens except EOS
+                if token in ['_PAD', '_SOS', '_UNK']:
                     continue
+                    
+                # Stop at EOS
+                if token == '_EOS':
+                    break
                     
                 # Skip polymer notation sections (after | symbol)
                 if token == '|':
@@ -489,6 +493,16 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             # Add EOS token
             if '_EOS' in vocab:
                 monomer_token_ids.append(vocab['_EOS'])
+            
+            # CRITICAL: Pad to a fixed length
+            max_length = 256  # or whatever max length you want
+            if len(monomer_token_ids) < max_length:
+                # Pad with PAD tokens
+                pad_token_id = vocab.get('_PAD', 0)
+                monomer_token_ids.extend([pad_token_id] * (max_length - len(monomer_token_ids)))
+            else:
+                # Truncate if too long
+                monomer_token_ids = monomer_token_ids[:max_length]
             
             graph_data.tgt_token_ids = monomer_token_ids
             

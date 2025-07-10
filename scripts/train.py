@@ -1667,8 +1667,8 @@ def add_attention_regularization(model):
     return model
 
 # %% Create an instance of the G2S model with safe creation
-if args.training_stage == 1:
-    # Stage 1: Regular training
+if args.training_stage == 0 or args.training_stage == 1:
+    # Stage 0 (monomer pretraining) or Stage 1 (full pretraining): Regular training
     if args.ppguided:
         model_type = G2S_VAE_PPguided
     else:
@@ -1680,12 +1680,16 @@ if args.training_stage == 1:
         embedding_dim, device, model_config, vocab, seed, 
         loss_weights=class_weights, add_latent=add_latent
     )
-else:
-    # Stage 2: Transfer learning
+elif args.training_stage == 2:
+    # Stage 2: Transfer learning (requires pretrained model)
+    if args.pretrained_model_path is None:
+        raise ValueError("Stage 2 requires --pretrained_model_path to be specified")
+        
     print(f"Loading pretrained model from: {args.pretrained_model_path}")
     
     # Load pretrained model
     pretrained_checkpoint = torch.load(args.pretrained_model_path)
+    # ... rest of Stage 2 code
     pretrained_config = pretrained_checkpoint['model_config']
     
     # Create pretrained model

@@ -605,15 +605,20 @@ def check_latent_clustering(model, dict_val_loader, device):
                 
                 z_vectors.append(z.cpu().numpy())
                 
-                # Extract monomer info from SMILES
+                # Extract monomer info from SMILES     
                 # For Stage 0, we can use the first few tokens as a proxy for monomer type
                 for j in range(data.num_graphs):
                     if hasattr(data, 'tgt_token_ids'):
                         # Get first 10 non-special tokens as monomer fingerprint
                         tokens = data.tgt_token_ids[j][:20]
-                        monomer_id = hash(tuple(tokens.tolist()))
+                        # Check if tokens is already a list or needs conversion
+                        if hasattr(tokens, 'tolist'):
+                            tokens_list = tokens.tolist()
+                        else:
+                            tokens_list = list(tokens)
+                        monomer_id = hash(tuple(tokens_list))
                         monomer_labels.append(monomer_id % 10)  # Simple clustering into 10 groups
-    
+
     model.train()
     
     if len(z_vectors) > 0 and len(monomer_labels) > 30:  # Need enough samples
@@ -1168,116 +1173,109 @@ def validate_generation_quality(model, vocab, device, num_samples=100, stage=Non
         try:
             z_random = torch.randn(num_samples, model.embedding_dim, device=device)
             
-            # NEW: Try to use enhanced inference if available
-            if hasattr(model.Decoder, 'inference_with_retries'):
-                # Use the new enhanced method for better validity
-                predictions = model.Decoder.inference_with_retries(z_random, max_retries=3, temperature_range=(0.7, 0.9))
-            else:
-                # Use beam search for better quality validation
-                if hasattr(model.Decoder, 'constrained_beam_search'):
-                    # Use beam search for half the samples
-                    beam_predictions = []
-                    for i in range(num_samples // 2):
-                        z_single = z_random[i:i+1]
-                        beam_pred = model.Decoder.constrained_beam_search(z_single, beam_size=8, temperature=0.8)
-                        beam_predictions.append((beam_pred, 0.0))
-                    
-                    # Use regular inference for the other half
-                    z_remaining = z_random[num_samples // 2:]
-                    result = model.inference(data=z_remaining, device=device, sample=False, log_var=None)
-                    remaining_predictions = result[0] if len(result) >= 4 else result[0] if result else []
-                    
-                    # Combine predictions
-                    predictions = beam_predictions + remaining_predictions
-                else:
-                    # Fall back to standard inference
-                    result = model.inference(data=z_random, device=device, sample=False, log_var=None)
-                    predictions = result[0] if len(result) >= 4 else result[0] if result else None
-                
-                if len(result) >= 4:
-                    predictions, _, _, _ = result[:4]
-                else:
-                    predictions = result[0] if result else None
+            # Simple inference for validation
+            try:
+                predictions = model.Decoder.inference(z_random, temperature=0.8)
+            except Exception as e:
+                print(f"Inference failed: {e}, trying alternative method")
+                result = model.inference(data=z_random, device=device, sample=False, log_var=None)
+                predictions = result[0] if isinstance(result, tuple) else result
             
-            if predictions is None:
+            if predictions is None or len(predictions) == 0:
                 return 0.0, 0.0
             
-            for i in range(min(len(predictions), num_samples)):
+            # Process predictions
+            valid_predictions_count = 0
+            for i in range(len(predictions)):
                 try:
-                    if len(predictions[i]) > 0 and hasattr(predictions[i][0], '__iter__'):
+                    # Handle different prediction formats safely
+                    pred_tokens = None
+                    if isinstance(predictions[i], tuple) and len(predictions[i]) > 0:
                         pred_tokens = predictions[i][0]
-                        smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
+                    elif isinstance(predictions[i], list):
+                        pred_tokens = predictions[i]
+                    elif hasattr(predictions[i], 'tolist'):
+                        pred_tokens = predictions[i].tolist()
+                    else:
+                        continue
+                    
+                    if not pred_tokens:
+                        continue
                         
-                        # Stage-specific format validity check
-                        if stage == 0:  # Monomer validation
-                            # For monomers: just check basic SMILES validity
-                            format_valid = (
-                                len(smiles_string) > 3 and  # At least "C" or "CC"
-                                smiles_string.count('(') == smiles_string.count(')') and
-                                smiles_string.count('[') == smiles_string.count(']') and
-                                # Basic chemistry characters
-                                any(c in smiles_string for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's']) and
-                                # No polymer notation
-                                '|' not in smiles_string and
-                                '[*' not in smiles_string
-                            )
-                        else:  # Stage 1 & 2: Full polymer validation
-                            format_valid = (
-                                len(smiles_string) > 10 and 
-                                '|' in smiles_string and
-                                '[*:' in smiles_string and
-                                smiles_string.count('(') == smiles_string.count(')') and
-                                smiles_string.count('[') == smiles_string.count(']')
-                            )
+                    valid_predictions_count += 1
+                    smiles_string = safe_token_processing(pred_tokens, vocab, "RT_tokenized")
+                    
+                    if not smiles_string:
+                        continue
+                    
+                    # Stage-specific format validity check
+                    if stage == 0:  # Monomer validation
+                        format_valid = (
+                            len(smiles_string) > 3 and
+                            smiles_string.count('(') == smiles_string.count(')') and
+                            smiles_string.count('[') == smiles_string.count(']') and
+                            any(c in smiles_string for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's']) and
+                            '|' not in smiles_string and
+                            '[*' not in smiles_string
+                        )
+                    else:  # Stage 1 & 2: Full polymer validation
+                        format_valid = (
+                            len(smiles_string) > 10 and 
+                            '|' in smiles_string and
+                            '[*:' in smiles_string and
+                            smiles_string.count('(') == smiles_string.count(')') and
+                            smiles_string.count('[') == smiles_string.count(']')
+                        )
+                    
+                    if format_valid:
+                        format_valid_count += 1
                         
-                        if format_valid:
-                            format_valid_count += 1
-                            
-                            # Chemical validity check
-                            if rdkit_available:
-                                if stage == 0:  # Monomer chemical validity
+                        # Chemical validity check
+                        if rdkit_available:
+                            if stage == 0:  # Monomer chemical validity
+                                try:
+                                    mol = Chem.MolFromSmiles(smiles_string)
+                                    if mol is not None:
+                                        rdkit_valid_count += 1
+                                except:
+                                    pass
+                            else:  # Polymer chemical validity
+                                if '|' in smiles_string:
+                                    smiles_part = smiles_string.split('|')[0]
                                     try:
-                                        # Direct SMILES validation for monomers
-                                        mol = Chem.MolFromSmiles(smiles_string)
-                                        if mol is not None:
-                                            rdkit_valid_count += 1
+                                        smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                        if '.' in smiles_clean:
+                                            monomers = smiles_clean.split('.')
+                                            all_valid = True
+                                            for monomer in monomers:
+                                                if monomer.strip():
+                                                    mol = Chem.MolFromSmiles(monomer)
+                                                    if mol is None:
+                                                        all_valid = False
+                                                        break
+                                            if all_valid:
+                                                rdkit_valid_count += 1
+                                        else:
+                                            mol = Chem.MolFromSmiles(smiles_clean)
+                                            if mol is not None:
+                                                rdkit_valid_count += 1
                                     except:
                                         pass
-                                else:  # Polymer chemical validity (Stage 1 & 2)
-                                    if '|' in smiles_string:
-                                        smiles_part = smiles_string.split('|')[0]
-                                        try:
-                                            # CRITICAL FIX: Clean the polymer notation
-                                            smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
-                                            
-                                            if '.' in smiles_clean:
-                                                # Copolymer
-                                                monomers = smiles_clean.split('.')
-                                                all_valid = True
-                                                for monomer in monomers:
-                                                    if monomer.strip():
-                                                        mol = Chem.MolFromSmiles(monomer)
-                                                        if mol is None:
-                                                            all_valid = False
-                                                            break
-                                                if all_valid:
-                                                    rdkit_valid_count += 1
-                                            else:
-                                                # Single monomer
-                                                mol = Chem.MolFromSmiles(smiles_clean)
-                                                if mol is not None:
-                                                    rdkit_valid_count += 1
-                                        except:
-                                            pass
-                except:
+                except Exception as e:
+                    # Skip problematic predictions
                     continue
-                    
+            
+            # Calculate validity based on successful predictions
+            if valid_predictions_count > 0:
+                format_validity = format_valid_count / valid_predictions_count
+                rdkit_validity = rdkit_valid_count / valid_predictions_count
+            else:
+                format_validity = 0.0
+                rdkit_validity = 0.0
+                
         except Exception as e:
             print(f"Generation validation failed: {e}")
             return 0.0, 0.0
-    
-    format_validity = format_valid_count / num_samples if num_samples > 0 else 0.0
-    rdkit_validity = rdkit_valid_count / num_samples if num_samples > 0 else 0.0
     
     model.train()
     return format_validity, rdkit_validity

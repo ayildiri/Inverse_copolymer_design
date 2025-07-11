@@ -1051,38 +1051,56 @@ def test(dict_loader):
         
     return ce_losses, total_losses, kld_losses, accs, mses
 
-def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, resume_from_checkpoint=False, generation_validity=None, rdkit_validity=None, clustering_score=None):
+def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path, 
+                              resume_from_checkpoint=False, generation_validity=None, 
+                              rdkit_validity=None, **kwargs):  # Added **kwargs
     csv_file = os.path.join(directory_path, 'training_log.csv')
     flag_file = os.path.join(directory_path, '.csv_initialized')
     
-    # Read existing data if file exists
-    existing_data = []
+    # Base headers
     headers = ['epoch', 'train_loss_mean', 'train_kld_mean', 'train_acc_mean', 'train_mse_mean',
                'val_loss_mean', 'val_kld_mean', 'val_acc_mean', 'val_mse_mean', 
                'generation_validity', 'rdkit_validity']
     
-    # Add clustering score header for Stage 0
-    if clustering_score is not None:
-        headers.append('clustering_score')
+    # Add any additional headers from kwargs
+    extra_headers = list(kwargs.keys())
+    headers.extend(extra_headers)
+    
+    # Read existing data if file exists
+    existing_data = []
+    existing_headers = headers.copy()
     
     if os.path.exists(csv_file):
-        with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # FIXED: Keep all epochs except the current one (which we'll update)
-                if int(row['epoch']) != epoch:
-                    existing_data.append(row)
+        try:
+            with open(csv_file, 'r') as f:
+                reader = csv.DictReader(f)
+                existing_headers = reader.fieldnames or headers
+                for row in reader:
+                    if int(row['epoch']) != epoch:
+                        existing_data.append(row)
+        except Exception as e:
+            print(f"Warning: Could not read existing CSV: {e}")
     
-    # Sort existing data by epoch to maintain order
+    # Merge headers (in case new columns were added)
+    all_headers = list(existing_headers)
+    for h in headers:
+        if h not in all_headers:
+            all_headers.append(h)
+    
+    # Sort existing data by epoch
     existing_data.sort(key=lambda x: int(x['epoch']))
     
     # Write updated data
     with open(csv_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
+        writer = csv.DictWriter(f, fieldnames=all_headers)
         writer.writeheader()
         
         # Write all existing epochs
         for row in existing_data:
+            # Fill in missing fields with 0.0
+            for header in all_headers:
+                if header not in row:
+                    row[header] = 0.0
             writer.writerow(row)
         
         # Write current epoch
@@ -1100,10 +1118,14 @@ def save_epoch_metrics_to_csv(epoch, train_metrics, val_metrics, directory_path,
             'rdkit_validity': rdkit_validity if rdkit_validity is not None else 0.0
         }
         
-        # Add clustering score if provided
-        if clustering_score is not None:
-            row_data['clustering_score'] = clustering_score
-            
+        # Add any extra metrics from kwargs
+        row_data.update(kwargs)
+        
+        # Fill any missing fields
+        for header in all_headers:
+            if header not in row_data:
+                row_data[header] = 0.0
+                
         writer.writerow(row_data)
     
     # Update or create flag file

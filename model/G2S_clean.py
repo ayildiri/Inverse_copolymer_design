@@ -1636,13 +1636,16 @@ class G2S_VAE_PPguided(nn.Module):
         validity_penalty = 0.0
         batch_size = len(predictions)
         
-        # Import RDKit if available for chemical checks
+        # Import RDKit if available
         try:
             from rdkit import Chem
             import re
             rdkit_available = True
         except ImportError:
             rdkit_available = False
+        
+        # Check if in monomer mode
+        is_monomer_mode = hasattr(self.Decoder, 'is_monomer_mode') and self.Decoder.is_monomer_mode
         
         for pred in predictions:
             try:
@@ -1655,63 +1658,146 @@ class G2S_VAE_PPguided(nn.Module):
                 if tokens:
                     smiles_string = combine_tokens(tokens, tokenization="RT_tokenized")
                     
-                    # ENHANCED PENALTIES with graduated severity
-                    # Critical format requirements (highest penalty)
-                    if '|' not in smiles_string:
-                        validity_penalty += 2.0  # Increased from 1.0
-                    elif smiles_string.count('|') < 3:
-                        validity_penalty += 1.5  # Must have all pipe sections
+                    if is_monomer_mode:
+                        # ========== MONOMER-SPECIFIC VALIDATION ==========
                         
-                    if '[*:' not in smiles_string:
-                        validity_penalty += 2.0  # Increased from 1.0
+                        # Length check
+                        if len(smiles_string) < 3:
+                            validity_penalty += 2.0  # Too short
+                            continue
+                        elif len(smiles_string) > 100:
+                            validity_penalty += 1.0  # Too long for a monomer
                         
-                    # Connectivity requirements
-                    if '<' not in smiles_string:
-                        validity_penalty += 1.5
-                    if ':' not in smiles_string.split('|')[-1] if '|' in smiles_string else smiles_string:
-                        validity_penalty += 1.0
+                        # HEAVILY penalize polymer notation in monomer mode
+                        if '|' in smiles_string:
+                            validity_penalty += 3.0
+                        if '[*' in smiles_string:
+                            validity_penalty += 3.0
                         
-                    # Balance requirements
-                    if smiles_string.count('(') != smiles_string.count(')'):
-                        validity_penalty += 1.0  # Increased from 0.5
-                    if smiles_string.count('[') != smiles_string.count(']'):
-                        validity_penalty += 1.0  # Increased from 0.5
-                    
-                    # Chemical validity check (bonus for RDKit-valid structures)
-                    if rdkit_available and '|' in smiles_string:
-                        smiles_part = smiles_string.split('|')[0]
-                        try:
-                            # CRITICAL FIX: Clean the polymer notation
-                            smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
-                            
-                            if '.' in smiles_clean:
-                                # Copolymer
-                                monomers = smiles_clean.split('.')
-                                all_valid = True
-                                for monomer in monomers:
-                                    if monomer.strip():
-                                        mol = Chem.MolFromSmiles(monomer)
-                                        if mol is None:
-                                            all_valid = False
-                                            break
-                                if all_valid:
-                                    validity_penalty -= 1.0  # REWARD for RDKit-valid chemistry
-                            else:
-                                # Single monomer
-                                mol = Chem.MolFromSmiles(smiles_clean)
+                        # Check for organic chemistry elements (REWARD)
+                        has_carbon = any(c in smiles_string for c in ['C', 'c'])
+                        has_heteroatom = any(c in smiles_string for c in ['N', 'n', 'O', 'o', 'S', 's', 'F', 'P', 'B'])
+                        
+                        if has_carbon:
+                            validity_penalty -= 0.5  # Reward carbon presence
+                        if has_heteroatom:
+                            validity_penalty -= 0.3  # Reward heteroatoms
+                        
+                        # Balance checks
+                        paren_balanced = smiles_string.count('(') == smiles_string.count(')')
+                        bracket_balanced = smiles_string.count('[') == smiles_string.count(']')
+                        
+                        if not paren_balanced:
+                            validity_penalty += 1.5
+                        if not bracket_balanced:
+                            validity_penalty += 1.5
+                        
+                        # Ring closure check
+                        ring_numbers = {}
+                        for char in smiles_string:
+                            if char.isdigit() and char != '0':
+                                ring_numbers[char] = ring_numbers.get(char, 0) + 1
+                        
+                        # Each ring number should appear exactly twice
+                        for count in ring_numbers.values():
+                            if count != 2:
+                                validity_penalty += 1.0
+                                break
+                        
+                        # Check for common invalid patterns
+                        invalid_patterns = [
+                            '..', '()', '[]', 'CC(C)(C)(C)C',  # Invalid syntax
+                            '====', '###',  # Invalid bonds
+                            '++', '--',  # Invalid charges
+                        ]
+                        for pattern in invalid_patterns:
+                            if pattern in smiles_string:
+                                validity_penalty += 1.0
+                        
+                        # RDKit validation for monomers
+                        if rdkit_available and paren_balanced and bracket_balanced:
+                            try:
+                                mol = Chem.MolFromSmiles(smiles_string)
                                 if mol is not None:
-                                    validity_penalty -= 1.0  # REWARD for RDKit-valid chemistry
-                        except:
-                            pass
+                                    num_atoms = mol.GetNumAtoms()
+                                    if num_atoms >= 3 and num_atoms <= 50:  # Reasonable monomer size
+                                        validity_penalty -= 2.0  # STRONG REWARD for valid monomer
+                                        
+                                        # Additional rewards for good monomers
+                                        if num_atoms >= 6:
+                                            validity_penalty -= 0.5  # Bonus for non-trivial size
+                                        
+                                        # Check for aromatic rings (common in polymers)
+                                        if any(atom.GetIsAromatic() for atom in mol.GetAtoms()):
+                                            validity_penalty -= 0.5  # Bonus for aromaticity
+                                    elif num_atoms < 3:
+                                        validity_penalty += 1.5  # Too small
+                                    elif num_atoms > 50:
+                                        validity_penalty += 1.0  # Too large for monomer
+                                else:
+                                    validity_penalty += 1.5  # Invalid SMILES
+                            except:
+                                validity_penalty += 1.0  # Error in parsing
                         
-                    # REWARDS for good format (negative penalty)
-                    if len(smiles_string) > 30 and '|' in smiles_string:
-                        validity_penalty -= 0.3  # Reward reasonable length
-                    if smiles_string.count('|') == 3:  # Exact format
-                        validity_penalty -= 0.5
-                    if '[*:1]' in smiles_string and '[*:2]' in smiles_string:
-                        validity_penalty -= 0.5  # Both attachment points
+                    else:
+                        # ========== POLYMER-SPECIFIC VALIDATION (Original) ==========
                         
+                        # Critical format requirements (highest penalty)
+                        if '|' not in smiles_string:
+                            validity_penalty += 2.0  # Increased from 1.0
+                        elif smiles_string.count('|') < 3:
+                            validity_penalty += 1.5  # Must have all pipe sections
+                            
+                        if '[*:' not in smiles_string:
+                            validity_penalty += 2.0  # Increased from 1.0
+                            
+                        # Connectivity requirements
+                        if '<' not in smiles_string:
+                            validity_penalty += 1.5
+                        if ':' not in smiles_string.split('|')[-1] if '|' in smiles_string else smiles_string:
+                            validity_penalty += 1.0
+                            
+                        # Balance requirements
+                        if smiles_string.count('(') != smiles_string.count(')'):
+                            validity_penalty += 1.0  # Increased from 0.5
+                        if smiles_string.count('[') != smiles_string.count(']'):
+                            validity_penalty += 1.0  # Increased from 0.5
+                        
+                        # Chemical validity check (bonus for RDKit-valid structures)
+                        if rdkit_available and '|' in smiles_string:
+                            smiles_part = smiles_string.split('|')[0]
+                            try:
+                                # Clean the polymer notation
+                                smiles_clean = re.sub(r'\[\*:\d+\]', '*', smiles_part)
+                                
+                                if '.' in smiles_clean:
+                                    # Copolymer
+                                    monomers = smiles_clean.split('.')
+                                    all_valid = True
+                                    for monomer in monomers:
+                                        if monomer.strip():
+                                            mol = Chem.MolFromSmiles(monomer)
+                                            if mol is None:
+                                                all_valid = False
+                                                break
+                                    if all_valid:
+                                        validity_penalty -= 1.0  # REWARD for RDKit-valid chemistry
+                                else:
+                                    # Single monomer
+                                    mol = Chem.MolFromSmiles(smiles_clean)
+                                    if mol is not None:
+                                        validity_penalty -= 1.0  # REWARD for RDKit-valid chemistry
+                            except:
+                                pass
+                            
+                        # REWARDS for good format (negative penalty)
+                        if len(smiles_string) > 30 and '|' in smiles_string:
+                            validity_penalty -= 0.3  # Reward reasonable length
+                        if smiles_string.count('|') == 3:  # Exact format
+                            validity_penalty -= 0.5
+                        if '[*:1]' in smiles_string and '[*:2]' in smiles_string:
+                            validity_penalty -= 0.5  # Both attachment points
+                            
             except:
                 validity_penalty += 1.0  # Penalty for unparseable
                 

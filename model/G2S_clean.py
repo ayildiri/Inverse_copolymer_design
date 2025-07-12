@@ -257,6 +257,9 @@ class SequenceDecoder(nn.Module):
         
         self.ndim= model_config['embedding_dim']
         self.config = model_config
+
+        # monomer mode flag
+        self.is_monomer_mode = model_config.get('is_monomer_mode', False)
         
         self.max_n = 512  # Changed from 256 to accommodate stoichiometry + connectivity
         

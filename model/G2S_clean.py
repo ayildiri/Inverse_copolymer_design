@@ -660,8 +660,18 @@ class SequenceDecoder(nn.Module):
             if next_token_str in ['_SOS', '_EOS', '_PAD', '_UNK']:
                 return True
             
+            # STAGE-SPECIFIC: For monomer training, prevent polymer tokens
+            if hasattr(self, 'is_monomer_mode') and self.is_monomer_mode:
+                # Disallow polymer-specific tokens
+                if next_token_str in ['|', '[*:', '[*]'] or next_token_str.startswith('[*:'):
+                    return False
+                
+                # Allow more freedom early but not too much
+                if len(current_tokens) < 5:  # Very early - allow most chemistry
+                    return next_token_str not in ['_PAD', '_UNK']
+            
             # Allow more freedom in early generation
-            if len(current_tokens) < 20:  # Increased from 10
+            if len(current_tokens) < 20:
                 return True
             
             current_sequence = ''.join(current_tokens)

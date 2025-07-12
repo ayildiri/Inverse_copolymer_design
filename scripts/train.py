@@ -413,6 +413,7 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     """Create a data loader with monomer-only SMILES for pretraining"""
     import copy
     from torch_geometric.data import Data, Batch
+    import re
     
     monomer_loader = {}
     
@@ -446,64 +447,85 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             # Process target sequence to monomer-only
             original_token_ids = data_batch.tgt_token_ids[i]
             
-            # Convert to tokens
-            tokens = []
-            inv_vocab = {v: k for k, v in vocab.items()}
-            for token_id in original_token_ids:
-                if token_id in inv_vocab:
-                    tokens.append(inv_vocab[token_id])
+            # Convert token IDs to string first to properly extract monomer
+            tokens = tokenids_to_vocab(original_token_ids, vocab)
+            full_smiles = combine_tokens(tokens, tokenization=tokenization)
             
-            # Remove polymer-specific tokens at the token level
+            # Extract monomer part (before first |)
+            if '|' in full_smiles:
+                monomer_smiles = full_smiles.split('|')[0]
+            else:
+                monomer_smiles = full_smiles
+            
+            # Clean monomer: remove attachment points
+            monomer_smiles = re.sub(r'\[\*:\d+\]', '', monomer_smiles)
+            monomer_smiles = monomer_smiles.replace('[*]', '')
+            
+            # CRITICAL: Validate monomer SMILES
+            if len(monomer_smiles) < 3:
+                continue  # Skip too short
+            
+            # Basic validation
+            if monomer_smiles.count('(') != monomer_smiles.count(')'):
+                continue  # Skip unbalanced parentheses
+            
+            if monomer_smiles.count('[') != monomer_smiles.count(']'):
+                continue  # Skip unbalanced brackets
+            
+            # Check for at least one organic element
+            if not any(c in monomer_smiles for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's', 'F', 'P', 'B']):
+                continue  # Skip if no organic atoms
+            
+            # Re-tokenize the cleaned monomer
             monomer_tokens = []
-            skip_until_pipe = False
+            if tokenization == "RT_tokenized":
+                # Use proper regex tokenization matching the original tokenizer
+                pattern = r'(\[[^\]]+\]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\|\/|:|~|@|\?|>|\*|\$|\%[0-9]{2}|[0-9])'
+                monomer_tokens = re.findall(pattern, monomer_smiles)
+            else:
+                # Character-level tokenization
+                monomer_tokens = list(monomer_smiles)
             
-            for token in tokens:
-                # Skip special tokens except EOS
-                if token in ['_PAD', '_SOS', '_UNK']:
-                    continue
-                    
-                # Stop at EOS
-                if token == '_EOS':
-                    break
-                    
-                # Skip polymer notation sections (after | symbol)
-                if token == '|':
-                    skip_until_pipe = True
-                    break  # Stop processing after first pipe
-                    
-                # Skip attachment point tokens
-                if token.startswith('[*:') or token == '[*]':
-                    continue
-                    
-                # Keep regular chemistry tokens
-                monomer_tokens.append(token)
-            
-            # Convert back to token IDs
+            # Convert back to token IDs with proper special tokens
             monomer_token_ids = []
             
             # Add SOS token
             if '_SOS' in vocab:
                 monomer_token_ids.append(vocab['_SOS'])
             
-            # Add monomer tokens
+            # Add monomer tokens (skip any that aren't in vocab)
             for token in monomer_tokens:
                 if token in vocab:
                     monomer_token_ids.append(vocab[token])
+                else:
+                    # If token not in vocab, try to handle it
+                    if tokenization == "oldtok" and len(token) > 1:
+                        # For oldtok, split unknown multi-char tokens
+                        for char in token:
+                            if char in vocab:
+                                monomer_token_ids.append(vocab[char])
             
             # Add EOS token
             if '_EOS' in vocab:
                 monomer_token_ids.append(vocab['_EOS'])
             
-            # CRITICAL: Pad to a fixed length
-            max_length = 256  # or whatever max length you want
+            # Check if we have a reasonable sequence
+            if len(monomer_token_ids) < 5:  # Too short (just SOS + EOS + few tokens)
+                continue
+            
+            # CRITICAL: Use appropriate max length for monomers
+            max_length = 128  # Shorter for monomers, not 256
+            
+            # Pad or truncate
             if len(monomer_token_ids) < max_length:
-                # Pad with PAD tokens
                 pad_token_id = vocab.get('_PAD', 0)
                 monomer_token_ids.extend([pad_token_id] * (max_length - len(monomer_token_ids)))
             else:
-                # Truncate if too long
-                monomer_token_ids = monomer_token_ids[:max_length]
+                # Keep EOS at the end when truncating
+                eos_token = vocab.get('_EOS', 2)
+                monomer_token_ids = monomer_token_ids[:max_length-1] + [eos_token]
             
+            # Assign to graph data
             graph_data.tgt_token_ids = monomer_token_ids
             
             # Copy other attributes
@@ -513,12 +535,36 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
                 graph_data.y1 = data_batch.y1[i:i+1]
             if hasattr(data_batch, 'y2'):
                 graph_data.y2 = data_batch.y2[i:i+1]
+            if hasattr(data_batch, 'y3'):
+                graph_data.y3 = data_batch.y3[i:i+1]
+            if hasattr(data_batch, 'y4'):
+                graph_data.y4 = data_batch.y4[i:i+1]
             
             new_data_list.append(graph_data)
         
-        # Create new batch
-        new_batch = Batch.from_data_list(new_data_list)
-        monomer_loader[batch_key] = [new_batch, dest_matrix, inc_matrix]
+        # Only create batch if we have valid data
+        if len(new_data_list) > 0:
+            new_batch = Batch.from_data_list(new_data_list)
+            monomer_loader[batch_key] = [new_batch, dest_matrix, inc_matrix]
+            
+            # Debug: print info about first batch
+            if batch_key == '0':
+                print(f"[Stage 0] First batch monomer info:")
+                print(f"  Original batch size: {data_batch.num_graphs}")
+                print(f"  Valid monomers: {len(new_data_list)}")
+                if len(new_data_list) > 0:
+                    # Check first monomer
+                    first_tokens = tokenids_to_vocab(new_data_list[0].tgt_token_ids, vocab)
+                    first_smiles = combine_tokens(first_tokens, tokenization=tokenization)
+                    print(f"  First monomer example: {first_smiles}")
+                    print(f"  Sequence length: {len([t for t in new_data_list[0].tgt_token_ids if t != vocab.get('_PAD', 0)])}")
+    
+    print(f"[Stage 0] Created monomer data loader with {len(monomer_loader)} batches")
+    
+    # Validate that we have enough data
+    if len(monomer_loader) < len(original_loader) * 0.5:
+        print(f"WARNING: Lost more than 50% of data during monomer conversion!")
+        print(f"Original batches: {len(original_loader)}, Monomer batches: {len(monomer_loader)}")
     
     return monomer_loader
 

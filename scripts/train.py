@@ -1887,6 +1887,10 @@ if args.training_stage == 0 or args.training_stage == 1:
     else:
         model_type = G2S_VAE
     
+    # monomer mode flag for Stage 0
+    if args.training_stage == 0:
+        model_config['is_monomer_mode'] = True
+    
     model = safe_model_creation(
         model_type,
         num_node_features, num_edge_features, hidden_dimension, 

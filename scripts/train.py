@@ -414,8 +414,14 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     import copy
     from torch_geometric.data import Data, Batch
     import re
+    import random
     
     monomer_loader = {}
+    
+    # Track statistics
+    total_molecules = 0
+    valid_molecules = 0
+    monomer_types = set()
     
     for batch_key, batch_data in original_loader.items():
         data_batch = batch_data[0]
@@ -427,6 +433,8 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         
         # Process each graph in the batch
         for i in range(data_batch.num_graphs):
+            total_molecules += 1
+            
             # Get original graph data
             graph_data = Data()
             
@@ -451,30 +459,70 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             tokens = tokenids_to_vocab(original_token_ids, vocab)
             full_smiles = combine_tokens(tokens, tokenization=tokenization)
             
-            # Extract monomer part (before first |)
+            # Extract polymer part (before first |)
             if '|' in full_smiles:
-                monomer_smiles = full_smiles.split('|')[0]
+                polymer_part = full_smiles.split('|')[0]
             else:
-                monomer_smiles = full_smiles
+                polymer_part = full_smiles
             
-            # Clean monomer: remove attachment points
-            monomer_smiles = re.sub(r'\[\*:\d+\]', '', monomer_smiles)
-            monomer_smiles = monomer_smiles.replace('[*]', '')
+            # CRITICAL: Extract and clean individual monomers
+            monomer_smiles = None
             
-            # CRITICAL: Validate monomer SMILES
-            if len(monomer_smiles) < 3:
-                continue  # Skip too short
+            if '.' in polymer_part:
+                # Copolymer - extract individual monomers
+                individual_monomers = polymer_part.split('.')
+                
+                # Clean each monomer and collect valid ones
+                valid_monomers = []
+                for monomer in individual_monomers:
+                    # Remove all polymer notations
+                    cleaned = monomer
+                    cleaned = re.sub(r'\[\*:\d+\]', '', cleaned)  # Remove [*:1], [*:2], etc.
+                    cleaned = cleaned.replace('[*]', '')           # Remove [*]
+                    cleaned = cleaned.replace('*', '')             # Remove bare *
+                    cleaned = cleaned.strip()                      # Remove whitespace
+                    
+                    # Check if it's a valid monomer
+                    if (len(cleaned) > 3 and 
+                        any(c in cleaned for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's', 'F', 'P', 'B']) and
+                        cleaned.count('(') == cleaned.count(')') and
+                        cleaned.count('[') == cleaned.count(']')):
+                        valid_monomers.append(cleaned)
+                
+                # Choose one monomer (you can modify strategy here)
+                if valid_monomers:
+                    # Strategy: Take the first valid monomer
+                    # Alternative: random.choice(valid_monomers) for variety
+                    monomer_smiles = valid_monomers[0]
+                    monomer_types.add(monomer_smiles)  # Track unique monomers
+                else:
+                    continue  # Skip if no valid monomers
+                    
+            else:
+                # Single polymer - just clean it
+                cleaned = polymer_part
+                cleaned = re.sub(r'\[\*:\d+\]', '', cleaned)
+                cleaned = cleaned.replace('[*]', '')
+                cleaned = cleaned.replace('*', '')
+                cleaned = cleaned.strip()
+                
+                # Validate
+                if (len(cleaned) > 3 and 
+                    any(c in cleaned for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's', 'F', 'P', 'B']) and
+                    cleaned.count('(') == cleaned.count(')') and
+                    cleaned.count('[') == cleaned.count(']')):
+                    monomer_smiles = cleaned
+                    monomer_types.add(monomer_smiles)
+                else:
+                    continue
             
-            # Basic validation
-            if monomer_smiles.count('(') != monomer_smiles.count(')'):
-                continue  # Skip unbalanced parentheses
+            # Skip if no valid monomer extracted
+            if not monomer_smiles:
+                continue
             
-            if monomer_smiles.count('[') != monomer_smiles.count(']'):
-                continue  # Skip unbalanced brackets
-            
-            # Check for at least one organic element
-            if not any(c in monomer_smiles for c in ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's', 'F', 'P', 'B']):
-                continue  # Skip if no organic atoms
+            # Additional validation - check for common issues
+            if any(invalid in monomer_smiles for invalid in ['..', '...', '((', '))', '[[', ']]']):
+                continue
             
             # Re-tokenize the cleaned monomer
             monomer_tokens = []
@@ -497,13 +545,11 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             for token in monomer_tokens:
                 if token in vocab:
                     monomer_token_ids.append(vocab[token])
-                else:
-                    # If token not in vocab, try to handle it
-                    if tokenization == "oldtok" and len(token) > 1:
-                        # For oldtok, split unknown multi-char tokens
-                        for char in token:
-                            if char in vocab:
-                                monomer_token_ids.append(vocab[char])
+                elif tokenization == "oldtok" and len(token) > 1:
+                    # For oldtok, try character by character
+                    for char in token:
+                        if char in vocab:
+                            monomer_token_ids.append(vocab[char])
             
             # Add EOS token
             if '_EOS' in vocab:
@@ -513,8 +559,8 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             if len(monomer_token_ids) < 5:  # Too short (just SOS + EOS + few tokens)
                 continue
             
-            # CRITICAL: Use appropriate max length for monomers
-            max_length = 128  # Shorter for monomers, not 256
+            # Use appropriate max length for monomers
+            max_length = 128  # Shorter than full polymers
             
             # Pad or truncate
             if len(monomer_token_ids) < max_length:
@@ -531,16 +577,15 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             # Copy other attributes
             if hasattr(data_batch, 'W_atoms'):
                 graph_data.W_atoms = data_batch.W_atoms[start_idx:end_idx]
-            if hasattr(data_batch, 'y1'):
-                graph_data.y1 = data_batch.y1[i:i+1]
-            if hasattr(data_batch, 'y2'):
-                graph_data.y2 = data_batch.y2[i:i+1]
-            if hasattr(data_batch, 'y3'):
-                graph_data.y3 = data_batch.y3[i:i+1]
-            if hasattr(data_batch, 'y4'):
-                graph_data.y4 = data_batch.y4[i:i+1]
+            
+            # Copy property values
+            for prop_idx in range(10):  # Support up to 10 properties
+                prop_attr = f'y{prop_idx+1}'
+                if hasattr(data_batch, prop_attr):
+                    setattr(graph_data, prop_attr, getattr(data_batch, prop_attr)[i:i+1])
             
             new_data_list.append(graph_data)
+            valid_molecules += 1
         
         # Only create batch if we have valid data
         if len(new_data_list) > 0:
@@ -549,22 +594,40 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
             
             # Debug: print info about first batch
             if batch_key == '0':
-                print(f"[Stage 0] First batch monomer info:")
+                print(f"\n[Stage 0] First batch monomer info:")
                 print(f"  Original batch size: {data_batch.num_graphs}")
                 print(f"  Valid monomers: {len(new_data_list)}")
                 if len(new_data_list) > 0:
-                    # Check first monomer
-                    first_tokens = tokenids_to_vocab(new_data_list[0].tgt_token_ids, vocab)
-                    first_smiles = combine_tokens(first_tokens, tokenization=tokenization)
-                    print(f"  First monomer example: {first_smiles}")
+                    # Check first few monomers
+                    for j in range(min(3, len(new_data_list))):
+                        first_tokens = tokenids_to_vocab(new_data_list[j].tgt_token_ids, vocab)
+                        first_smiles = combine_tokens(first_tokens, tokenization=tokenization)
+                        print(f"  Monomer {j+1}: {first_smiles}")
+                        
+                        # Verify no polymer notation
+                        if any(char in first_smiles for char in ['*', '|', '[*']):
+                            print(f"    ⚠️ WARNING: Monomer still contains polymer notation!")
+                    
                     print(f"  Sequence length: {len([t for t in new_data_list[0].tgt_token_ids if t != vocab.get('_PAD', 0)])}")
     
-    print(f"[Stage 0] Created monomer data loader with {len(monomer_loader)} batches")
+    print(f"\n[Stage 0] Monomer conversion complete:")
+    print(f"  Total molecules processed: {total_molecules}")
+    print(f"  Valid monomers created: {valid_molecules}")
+    print(f"  Success rate: {valid_molecules/total_molecules*100:.1f}%")
+    print(f"  Unique monomer types: {len(monomer_types)}")
+    print(f"  Created monomer batches: {len(monomer_loader)}")
     
     # Validate that we have enough data
-    if len(monomer_loader) < len(original_loader) * 0.5:
-        print(f"WARNING: Lost more than 50% of data during monomer conversion!")
+    if len(monomer_loader) < len(original_loader) * 0.3:
+        print(f"\n⚠️ WARNING: Lost more than 70% of data during monomer conversion!")
         print(f"Original batches: {len(original_loader)}, Monomer batches: {len(monomer_loader)}")
+        print(f"This might indicate an issue with the cleaning process.")
+    
+    # Show a few example unique monomers
+    if monomer_types:
+        print(f"\n📋 Example unique monomers (first 5):")
+        for i, monomer in enumerate(list(monomer_types)[:5]):
+            print(f"  {i+1}: {monomer}")
     
     return monomer_loader
 

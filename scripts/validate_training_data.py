@@ -21,7 +21,9 @@ def validate_training_data(data_path, vocab_path, tokenization="RT_tokenized", d
             dataset_name = "UNKNOWN"
     
     # Extract stage from path
-    if 'Stage1' in data_path:
+    if 'Stage0' in data_path:
+        stage = "Stage 0"
+    elif 'Stage1' in data_path:
         stage = "Stage 1"
     elif 'Stage2' in data_path:
         stage = "Stage 2"

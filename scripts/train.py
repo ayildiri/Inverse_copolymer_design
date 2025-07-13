@@ -2076,11 +2076,8 @@ elif model_config['alpha'] == "fixed":
 # %%# %% Train
 
 # Enhanced optimizer with weight decay
-if args.training_stage == 1:
-    # Stage 1: Normal optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-else:
-    # Stage 2: Different learning rates for different components
+if args.training_stage == 2 and hasattr(model, 'PP_lin1'):
+    # Stage 2 with property prediction: Different learning rates
     param_groups = [
         {'params': model.PP_lin1.parameters(), 'lr': args.learning_rate},
         {'params': model.PP_lin2.parameters(), 'lr': args.learning_rate}
@@ -2094,6 +2091,10 @@ else:
     
     optimizer = torch.optim.Adam(param_groups, weight_decay=args.weight_decay)
     print(f"Stage 2 optimizer with differential learning rates created")
+else:
+    # Stage 0, 1, or any model without property layers: Normal optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    print(f"Standard optimizer created for stage {args.training_stage}")
 
 # Enhanced learning rate scheduler with configurable parameters
 from torch.optim.lr_scheduler import ReduceLROnPlateau

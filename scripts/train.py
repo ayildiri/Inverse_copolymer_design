@@ -1820,7 +1820,7 @@ if args.training_stage == 0:
     # Load regular data first
     dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data_safely(
         csv_path=None,
-        stage=1,  # Use stage 1 data
+        stage=0, 
         source_properties=args.source_properties,
         target_properties=args.target_properties,
         batch_size=batch_size,

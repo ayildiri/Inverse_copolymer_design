@@ -823,21 +823,22 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         num_nodes = batch_data.num_nodes
         
         # Create dest_is_origin_matrix
-        # This matrix maps from nodes (origin) to edges (destination)
-        dest_indices = torch.arange(num_edges, device=device)  # Edge indices
-        origin_indices = edge_index[0]  # Source node for each edge
+        # This matrix should be [num_nodes, num_edges] to aggregate from edges to nodes
+        row_indices = edge_index[1]  # destination nodes
+        col_indices = torch.arange(num_edges, device=device)  # edge indices
         
-        # Create sparse matrix with correct dimensions
-        indices = torch.stack([dest_indices, origin_indices])
+        indices = torch.stack([row_indices, col_indices])
         values = torch.ones(num_edges, device=device)
-        size = (num_edges, num_nodes)
+        size = (num_nodes, num_edges)  # CRITICAL: This should be nodes x edges
         dest_is_origin_matrix = torch.sparse.FloatTensor(indices, values, size)
         
         # Create inc_edges_to_atom_matrix
-        atom_indices = edge_index[0]
-        edge_indices = torch.arange(num_edges, device=device)  # Create on same device
-        indices = torch.stack([atom_indices, edge_indices])
-        values = torch.ones(num_edges, device=device)  # Create on same device
+        # This matrix maps from edges to source atoms
+        row_indices = edge_index[0]  # source nodes
+        col_indices = torch.arange(num_edges, device=device)  # edge indices
+        
+        indices = torch.stack([row_indices, col_indices])
+        values = torch.ones(num_edges, device=device)
         size = (num_nodes, num_edges)
         inc_edges_to_atom_matrix = torch.sparse.FloatTensor(indices, values, size)
         

@@ -415,6 +415,7 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     from torch_geometric.data import Data, Batch
     import re
     import random
+    import torch
     
     monomer_loader = {}
     
@@ -590,7 +591,7 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         # Only create batch if we have valid data
         if len(new_data_list) > 0:
             new_batch = Batch.from_data_list(new_data_list)
-            monomer_loader[batch_key] = [new_batch, dest_matrix, inc_matrix]
+            monomer_loader[batch_key] = [new_batch, None, None]  # Temporarily store without matrices
             
             # Debug: print info about first batch
             if batch_key == '0':
@@ -600,7 +601,16 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
                 if len(new_data_list) > 0:
                     # Check first few monomers
                     for j in range(min(3, len(new_data_list))):
-                        first_tokens = tokenids_to_vocab(new_data_list[j].tgt_token_ids, vocab)
+                        # Get tokens without padding for cleaner display
+                        token_ids = new_data_list[j].tgt_token_ids
+                        first_tokens = []
+                        for tid in token_ids:
+                            token = tokenids_to_vocab([tid], vocab)[0]
+                            if token in ['_PAD', '_EOS']:
+                                break  # Stop at padding or end
+                            if token not in ['_SOS', '_UNK']:
+                                first_tokens.append(token)
+                        
                         first_smiles = combine_tokens(first_tokens, tokenization=tokenization)
                         print(f"  Monomer {j+1}: {first_smiles}")
                         
@@ -628,6 +638,40 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         print(f"\n📋 Example unique monomers (first 5):")
         for i, monomer in enumerate(list(monomer_types)[:5]):
             print(f"  {i+1}: {monomer}")
+    
+    # CRITICAL: Recreate message passing matrices for monomer graphs
+    print("\n🔄 Recreating message passing matrices for monomer graphs...")
+    
+    for batch_key in monomer_loader:
+        batch_data = monomer_loader[batch_key][0]
+        
+        # Create new matrices for this batch
+        edge_index = batch_data.edge_index
+        num_edges = edge_index.size(1)
+        num_nodes = batch_data.num_nodes
+        
+        # Create dest_is_origin_matrix
+        dest_indices = edge_index[1]
+        origin_indices = edge_index[0]
+        
+        # Create sparse matrix
+        indices = torch.stack([dest_indices, origin_indices])
+        values = torch.ones(num_edges)
+        size = (num_edges, num_nodes)
+        dest_is_origin_matrix = torch.sparse.FloatTensor(indices, values, size)
+        
+        # Create inc_edges_to_atom_matrix
+        atom_indices = edge_index[0]
+        edge_indices = torch.arange(num_edges)
+        indices = torch.stack([atom_indices, edge_indices])
+        values = torch.ones(num_edges)
+        size = (num_nodes, num_edges)
+        inc_edges_to_atom_matrix = torch.sparse.FloatTensor(indices, values, size)
+        
+        # Update the batch data with new matrices
+        monomer_loader[batch_key] = [batch_data, dest_is_origin_matrix, inc_edges_to_atom_matrix]
+    
+    print("✅ Message passing matrices recreated successfully!")
     
     return monomer_loader
 

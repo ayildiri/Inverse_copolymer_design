@@ -15,6 +15,7 @@ from torch_geometric.loader import DataLoader
 from sklearn.model_selection import train_test_split
 from data_processing.Function_Featurization_Own import poly_smiles_to_graph_flexible
 import argparse
+import shutil
 
 # %% Hyperparameters
 device = 'cpu'
@@ -36,6 +37,11 @@ parser.add_argument("--semi_supervised", action="store_true", default=False,
                     help="Enable semi-supervised mode for Stage 1 (includes unlabeled data)")
 parser.add_argument("--exclude_properties", type=str, nargs='*', default=[],
                     help="Property columns to exclude in semi-supervised mode (e.g., bandgap_chain)")
+# LONG-TERM FIX: Add vocab_file argument
+parser.add_argument("--vocab_file", type=str, default=None,
+                    help="Path to existing vocabulary file to use (ensures consistency across stages)")
+parser.add_argument("--create_master_vocab", action="store_true", default=False,
+                    help="Create a comprehensive vocabulary from all data (use this once before all stages)")
 
 args = parser.parse_args()
 
@@ -61,6 +67,89 @@ if len(property_columns) != len(property_names):
 
 print(f"Processing {property_count} properties: {property_names}")
 print(f"Property columns in CSV: {property_columns}")
+
+# LONG-TERM FIX: Master vocabulary creation function
+def create_master_vocabulary(csv_path, output_path, tokenization='RT_tokenized', augment='augmented'):
+    """Create a comprehensive master vocabulary from the entire dataset"""
+    from collections import Counter
+    
+    print("\n🔨 CREATING MASTER VOCABULARY")
+    print("="*60)
+    
+    # Load the full dataset
+    df = pd.read_csv(csv_path)
+    print(f"📊 Loaded {len(df)} molecules from dataset")
+    
+    # Collect all SMILES strings
+    all_poly_inputs = []
+    
+    # Get all poly_chemprop_input values
+    if 'poly_chemprop_input' in df.columns:
+        all_poly_inputs.extend(df['poly_chemprop_input'].dropna().tolist())
+    
+    # Also get nocan versions if available
+    if 'poly_chemprop_input_nocan' in df.columns:
+        all_poly_inputs.extend(df['poly_chemprop_input_nocan'].dropna().tolist())
+    
+    print(f"📝 Collected {len(all_poly_inputs)} polymer strings to tokenize")
+    
+    # Tokenize all strings
+    token_counter = Counter()
+    for i, poly_input in enumerate(all_poly_inputs):
+        if tokenization == "oldtok":
+            tokens = tokenize_poly_input(poly_input=poly_input)
+        elif tokenization == "RT_tokenized":
+            tokens = tokenize_poly_input_RTlike(poly_input=poly_input)
+        
+        token_counter.update(tokens)
+        
+        if i % 1000 == 0:
+            print(f"   Tokenized {i}/{len(all_poly_inputs)} polymer strings...")
+    
+    # Create vocabulary with special tokens first
+    special_tokens = ['_PAD', '_SOS', '_EOS', '_UNK']
+    vocab = {token: idx for idx, token in enumerate(special_tokens)}
+    
+    # Add all tokens sorted by frequency (most common first) for consistency
+    for token, count in token_counter.most_common():
+        if token not in vocab:
+            vocab[token] = len(vocab)
+    
+    # Save vocabulary
+    with open(output_path, 'w') as f:
+        for token, idx in sorted(vocab.items(), key=lambda x: x[1]):
+            # Save without frequency counts for consistency
+            f.write(f"{token}\t{idx}\n")
+    
+    print(f"\n✅ Created master vocabulary with {len(vocab)} unique tokens")
+    print(f"📁 Saved to: {output_path}")
+    print(f"🔤 Token examples: {list(token_counter.most_common(10))}")
+    
+    return vocab
+
+# LONG-TERM FIX: Handle master vocabulary creation
+if args.create_master_vocab:
+    # Special mode to create master vocabulary
+    if not args.input_file:
+        raise ValueError("--input_file required when creating master vocabulary")
+    
+    master_vocab_path = os.path.join(
+        os.path.dirname(args.output_dir) if args.output_dir else main_dir_path,
+        f'master_vocab_{augment}_{tokenization}.txt'
+    )
+    
+    create_master_vocabulary(
+        args.input_file,
+        master_vocab_path,
+        tokenization=tokenization,
+        augment=augment
+    )
+    
+    print("\n🎯 MASTER VOCABULARY CREATED!")
+    print("📋 Next steps:")
+    print("1. Use this vocabulary for all stages by adding: --vocab_file " + master_vocab_path)
+    print("2. This ensures all stages use identical vocabulary")
+    sys.exit(0)  # Exit after creating master vocab
 
 # Load input file based on command line argument or fall back to default paths
 if args.input_file:
@@ -219,12 +308,47 @@ property_suffix = "_".join(property_names)
 vocab_filename = f'poly_smiles_vocab_{file_prefix}_{tokenization}_{property_suffix}.txt'
 graphs_filename = f'Graphs_list_{file_prefix}_{tokenization}_{property_suffix}.pt'
 
-# Create vocab file with property suffix
-make_vocab(target_tokens_list=target_tokens_list, vocab_file=os.path.join(output_dir, vocab_filename))
+# LONG-TERM FIX: Handle vocabulary file usage/creation
+vocab_path = os.path.join(output_dir, vocab_filename)
+
+if args.vocab_file:
+    # Use existing vocabulary file
+    print(f"\n📚 USING EXISTING VOCABULARY: {args.vocab_file}")
+    
+    # Copy the vocab file to output directory with appropriate name
+    shutil.copy(args.vocab_file, vocab_path)
+    print(f"✅ Copied vocabulary to: {vocab_path}")
+    
+    # Load the vocabulary
+    vocab = load_vocab(vocab_file=args.vocab_file)
+    print(f"🔤 Loaded vocabulary with {len(vocab)} tokens")
+    
+else:
+    # Create new vocabulary from current data
+    print(f"\n📝 CREATING NEW VOCABULARY from current data")
+    print("⚠️  WARNING: This may create inconsistencies between stages!")
+    print("💡 RECOMMENDATION: Create a master vocabulary first using --create_master_vocab")
+    
+    # Create vocab file with property suffix
+    make_vocab(target_tokens_list=target_tokens_list, vocab_file=vocab_path)
+    
+    # Load the created vocabulary
+    vocab = load_vocab(vocab_file=vocab_path)
+    print(f"🔤 Created vocabulary with {len(vocab)} tokens")
+
+# LONG-TERM FIX: Save vocab info for verification
+vocab_info_path = os.path.join(output_dir, f'vocab_info_{property_suffix}.txt')
+with open(vocab_info_path, 'w') as f:
+    f.write(f"Vocabulary size: {len(vocab)}\n")
+    f.write(f"Source: {'External' if args.vocab_file else 'Created from data'}\n")
+    if args.vocab_file:
+        f.write(f"External vocab path: {args.vocab_file}\n")
+    f.write(f"Property suffix: {property_suffix}\n")
+    f.write(f"Tokenization: {tokenization}\n")
+    f.write(f"Dataset: {file_prefix}\n")
+print(f"📋 Saved vocabulary info to: {vocab_info_path}")
 
 # convert the target_tokens_list to target_token_ids_list using the vocab file
-# load vocab dict (token:id)
-vocab = load_vocab(vocab_file=os.path.join(output_dir, vocab_filename))
 max_tgt_token_length = len(max(target_tokens_list, key=len))
 for tgt_tokens in target_tokens_list:
     tgt_token_ids, tgt_lens = get_seq_features_from_line(tgt_tokens=tgt_tokens, vocab=vocab, max_tgt_len=max_tgt_token_length)
@@ -793,8 +917,27 @@ if os.path.exists(test_path):  # ← ADD VERIFICATION
 else:
     raise IOError(f"Failed to save test loader")
 
+# LONG-TERM FIX: Print summary of what to use for consistent training
+print("\n" + "="*60)
+print("🎯 VOCABULARY CONSISTENCY SUMMARY")
+print("="*60)
+
+if args.vocab_file:
+    print(f"✅ Used external vocabulary: {args.vocab_file}")
+    print(f"   All stages should use the SAME vocabulary file!")
+else:
+    print(f"⚠️  Created new vocabulary from data")
+    print(f"   This may cause inconsistencies between stages!")
+    print(f"\n💡 RECOMMENDATION FOR TRANSFER LEARNING:")
+    print(f"   1. Create master vocabulary first:")
+    print(f"      python Transform_Batch_Data.py --create_master_vocab --input_file your_data.csv")
+    print(f"   2. Use it for all stages:")
+    print(f"      python Transform_Batch_Data.py --vocab_file master_vocab_{augment}_{tokenization}.txt ...")
+
+print(f"\n📁 Output files saved with:")
+print(f'   Prefix: {file_prefix}')
+print(f'   Property suffix: {property_suffix}')
+print(f'   Vocabulary: {len(vocab)} tokens')
 print('Done')
-print(f'Saved data files with prefix: {file_prefix} and property suffix: {property_suffix}')
-print(f'All files saved to: {output_dir}')
 print(f"\n🎉 ROBUST DATA SPLITTING COMPLETED SUCCESSFULLY!")
 print(f"✅ Evaluation sets guaranteed to have labeled data for performance measurement")

@@ -823,12 +823,13 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         num_nodes = batch_data.num_nodes
         
         # Create dest_is_origin_matrix
-        dest_indices = edge_index[1]
-        origin_indices = edge_index[0]
+        # This matrix maps from nodes (origin) to edges (destination)
+        dest_indices = torch.arange(num_edges, device=device)  # Edge indices
+        origin_indices = edge_index[0]  # Source node for each edge
         
-        # Create sparse matrix (ensure all tensors are on same device)
+        # Create sparse matrix with correct dimensions
         indices = torch.stack([dest_indices, origin_indices])
-        values = torch.ones(num_edges, device=device)  # Create on same device
+        values = torch.ones(num_edges, device=device)
         size = (num_edges, num_nodes)
         dest_is_origin_matrix = torch.sparse.FloatTensor(indices, values, size)
         

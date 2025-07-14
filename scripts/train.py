@@ -2046,6 +2046,22 @@ if args.training_stage == 0:
     # Override epochs for monomer pretraining
     epochs = args.monomer_pretrain_epochs
     print(f"Will run monomer pretraining for {epochs} epochs")
+    
+    # DEBUG: Verify monomer conversion worked
+    print("\n🔍 DEBUG: Checking if monomer conversion worked...")
+    first_key = list(dict_train_loader.keys())[0]
+    first_batch = dict_train_loader[first_key][0]
+    first_matrix = dict_train_loader[first_key][1]
+    
+    print(f"First batch num_nodes: {first_batch.num_nodes}")
+    print(f"First batch num_graphs: {first_batch.num_graphs}")
+    print(f"First matrix shape: {first_matrix.shape}")
+    
+    # Check a sample sequence
+    sample_tokens = tokenids_to_vocab(first_batch.tgt_token_ids[0], vocab)
+    sample_smiles = combine_tokens(sample_tokens[:20], tokenization="RT_tokenized")  # First 20 tokens
+    print(f"Sample sequence: {sample_smiles}")
+    print(f"Contains polymer notation: {'|' in sample_smiles or '*' in sample_smiles}")
 
 # CRITICAL FIX: Verify data/vocab consistency AFTER loading data
 try:

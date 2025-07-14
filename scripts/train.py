@@ -1994,16 +1994,6 @@ if args.training_stage == 0:
         dataset_path=args.dataset_path
     )
     
-    # Convert to monomer-only data
-    print("Converting to monomer-only sequences...")
-    dict_train_loader = create_monomer_data_loader(dict_train_loader, vocab, tokenization)
-    dict_val_loader = create_monomer_data_loader(dict_val_loader, vocab, tokenization)
-    dict_test_loader = create_monomer_data_loader(dict_test_loader, vocab, tokenization)
-    
-    # Override epochs for monomer pretraining
-    epochs = args.monomer_pretrain_epochs
-    print(f"Will run monomer pretraining for {epochs} epochs")
-    
 elif args.training_stage == 1:
     # Stage 1: Load all available data
     print(f"Stage 1: Loading combined dataset for pretraining on {args.source_properties}")
@@ -2045,6 +2035,17 @@ else:  # Stage 2
     # Update property names for stage 2
     property_names = args.target_properties
     property_count = len(property_names)
+
+# Convert to monomer-only data BEFORE model creation if Stage 0
+if args.training_stage == 0:
+    print("\nConverting to monomer-only sequences...")
+    dict_train_loader = create_monomer_data_loader(dict_train_loader, vocab, tokenization)
+    dict_val_loader = create_monomer_data_loader(dict_val_loader, vocab, tokenization)
+    dict_test_loader = create_monomer_data_loader(dict_test_loader, vocab, tokenization)
+    
+    # Override epochs for monomer pretraining
+    epochs = args.monomer_pretrain_epochs
+    print(f"Will run monomer pretraining for {epochs} epochs")
 
 # CRITICAL FIX: Verify data/vocab consistency AFTER loading data
 try:

@@ -104,6 +104,11 @@ def validate_model_configuration(model, vocab, dict_train_loader):
         test_dest = dict_train_loader[first_batch_key][1]
         test_inc = dict_train_loader[first_batch_key][2]
         
+        # DEBUG: Check matrix dimensions
+        print(f"   DEBUG: test_data nodes={test_data.num_nodes}, edges={test_data.edge_index.size(1)}")
+        print(f"   DEBUG: test_dest shape={test_dest.shape}")
+        print(f"   DEBUG: test_inc shape={test_inc.shape}")
+        
         # Move to device
         test_data.to(device)
         test_dest.to(device)

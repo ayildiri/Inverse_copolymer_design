@@ -2080,7 +2080,25 @@ try:
         print(f"✅ Data/vocab consistency verified. Max token ID: {max_token_id}, Vocab size: {len(vocab)}")
 except Exception as e:
     print(f"WARNING: Could not validate data consistency: {e}")
-
+    
+# DEBUG: Check original matrix structure before monomer conversion
+if args.training_stage == 0:
+    print("\n🔍 DEBUG: Checking ORIGINAL matrix structure before conversion...")
+    # Load original data temporarily
+    original_train = torch.load(os.path.join(args.dataset_path, f'dict_train_loader_augmented_{tokenization}.pt'))
+    orig_key = list(original_train.keys())[0]
+    orig_data = original_train[orig_key][0]
+    orig_dest = original_train[orig_key][1]
+    orig_inc = original_train[orig_key][2]
+    
+    print(f"Original data nodes: {orig_data.num_nodes}")
+    print(f"Original data edges: {orig_data.edge_index.size(1)}")
+    print(f"Original dest_is_origin shape: {orig_dest.shape}")
+    print(f"Original inc_edges_to_atom shape: {orig_inc.shape}")
+    print(f"Edge index sample: {orig_data.edge_index[:, :5]}")
+    
+    del original_train  # Clean up memory
+    
 num_train_graphs = len(list(dict_train_loader.keys())[
     :-2])*batch_size + dict_train_loader[list(dict_train_loader.keys())[-1]][0].num_graphs
 num_node_features = dict_train_loader['0'][0].num_node_features

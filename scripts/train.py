@@ -284,62 +284,224 @@ def load_transfer_data_safely(csv_path, stage, source_properties, target_propert
     print(f"Source properties: {source_properties}")
     print(f"Target properties: {target_properties}")
     
+    # Import necessary modules
+    import torch
+    import os
+    from data_processing.data_utils import tokenids_to_vocab
+    
+    # Determine which properties to use based on stage
+    if stage == 0 or stage == 1:
+        # Stage 0 and 1 use source properties (EA, IP)
+        properties_to_load = source_properties
+    elif stage == 2:
+        # Stage 2 uses target properties (bandgap)
+        properties_to_load = target_properties
+    else:
+        raise ValueError(f"Unknown stage: {stage}")
+    
+    # Construct file paths
+    if dataset_path:
+        # Use the provided dataset path
+        print(f"📂 Loading data from: {dataset_path}")
+    else:
+        # Fallback to constructing path from csv_path
+        dataset_path = os.path.dirname(csv_path) if csv_path else "."
+    
+    # Determine property suffix for file naming
+    property_suffix = "_".join(properties_to_load)
+    
+    # Construct file names
+    vocab_filename = f'poly_smiles_vocab_augmented_{tokenization}_{property_suffix}.txt'
+    train_filename = f'dict_train_loader_augmented_{tokenization}_{property_suffix}.pt'
+    val_filename = f'dict_val_loader_augmented_{tokenization}_{property_suffix}.pt'
+    test_filename = f'dict_test_loader_augmented_{tokenization}_{property_suffix}.pt'
+    
+    # Try to load with property suffix first, then fallback to without
     try:
-        # Import your transfer data loading function
-        from data_processing.transfer_data_utils import load_transfer_data
+        # Try with property suffix
+        vocab_path = os.path.join(dataset_path, vocab_filename)
+        train_path = os.path.join(dataset_path, train_filename)
+        val_path = os.path.join(dataset_path, val_filename)
+        test_path = os.path.join(dataset_path, test_filename)
         
-        dict_train_loader, dict_val_loader, dict_test_loader = load_transfer_data(
-            csv_path=csv_path,
-            stage=stage,
-            source_properties=source_properties,
-            target_properties=target_properties,
-            batch_size=batch_size,
-            tokenization=tokenization,
-            vocab=vocab,
-            device=device,
-            dataset_path=dataset_path,  # FIXED: Pass the dataset_path
-            **kwargs
-        )
-        
-        # Validate data consistency
-        print("🔍 Validating loaded data...")
-        
-        # Check first batch
-        first_key = list(dict_train_loader.keys())[0]
-        first_batch = dict_train_loader[first_key][0]
-        
-        if hasattr(first_batch, 'tgt_token_ids'):
-            max_token = max(max(seq) for seq in first_batch.tgt_token_ids)
-            if max_token >= len(vocab):
-                raise ValueError(f"Token ID {max_token} exceeds vocabulary size {len(vocab)}")
-        
-        print(f"✅ Transfer data loaded successfully")
-        return dict_train_loader, dict_val_loader, dict_test_loader
-        
-    except ImportError:
-        print("❌ transfer_data_utils not found. Using standard data loading...")
-        # Fallback to standard data loading
-        if dataset_path:
-            data_path_prefix = os.path.join(dataset_path, f'dict_{{}}_loader_{tokenization}.pt')
-        else:
-            data_path_prefix = os.path.join(os.path.dirname(csv_path), f'dict_{{}}_loader_{tokenization}.pt')
-        try:
-            dict_train_loader = torch.load(data_path_prefix.format('train'))
-            dict_val_loader = torch.load(data_path_prefix.format('val'))
-            dict_test_loader = torch.load(data_path_prefix.format('test'))
-            return dict_train_loader, dict_val_loader, dict_test_loader
-        except Exception as e:
-            print(f"❌ Standard data loading also failed: {e}")
-            raise
-        
-    except Exception as e:
-        print(f"❌ Transfer data loading failed: {e}")
-        print("\n🔧 TROUBLESHOOTING:")
-        print("1. Check if transfer_data_utils.py exists and is correct")
-        print("2. Verify CSV file format and column names")
-        print("3. Ensure vocabulary file matches the tokenization used")
-        print("4. Check if property names match CSV columns")
+        if not os.path.exists(train_path):
+            # Fallback to files without property suffix
+            train_path = os.path.join(dataset_path, f'dict_train_loader_augmented_{tokenization}.pt')
+            val_path = os.path.join(dataset_path, f'dict_val_loader_augmented_{tokenization}.pt')
+            test_path = os.path.join(dataset_path, f'dict_test_loader_augmented_{tokenization}.pt')
+            vocab_path = os.path.join(dataset_path, f'poly_smiles_vocab_augmented_{tokenization}.txt')
+    except:
+        pass
+    
+    print(f"🎯 Stage: {stage}")
+    print(f"🔤 Tokenization: {tokenization}")
+    print(f"📚 Vocabulary size: {len(vocab)}")
+    print(f"🧬 Stage {stage}: Loading dataset with properties: {properties_to_load}")
+    
+    # Load data files
+    print(f"📥 Loading data files...")
+    try:
+        dict_train_loader = torch.load(train_path)
+        dict_val_loader = torch.load(val_path)
+        dict_test_loader = torch.load(test_path)
+        print(f"✅ Successfully loaded data files")
+    except FileNotFoundError as e:
+        print(f"❌ Error loading data files: {e}")
+        print(f"Looked for files in: {dataset_path}")
         raise
+    
+    # Perform critical vocabulary validation
+    print(f"\n🔍 PERFORMING CRITICAL VOCABULARY VALIDATION...")
+    
+    def validate_loader_vocab(loader, loader_name, vocab, stage):
+        """Validate that all token IDs in loader are within vocabulary bounds"""
+        print(f"🔍 Validating Stage {stage} {loader_name} data consistency with vocabulary...")
+        
+        max_token_id = -1
+        total_sequences = 0
+        total_tokens = 0
+        vocab_coverage = set()
+        
+        for batch_key in loader:
+            if batch_key in ['dest_is_origin_matrix', 'inc_edges_to_atom_matrix']:
+                continue
+                
+            data = loader[batch_key][0]
+            if hasattr(data, 'tgt_token_ids'):
+                for seq in data.tgt_token_ids:
+                    total_sequences += 1
+                    for token_id in seq:
+                        if isinstance(token_id, torch.Tensor):
+                            token_id = token_id.item()
+                        total_tokens += 1
+                        vocab_coverage.add(token_id)
+                        if token_id > max_token_id:
+                            max_token_id = token_id
+        
+        print(f"📊 Checked {total_sequences:,} sequences with {total_tokens:,} total tokens")
+        
+        if max_token_id >= len(vocab):
+            raise ValueError(f"❌ Stage {stage} {loader_name} data contains token ID {max_token_id} but vocabulary only has {len(vocab)} tokens!")
+        
+        coverage_percent = len(vocab_coverage) / len(vocab) * 100
+        print(f"✅ Stage {stage} {loader_name} data validation passed! Max token ID: {max_token_id} (within vocab size {len(vocab)})")
+        print(f"Vocabulary coverage: {coverage_percent:.1f}%")
+        
+        return max_token_id
+    
+    # Validate all loaders
+    validate_loader_vocab(dict_train_loader, "training", vocab, stage)
+    validate_loader_vocab(dict_val_loader, "validation", vocab, stage)
+    validate_loader_vocab(dict_test_loader, "test", vocab, stage)
+    
+    print(f"✅ All Stage {stage} vocabulary validations passed!")
+    
+    # Report data composition
+    print(f"\n📊 Stage {stage}: Loaded {len(dict_train_loader)} training batches")
+    
+    # Analyze data composition (labeled vs unlabeled)
+    if stage == 0 or stage == 1:
+        # Count labeled vs unlabeled for semi-supervised stages
+        labeled_count = 0
+        unlabeled_count = 0
+        
+        for batch_key in dict_train_loader:
+            if batch_key in ['dest_is_origin_matrix', 'inc_edges_to_atom_matrix']:
+                continue
+                
+            data = dict_train_loader[batch_key][0]
+            batch_size = data.num_graphs
+            
+            # Check each molecule in batch
+            for i in range(batch_size):
+                has_labels = True
+                for prop in properties_to_load:
+                    prop_map = {'EA': 'y1', 'IP': 'y2', 'bandgap': 'y3'}
+                    prop_attr = prop_map.get(prop, f'y{properties_to_load.index(prop)+1}')
+                    
+                    if hasattr(data, prop_attr):
+                        prop_val = getattr(data, prop_attr)[i]
+                        if torch.isnan(prop_val):
+                            has_labels = False
+                            break
+                    else:
+                        has_labels = False
+                        break
+                
+                if has_labels:
+                    labeled_count += 1
+                else:
+                    unlabeled_count += 1
+        
+        total_count = labeled_count + unlabeled_count
+        print(f"📊 Training data composition:")
+        print(f"   Labeled ({properties_to_load}): {labeled_count:,}")
+        print(f"   Unlabeled: {unlabeled_count:,}")
+        print(f"   Total: {total_count:,}")
+        
+        if stage == 1 and unlabeled_count > 0:
+            print(f"✅ Semi-supervised learning enabled!")
+            print(f"📈 Labeled ratio: {labeled_count/total_count*100:.1f}%")
+        elif stage == 0:
+            print(f"📝 Stage 0 will convert all data to monomers (labels will be preserved but not used)")
+            
+    elif stage == 2:
+        # Stage 2 should only have labeled data
+        total_count = 0
+        labeled_count = 0
+        unlabeled_count = 0
+        
+        for batch_key in dict_train_loader:
+            if batch_key in ['dest_is_origin_matrix', 'inc_edges_to_atom_matrix']:
+                continue
+            data = dict_train_loader[batch_key][0]
+            batch_size = data.num_graphs
+            
+            for i in range(batch_size):
+                total_count += 1
+                has_label = False
+                
+                # Check bandgap property
+                if hasattr(data, 'y3') or hasattr(data, 'y1'):  # y3 typical for bandgap, but check y1 too
+                    prop_attr = 'y3' if hasattr(data, 'y3') else 'y1'
+                    prop_val = getattr(data, prop_attr)[i]
+                    if not torch.isnan(prop_val):
+                        has_label = True
+                        labeled_count += 1
+                
+                if not has_label:
+                    unlabeled_count += 1
+        
+        print(f"📊 Training data composition:")
+        print(f"   Labeled ({properties_to_load}): {labeled_count:,}")
+        print(f"   Unlabeled: {unlabeled_count:,}")
+        print(f"   Total: {total_count:,}")
+        
+        if unlabeled_count > 0:
+            print(f"⚠️ Warning: Stage 2 contains unlabeled data - this is unusual")
+    
+    # Report validation and test set sizes
+    val_graphs = sum(dict_val_loader[k][0].num_graphs for k in dict_val_loader 
+                     if k not in ['dest_is_origin_matrix', 'inc_edges_to_atom_matrix'])
+    test_graphs = sum(dict_test_loader[k][0].num_graphs for k in dict_test_loader 
+                      if k not in ['dest_is_origin_matrix', 'inc_edges_to_atom_matrix'])
+    
+    # Val and test should only have labeled data
+    print(f"📊 Validation set: {val_graphs:,} labeled, 0 unlabeled")
+    print(f"📊 Test set: {test_graphs:,} labeled, 0 unlabeled")
+    
+    # Move to device
+    print(f"📱 Moving data to device: {device}")
+    for loader in [dict_train_loader, dict_val_loader, dict_test_loader]:
+        for batch_key in loader:
+            if isinstance(loader[batch_key], list):
+                for item in loader[batch_key]:
+                    if hasattr(item, 'to'):
+                        item.to(device)
+    
+    print(f"✅ Data loading completed successfully!")
+    
+    return dict_train_loader, dict_val_loader, dict_test_loader
 
 def safe_token_processing(token_ids, vocab, tokenization="RT_tokenized"):
     """Safely process tokens with comprehensive error handling"""

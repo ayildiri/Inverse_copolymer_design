@@ -821,15 +821,33 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         edge_index = batch_data.edge_index
         num_edges = edge_index.size(1)
         num_nodes = batch_data.num_nodes
-        
+
         # Create dest_is_origin_matrix
-        # This matrix should be [num_nodes, num_edges] to aggregate from edges to nodes
-        row_indices = edge_index[1]  # destination nodes
-        col_indices = torch.arange(num_edges, device=device)  # edge indices
+        # This matrix should be [num_edges, num_edges] for edge-to-edge message passing
+        # For each edge i, find all edges j that point to the source of edge i
+        edge_destinations = []
+        edge_origins = []
         
-        indices = torch.stack([row_indices, col_indices])
-        values = torch.ones(num_edges, device=device)
-        size = (num_nodes, num_edges)  # CRITICAL: This should be nodes x edges
+        for edge_idx in range(num_edges):
+            # For edge edge_idx: source_node -> target_node
+            source_node = edge_index[0, edge_idx]
+            
+            # Find all edges whose destination is this edge's source
+            incoming_edges = (edge_index[1] == source_node).nonzero(as_tuple=True)[0]
+            
+            for inc_edge in incoming_edges:
+                edge_destinations.append(edge_idx)
+                edge_origins.append(inc_edge.item())
+        
+        if edge_destinations:
+            indices = torch.tensor([edge_destinations, edge_origins], device=device)
+            values = torch.ones(len(edge_destinations), device=device)
+        else:
+            # Handle case with no connections
+            indices = torch.zeros((2, 0), dtype=torch.long, device=device)
+            values = torch.zeros(0, device=device)
+        
+        size = (num_edges, num_edges)
         dest_is_origin_matrix = torch.sparse.FloatTensor(indices, values, size)
         
         # Create inc_edges_to_atom_matrix

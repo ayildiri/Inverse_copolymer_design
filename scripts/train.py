@@ -645,6 +645,9 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     for batch_key in monomer_loader:
         batch_data = monomer_loader[batch_key][0]
         
+        # Get the device of the batch data
+        device = batch_data.edge_index.device
+        
         # Create new matrices for this batch
         edge_index = batch_data.edge_index
         num_edges = edge_index.size(1)
@@ -654,17 +657,17 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
         dest_indices = edge_index[1]
         origin_indices = edge_index[0]
         
-        # Create sparse matrix
+        # Create sparse matrix (ensure all tensors are on same device)
         indices = torch.stack([dest_indices, origin_indices])
-        values = torch.ones(num_edges)
+        values = torch.ones(num_edges, device=device)  # Create on same device
         size = (num_edges, num_nodes)
         dest_is_origin_matrix = torch.sparse.FloatTensor(indices, values, size)
         
         # Create inc_edges_to_atom_matrix
         atom_indices = edge_index[0]
-        edge_indices = torch.arange(num_edges)
+        edge_indices = torch.arange(num_edges, device=device)  # Create on same device
         indices = torch.stack([atom_indices, edge_indices])
-        values = torch.ones(num_edges)
+        values = torch.ones(num_edges, device=device)  # Create on same device
         size = (num_nodes, num_edges)
         inc_edges_to_atom_matrix = torch.sparse.FloatTensor(indices, values, size)
         
@@ -674,6 +677,7 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
     print("✅ Message passing matrices recreated successfully!")
     
     return monomer_loader
+
 
 class EarlyStopping:
     def __init__(self, dir, patience):

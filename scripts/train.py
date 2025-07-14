@@ -2454,24 +2454,35 @@ data_augment="old"
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
-# Determine directory path based on whether we're resuming or starting fresh
+# Determine directory path based on resume logic
+resume_same_stage = False
 if args.resume_from_checkpoint is not None:
-    # When resuming, ALWAYS use the directory containing the checkpoint
     checkpoint_dir = os.path.dirname(args.resume_from_checkpoint)
-    # Check if the checkpoint is directly in a Model_ directory
-    if os.path.basename(checkpoint_dir).startswith('Model_'):
+    
+    # Default: assume resuming same stage
+    resume_same_stage = True
+    
+    # Load checkpoint to inspect saved training_stage
+    checkpoint = torch.load(args.resume_from_checkpoint, map_location="cpu")
+    saved_stage = checkpoint.get("model_config", {}).get("training_stage", None)
+    
+    if saved_stage is not None and saved_stage != args.training_stage:
+        # Different stage: treat as new training
+        resume_same_stage = False
+        print(f"[INFO] Detected different training stage (saved: {saved_stage}, current: {args.training_stage}). Will start fresh in new directory.")
+    else:
+        print(f"[INFO] Resuming same training stage ({saved_stage}). Continuing in existing directory.")
+    
+    if resume_same_stage:
         directory_path = checkpoint_dir
     else:
-        # Checkpoint might be in a subdirectory, go up one level
-        parent_dir = os.path.dirname(checkpoint_dir)
-        if os.path.basename(parent_dir).startswith('Model_'):
-            directory_path = parent_dir
+        # New directory for new stage
+        if args.save_dir is not None:
+            directory_path = os.path.join(args.save_dir, model_name)
         else:
-            # Fallback: use the checkpoint directory itself
-            directory_path = checkpoint_dir
-    print(f"[INFO] Resuming training in existing directory: {directory_path}")
+            directory_path = os.path.join(main_dir_path, 'Checkpoints/', model_name)
 else:
-    # Starting fresh - create new model directory
+    # Starting fresh without any checkpoint
     if args.save_dir is not None:
         directory_path = os.path.join(args.save_dir, model_name)
     else:

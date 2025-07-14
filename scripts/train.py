@@ -2488,6 +2488,8 @@ else:
     else:
         directory_path = os.path.join(main_dir_path, 'Checkpoints/', model_name)
 
+model_config["training_stage"] = args.training_stage
+
 # Create directory with all parent directories
 os.makedirs(directory_path, exist_ok=True)
 print(f"✅ Checkpoint directory created/verified: {directory_path}")

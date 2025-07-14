@@ -643,6 +643,7 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
                     cleaned = re.sub(r'\[\*:\d+\]', '', cleaned)  # Remove [*:1], [*:2], etc.
                     cleaned = cleaned.replace('[*]', '')           # Remove [*]
                     cleaned = cleaned.replace('*', '')             # Remove bare *
+                    cleaned = cleaned.replace('()', '')
                     cleaned = cleaned.strip()                      # Remove whitespace
                     
                     # Check if it's a valid monomer
@@ -667,6 +668,7 @@ def create_monomer_data_loader(original_loader, vocab, tokenization):
                 cleaned = re.sub(r'\[\*:\d+\]', '', cleaned)
                 cleaned = cleaned.replace('[*]', '')
                 cleaned = cleaned.replace('*', '')
+                cleaned = cleaned.replace('()', '')
                 cleaned = cleaned.strip()
                 
                 # Validate

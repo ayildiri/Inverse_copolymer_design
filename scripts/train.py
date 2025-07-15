@@ -1875,6 +1875,8 @@ parser.add_argument("--stage1_sample_weight", type=float, default=1.0,
                     help="Weight for sampling data with source properties in stage 1")
 parser.add_argument("--temperature", type=float, default=1.0,
                     help="Temperature for sampling during generation (higher = more diverse, lower = more conservative)")
+parser.add_argument("--use_hierarchical_decoder", action="store_true", default=True,
+                    help="Use hierarchical decoder for better polymer generation")
 
 
 args = parser.parse_args()
@@ -1979,7 +1981,8 @@ model_config = {
     'property_names': property_names,
     'dropout_rate': args.dropout_rate,
     'weight_decay': args.weight_decay,
-    'temperature': args.temperature,  # ADD THIS LINE
+    'temperature': args.temperature,
+    'use_hierarchical_decoder': args.use_hierarchical_decoder,
 }
 
 # Parse property relationships if provided

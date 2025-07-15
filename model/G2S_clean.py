@@ -216,6 +216,91 @@ class Wdmpnn_Conv(nn.Module):
             
             return atom_embeddings
 
+class DisentangledGraphEncoder(nn.Module):
+    """Encoder with disentangled latent space for different molecular aspects"""
+    
+    def __init__(self, node_dim, edge_dim, hidden_dim, device, model_config):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.device = device
+        
+        # Separate encoders for different aspects
+        # 1. Core structure encoder (atoms, bonds)
+        self.structure_encoder = Wdmpnn_Conv(node_dim, edge_dim, hidden_dim, device)
+        
+        # 2. Topology encoder (connectivity patterns)
+        self.topology_encoder = Wdmpnn_Conv(node_dim, edge_dim, hidden_dim // 2, device)
+        
+        # 3. Electronic property encoder
+        self.property_encoder = Wdmpnn_Conv(node_dim, edge_dim, hidden_dim // 2, device)
+        
+        # Dimension of each latent component
+        self.structure_dim = hidden_dim // 2
+        self.topology_dim = hidden_dim // 4
+        self.property_dim = hidden_dim // 4
+        
+        # Projection layers for each component
+        self.structure_mu = nn.Linear(hidden_dim, self.structure_dim)
+        self.structure_logvar = nn.Linear(hidden_dim, self.structure_dim)
+        
+        self.topology_mu = nn.Linear(hidden_dim // 2, self.topology_dim)
+        self.topology_logvar = nn.Linear(hidden_dim // 2, self.topology_dim)
+        
+        self.property_mu = nn.Linear(hidden_dim // 2, self.property_dim)
+        self.property_logvar = nn.Linear(hidden_dim // 2, self.property_dim)
+        
+        # Learnable weights for component importance
+        self.component_weights = nn.Parameter(torch.ones(3) / 3)
+        
+    def forward(self, graph, dest_is_origin_matrix, inc_edges_to_atom_matrix, device):
+        atom_weights = graph.W_atoms
+        
+        # Encode different aspects
+        structure_features = self.structure_encoder(graph, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        topology_features = self.topology_encoder(graph, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        property_features = self.property_encoder(graph, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        
+        # Pool features
+        structure_pooled = global_mean_pool(structure_features * atom_weights.view(-1, 1), graph.batch)
+        topology_pooled = global_mean_pool(topology_features * atom_weights.view(-1, 1), graph.batch)
+        property_pooled = global_mean_pool(property_features * atom_weights.view(-1, 1), graph.batch)
+        
+        # Get distributions for each component
+        z_structure_mu = self.structure_mu(structure_pooled)
+        z_structure_logvar = self.structure_logvar(structure_pooled)
+        
+        z_topology_mu = self.topology_mu(topology_pooled)
+        z_topology_logvar = self.topology_logvar(topology_pooled)
+        
+        z_property_mu = self.property_mu(property_pooled)
+        z_property_logvar = self.property_logvar(property_pooled)
+        
+        # Combine with learnable weights
+        weights = F.softmax(self.component_weights, dim=0)
+        
+        # Concatenate all components
+        z_mu = torch.cat([
+            z_structure_mu * weights[0],
+            z_topology_mu * weights[1],
+            z_property_mu * weights[2]
+        ], dim=-1)
+        
+        z_logvar = torch.cat([
+            z_structure_logvar * weights[0],
+            z_topology_logvar * weights[1],
+            z_property_logvar * weights[2]
+        ], dim=-1)
+        
+        # Store component boundaries for later use
+        self.component_slices = {
+            'structure': (0, self.structure_dim),
+            'topology': (self.structure_dim, self.structure_dim + self.topology_dim),
+            'property': (self.structure_dim + self.topology_dim, self.structure_dim + self.topology_dim + self.property_dim)
+        }
+        
+        return z_mu, z_logvar
+
 class GraphEncoder(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim, device, model_config):
         super(GraphEncoder, self).__init__()
@@ -242,6 +327,96 @@ class GraphEncoder(nn.Module):
 
         return mu, logvar
 
+
+class DualPathDecoder(nn.Module):
+    """Dual-path decoder that separates structure from format generation"""
+    
+    def __init__(self, model_config, vocab, add_latent):
+        super().__init__()
+        
+        self.vocab = vocab
+        self.inv_vocab = {v: k for k, v in vocab.items()}
+        
+        if add_latent:
+            d_model = model_config['embedding_dim'] * 2
+        else:
+            d_model = model_config['embedding_dim']
+        
+        # Path 1: Chemical structure generation (focuses on SMILES)
+        self.structure_encoder = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=model_config['num_attention_heads'],
+            dim_feedforward=1024,
+            dropout=0.3,
+            batch_first=True
+        )
+        
+        self.structure_decoder = nn.LSTM(
+            input_size=d_model,
+            hidden_size=d_model // 2,
+            num_layers=2,
+            batch_first=True,
+            dropout=0.3
+        )
+        
+        # Path 2: Format generation (focuses on |stoich|connectivity)
+        self.format_encoder = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=model_config['num_attention_heads'],
+            dim_feedforward=512,
+            dropout=0.3,
+            batch_first=True
+        )
+        
+        self.format_predictor = nn.Sequential(
+            nn.Linear(d_model, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64)
+        )
+        
+        # Fusion mechanism
+        self.fusion_attention = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=model_config['num_attention_heads'],
+            dropout=0.3,
+            batch_first=True
+        )
+        
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, z, structure_hidden, format_components=None):
+        """Process through dual paths and fuse"""
+        # Path 1: Structure processing
+        structure_features = self.structure_encoder(structure_hidden)
+        
+        # Path 2: Format processing
+        format_input = z.unsqueeze(1)  # [batch, 1, d_model]
+        format_features = self.format_encoder(format_input)
+        
+        if format_components is not None:
+            # Incorporate predicted format components
+            format_pred = self.format_predictor(format_features.squeeze(1))
+            format_features = format_features + format_pred.unsqueeze(1) * 0.1
+        
+        # Fusion via cross-attention
+        fused_features, _ = self.fusion_attention(
+            query=structure_features,
+            key=format_features,
+            value=format_features
+        )
+        
+        # Gated combination
+        gate = self.fusion_gate(torch.cat([structure_features, fused_features], dim=-1))
+        final_features = gate * fused_features + (1 - gate) * structure_features
+        
+        return final_features
 
 ## Transformer decoder
 class SequenceDecoder(nn.Module):
@@ -339,6 +514,36 @@ class SequenceDecoder(nn.Module):
         self.format_output = nn.Linear(256, len(self.vocab), bias=True)
         self.output_layer = self.monomer_output  # Default for compatibility
         
+        # PROPERTY-CONDITIONED GENERATION COMPONENTS
+        self.use_property_conditioning = model_config.get('use_property_conditioning', False)
+        if self.use_property_conditioning:
+            # Property embedding layer
+            num_properties = model_config.get('property_count', 2)
+            self.property_embedder = nn.Sequential(
+                nn.Linear(num_properties, 128),
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(128, d_model)
+            )
+            
+            # Cross-attention between decoder states and property embeddings
+            self.property_cross_attention = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=model_config['num_attention_heads'],
+                dropout=0.3,
+                batch_first=True
+            )
+            
+            # Gate to control property influence
+            self.property_gate = nn.Sequential(
+                nn.Linear(d_model * 2, d_model),
+                nn.Sigmoid()
+            )
+            
+            # Property-aware output layer
+            self.property_aware_output = nn.Linear(d_model, len(self.vocab), bias=True)
+        
         # Loss function
         if self.config['loss'] == "ce" or self.config['loss'] == "wce":
             self.criterion = nn.CrossEntropyLoss(
@@ -355,6 +560,12 @@ class SequenceDecoder(nn.Module):
             
         # Setup grammar rules
         self.setup_grammar_rules()
+        
+        # DUAL-PATH ARCHITECTURE
+        self.use_dual_path = model_config.get('use_dual_path', False)
+        if self.use_dual_path:
+            self.dual_path_decoder = DualPathDecoder(model_config, vocab, add_latent)
+            self.dual_path_output = nn.Linear(d_model, len(self.vocab), bias=True)
     
     def setup_grammar_rules(self):
         """Setup polymer-specific grammar rules"""
@@ -473,8 +684,8 @@ class SequenceDecoder(nn.Module):
         
         return logits
     
-    def hierarchical_generate(self, z, temperature=0.8):
-        """Generate polymer using hierarchical approach"""
+    def hierarchical_generate(self, z, temperature=0.8, target_properties=None):
+        """Generate polymer using hierarchical approach with property conditioning"""
         batch_size = z.size(0)
         device = z.device
         
@@ -482,6 +693,11 @@ class SequenceDecoder(nn.Module):
         
         for b in range(batch_size):
             z_single = z[b:b+1]
+            
+            # Extract target properties for this sample if provided
+            sample_properties = None
+            if target_properties is not None and self.use_property_conditioning:
+                sample_properties = target_properties[b:b+1]
             
             # Stage 1: Generate core monomer structure
             monomer_tokens = []
@@ -505,7 +721,15 @@ class SequenceDecoder(nn.Module):
                 )
                 
                 dec_out = dec_out.transpose(0, 1)
-                logits = self.monomer_output(dec_out.squeeze(1))
+                
+                # Apply property conditioning if enabled
+                if self.use_property_conditioning and sample_properties is not None:
+                    dec_out_conditioned = self.apply_property_conditioning(
+                        dec_out.squeeze(1), sample_properties
+                    )
+                    logits = self.property_aware_output(dec_out_conditioned)
+                else:
+                    logits = self.monomer_output(dec_out.squeeze(1))
                 
                 # Block format tokens during monomer generation
                 for format_token in ['|', '<', '>', ':']:
@@ -770,7 +994,32 @@ class SequenceDecoder(nn.Module):
             probs = torch.ones_like(probs) / probs.size(-1)
         
         return probs
-    
+
+    def apply_property_conditioning(self, decoder_hidden, target_properties):
+        """Apply property conditioning to decoder hidden states"""
+        if not self.use_property_conditioning or target_properties is None:
+            return decoder_hidden
+        
+        # Embed properties
+        prop_embedding = self.property_embedder(target_properties)  # [batch, d_model]
+        
+        # Expand for sequence length if needed
+        if decoder_hidden.dim() == 3:  # [batch, seq, d_model]
+            prop_embedding = prop_embedding.unsqueeze(1).expand(-1, decoder_hidden.size(1), -1)
+        
+        # Apply cross-attention
+        attended_hidden, _ = self.property_cross_attention(
+            query=decoder_hidden,
+            key=prop_embedding,
+            value=prop_embedding
+        )
+        
+        # Gated combination
+        gate = self.property_gate(torch.cat([decoder_hidden, attended_hidden], dim=-1))
+        conditioned_hidden = gate * attended_hidden + (1 - gate) * decoder_hidden
+        
+        return conditioned_hidden
+
     def polymer_specific_constraints(self, current_seq, probs):
         """Enhanced constraints for polymer SMILES"""
         current_tokens = [self.inv_vocab.get(t, '') for t in current_seq[1:]]
@@ -1682,7 +1931,12 @@ class G2S_VAE_PPguided(nn.Module):
         #if model_config['pooling']=='custom':
         #    self.Encoder = GraphEncoder_GMT(node_dim, edge_dim, hidden_dim, device, model_config)
         #elif model_config['pooling']=='mean':
-        self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+        # Choose encoder type
+        use_disentangled = model_config.get('use_disentangled_encoder', False)
+        if use_disentangled:
+            self.Encoder = DisentangledGraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+        else:
+            self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
         self.Decoder = SequenceDecoder(model_config, vocab, loss_weights, add_latent=add_latent)
         if not self.hidden_dim==self.embedding_dim:
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)

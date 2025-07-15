@@ -2961,7 +2961,7 @@ for epoch in range(epoch_cp, epochs):
 
     # FIXED: Check and save best model with proper logging (only when validation runs)
     if (epoch + 1) % args.validation_freq == 0:
-       model_dict = {
+        model_dict = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -2981,7 +2981,7 @@ for epoch in range(epoch_cp, epochs):
         combined_improved = earlystopping(val_loss, model_dict, generation_validity)
         if combined_improved:
             print(f"🎯 [INFO] New best combined model saved")
-
+            
     # Use combined metric for actual early stopping
     if global_step >= len(beta_schedule) and earlystopping.early_stop:
         print("Early stopping triggered.")

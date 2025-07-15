@@ -246,35 +246,20 @@ class GraphEncoder(nn.Module):
 ## Transformer decoder
 class SequenceDecoder(nn.Module):
     def __init__(self, model_config, vocab, loss_weights, add_latent):
-        """Implementation of transformer decoder
-    
-        Args:
-            model_config (Dict): model config settings
-            data_config (Dict): data config settings
-            vocab (Dict): complete vocab of tokens
-        """
+        """Implementation of hierarchical polymer decoder"""
         super().__init__()
         
-        self.ndim= model_config['embedding_dim']
+        self.ndim = model_config['embedding_dim']
         self.config = model_config
-
-        # monomer mode flag
         self.is_monomer_mode = model_config.get('is_monomer_mode', False)
-        
-        self.max_n = 512  # Changed from 256 to accommodate stoichiometry + connectivity
-        
+        self.max_n = 512
         self.vocab = vocab
         self.inv_vocab = {v: k for k, v in vocab.items()}
         self.beam_size = 1
         self.add_latent = add_latent
         self.temperature = model_config.get('temperature', 1.0)
-    
-        # 🔧 DEBUG: Add debug information before embeddings creation
-        print(f"🔧 DEBUG: Creating embeddings with vocab size: {len(self.vocab)}")
-        print(f"🔧 DEBUG: feat_padding_idx will be: []")
-        print(f"🔧 DEBUG: feat_vocab_sizes will be: []")
-        print(f"🔧 DEBUG: embedding_dim: {model_config['embedding_dim']}")
-    
+        
+        # Create embeddings
         self.decoder_embeddings = Embeddings(
             word_vec_size=model_config['embedding_dim'],
             word_vocab_size=len(self.vocab),
@@ -284,61 +269,328 @@ class SequenceDecoder(nn.Module):
             feat_merge="concat",
             feat_vec_exponent=0.7,
             feat_vec_size=-1,
-            feat_padding_idx=[],          # ← CRITICAL: Empty list
-            feat_vocab_sizes=[],          # ← CRITICAL: Empty list - no feature embeddings
+            feat_padding_idx=[],
+            feat_vocab_sizes=[],
             dropout=0.3,
             sparse=False,
             freeze_word_vecs=False
         )
-    
-        # 🔧 VALIDATION: Test embeddings configuration immediately after creation
-        print("🧪 Validating embeddings configuration...")
-        try:
-            # CRITICAL FIX: Don't unsqueeze for validation test
-            test_input = torch.tensor([[self.vocab["_SOS"]]], device='cpu').unsqueeze(-1)  # Shape: [1, 1, 1]
-            test_output = self.decoder_embeddings(test_input)
-            print(f"✅ Embeddings validation passed: input shape {test_input.shape} -> output shape {test_output.shape}")
-        except Exception as e:
-            print(f"❌ Embeddings validation failed: {e}")
-            print(f"   Input shape: {test_input.shape}")
-            print(f"   Input dtype: {test_input.dtype}")
-            print(f"   Input value range: [{test_input.min().item()}, {test_input.max().item()}]")
-            print(f"   Vocab size: {len(self.vocab)}")
-            if hasattr(self.decoder_embeddings, 'make_embedding'):
-                print(f"   make_embedding type: {type(self.decoder_embeddings.make_embedding)}")
-                if hasattr(self.decoder_embeddings.make_embedding, '__len__'):
-                    print(f"   make_embedding length: {len(self.decoder_embeddings.make_embedding)}")
-            print("   This confirms the Elementwise error. Check feat_padding_idx and feat_vocab_sizes parameters.")
-            raise
-
-        if self.add_latent: 
-            d_model=model_config['embedding_dim']*2
-        else: 
-            d_model=model_config['embedding_dim']
-        #TransformerDecoder (with EDATT) or TransformerLMDecoder (without EDAtt)
-        self.Decoder = TransformerDecoder(num_layers=model_config['decoder_num_layers'], \
-            d_model=d_model, heads=model_config['num_attention_heads'], \
-            d_ff=2048, copy_attn=False, self_attn_type="scaled-dot", dropout=0.3, attention_dropout=0.3, \
-            embeddings=self.decoder_embeddings, max_relative_positions=4, aan_useffn=False, \
-            full_context_alignment=False, alignment_layer=-3, alignment_heads=0
+        
+        if self.add_latent:
+            d_model = model_config['embedding_dim'] * 2
+        else:
+            d_model = model_config['embedding_dim']
+            
+        # HIERARCHICAL DECODER COMPONENTS
+        # Stage 1: Core monomer structure decoder
+        self.monomer_decoder = TransformerDecoder(
+            num_layers=max(2, model_config['decoder_num_layers']//2),
+            d_model=d_model, heads=model_config['num_attention_heads'],
+            d_ff=2048, copy_attn=False, self_attn_type="scaled-dot", 
+            dropout=0.3, attention_dropout=0.3,
+            embeddings=self.decoder_embeddings, max_relative_positions=4, 
+            aan_useffn=False, full_context_alignment=False, 
+            alignment_layer=-3, alignment_heads=0
         )
-
-        self.output_layer = nn.Linear(d_model, len(self.vocab), bias=True)  # This should already be correct (no +1)
-
-        if self.config['loss']=="ce" or self.config['loss']=="wce":
+        
+        # Stage 2: Attachment point predictor
+        self.attachment_predictor = nn.Sequential(
+            nn.Linear(d_model, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 4)  # Predict: has_attachment, position1, position2, attachment_type
+        )
+        
+        # Stage 3: Format components predictor
+        self.format_predictor = nn.Sequential(
+            nn.Linear(d_model + 4, 256),  # d_model + attachment info
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 6),  # stoich1, stoich2, conn_type, conn_ratio1, conn_ratio2, conn_end
+            nn.Sigmoid()
+        )
+        
+        # Stage 4: Format sequence generator
+        self.format_decoder = nn.LSTM(
+            input_size=d_model + 6,  # latent + format components
+            hidden_size=256,
+            num_layers=2,
+            batch_first=True,
+            dropout=0.2
+        )
+        
+        # Fusion layer to combine all stages
+        self.fusion_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=model_config['num_attention_heads'],
+            dim_feedforward=2048,
+            dropout=0.3
+        )
+        
+        # Keep original decoder as fallback
+        self.Decoder = self.monomer_decoder
+        
+        # Output layers for each component
+        self.monomer_output = nn.Linear(d_model, len(self.vocab), bias=True)
+        self.format_output = nn.Linear(256, len(self.vocab), bias=True)
+        self.output_layer = self.monomer_output  # Default for compatibility
+        
+        # Loss function
+        if self.config['loss'] == "ce" or self.config['loss'] == "wce":
             self.criterion = nn.CrossEntropyLoss(
                 ignore_index=self.vocab["_PAD"],
                 reduction="mean",
                 weight=loss_weights
             )
-        elif self.config['loss']=="focal":
+        elif self.config['loss'] == "focal":
             self.criterion = FocalLoss(
-                gamma = 1,
+                gamma=1,
                 ignore_index=self.vocab["_PAD"],
                 reduction="none"
             )
-
-
+            
+        # Setup grammar rules
+        self.setup_grammar_rules()
+    
+    def setup_grammar_rules(self):
+        """Setup polymer-specific grammar rules"""
+        self.polymer_states = {
+            'START': ['atom', 'ring', 'branch'],
+            'AFTER_ATTACHMENT': [':', 'digit'],
+            'AFTER_COLON': ['1', '2', '3', '4'],
+            'NEED_PIPE': ['|'],
+            'NEED_STOICH': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.'],
+            'NEED_CONNECTIVITY': ['<'],
+            'IN_CONNECTIVITY': ['1', '2', '3', '-', ':', '.', '0', '>'],
+            'COMPLETE': ['_EOS']
+        }
+        
+        # Token categories
+        self.token_categories = {
+            'atoms': ['C', 'c', 'N', 'n', 'O', 'o', 'S', 's', 'F', 'P', 'B'],
+            'bonds': ['=', '#', '-'],
+            'structure': ['(', ')', '[', ']'],
+            'rings': ['1', '2', '3', '4', '5', '6', '7', '8', '9'],
+            'attachment': ['[*:', '*'],
+            'format': ['|', '<', '>', ':'],
+            'digits': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.']
+        }
+    
+    def get_current_grammar_state(self, generated_tokens):
+        """Determine current position in polymer grammar"""
+        token_str = ''.join(generated_tokens)
+        
+        # Count format markers
+        pipe_count = token_str.count('|')
+        
+        if pipe_count == 0:
+            # Still in monomer structure
+            if '[*:' in token_str and not token_str.endswith(']'):
+                return 'AFTER_ATTACHMENT'
+            return 'START'
+        elif pipe_count == 1:
+            return 'NEED_STOICH'
+        elif pipe_count == 2:
+            return 'NEED_STOICH'
+        elif pipe_count == 3:
+            if '<' not in token_str:
+                return 'NEED_CONNECTIVITY'
+            elif '>' in token_str:
+                return 'COMPLETE'
+            else:
+                return 'IN_CONNECTIVITY'
+        else:
+            return 'COMPLETE'
+    
+    def apply_grammar_mask(self, logits, current_tokens):
+        """Apply grammar constraints to logits"""
+        state = self.get_current_grammar_state(current_tokens)
+        
+        # Create mask of valid tokens for current state
+        valid_tokens = set()
+        
+        if state == 'START':
+            # Allow atoms, structure tokens, attachment points
+            for category in ['atoms', 'bonds', 'structure', 'rings', 'attachment']:
+                for token in self.token_categories.get(category, []):
+                    if token in self.vocab:
+                        valid_tokens.add(self.vocab[token])
+            # Don't allow format tokens yet
+            for token in self.token_categories['format']:
+                if token in self.vocab:
+                    logits[:, self.vocab[token]] = float('-inf')
+                    
+        elif state == 'AFTER_ATTACHMENT':
+            # Must be : then digit
+            if current_tokens[-1] == '[*':
+                if ':' in self.vocab:
+                    valid_tokens.add(self.vocab[':'])
+            elif current_tokens[-1] == ':':
+                for digit in ['1', '2', '3', '4']:
+                    if digit in self.vocab:
+                        valid_tokens.add(self.vocab[digit])
+                        
+        elif state == 'NEED_PIPE':
+            # Only allow pipe
+            if '|' in self.vocab:
+                logits[:, :] = float('-inf')
+                logits[:, self.vocab['|']] = 0
+                
+        elif state == 'NEED_STOICH':
+            # Only allow digits and decimal
+            for token in self.token_categories['digits']:
+                if token in self.vocab:
+                    valid_tokens.add(self.vocab[token])
+                    
+        elif state == 'NEED_CONNECTIVITY':
+            # Must start with 
+            if '<' in self.vocab:
+                logits[:, :] = float('-inf')
+                logits[:, self.vocab['<']] = 0
+                
+        elif state == 'IN_CONNECTIVITY':
+            # Allow connectivity tokens
+            for token in ['1', '2', '3', '-', ':', '.', '0', '>']:
+                if token in self.vocab:
+                    valid_tokens.add(self.vocab[token])
+                    
+        elif state == 'COMPLETE':
+            # Only allow EOS
+            if '_EOS' in self.vocab:
+                logits[:, :] = float('-inf')
+                logits[:, self.vocab['_EOS']] = 0
+        
+        # Apply mask if we have valid tokens defined
+        if valid_tokens and state not in ['NEED_PIPE', 'NEED_CONNECTIVITY', 'COMPLETE']:
+            # Mask all invalid tokens
+            for idx in range(logits.size(-1)):
+                if idx not in valid_tokens:
+                    logits[:, idx] = float('-inf')
+        
+        return logits
+    
+    def hierarchical_generate(self, z, temperature=0.8):
+        """Generate polymer using hierarchical approach"""
+        batch_size = z.size(0)
+        device = z.device
+        
+        all_sequences = []
+        
+        for b in range(batch_size):
+            z_single = z[b:b+1]
+            
+            # Stage 1: Generate core monomer structure
+            monomer_tokens = []
+            enc_output = z_single.unsqueeze(1)
+            src_lengths = torch.ones(1, device=device).long()
+            
+            # Initialize decoder state
+            self.monomer_decoder.state = {"src": enc_output}
+            current_token = torch.full((1, 1), self.vocab["_SOS"], device=device)
+            
+            # Generate monomer structure (before first |)
+            for step in range(150):  # Shorter for just monomer
+                input_seq = current_token.unsqueeze(-1).transpose(0, 1)
+                
+                dec_out, _ = self.monomer_decoder(
+                    tgt=input_seq,
+                    enc_out=enc_output,
+                    src_len=src_lengths,
+                    step=step+1,
+                    add_latent=self.add_latent
+                )
+                
+                dec_out = dec_out.transpose(0, 1)
+                logits = self.monomer_output(dec_out.squeeze(1))
+                
+                # Block format tokens during monomer generation
+                for format_token in ['|', '<', '>', ':']:
+                    if format_token in self.vocab:
+                        logits[:, self.vocab[format_token]] = float('-inf')
+                
+                # Boost attachment point probability after some tokens
+                if step > 20 and '[*:' not in [self.inv_vocab.get(t.item(), '') for t in monomer_tokens]:
+                    if '[*:' in self.vocab:
+                        logits[:, self.vocab['[*:']] += 2.0
+                
+                # Sample next token
+                probs = F.softmax(logits / temperature, dim=-1)
+                next_token = torch.multinomial(probs, 1)
+                
+                monomer_tokens.append(next_token)
+                current_token = next_token
+                
+                # Stop at EOS or when we have enough
+                if (next_token == self.vocab.get("_EOS", 2)).all() or step > 100:
+                    break
+            
+            # Ensure we have attachment points
+            monomer_string = ''.join([self.inv_vocab.get(t.item(), '') for t in monomer_tokens])
+            if '[*:1]' not in monomer_string:
+                # Insert attachment points
+                if 'c' in monomer_string:
+                    # Find aromatic carbon
+                    pos = monomer_string.find('c')
+                    monomer_tokens.insert(pos+1, torch.tensor([[self.vocab['[*:']]], device=device))
+                    monomer_tokens.insert(pos+2, torch.tensor([[self.vocab['1']]], device=device))
+                    monomer_tokens.insert(pos+3, torch.tensor([[self.vocab[']']]], device=device))
+            
+            if '[*:2]' not in monomer_string:
+                # Add second attachment point
+                monomer_string = ''.join([self.inv_vocab.get(t.item(), '') for t in monomer_tokens])
+                if 'c' in monomer_string:
+                    # Find last aromatic carbon
+                    pos = monomer_string.rfind('c')
+                    if pos > 0:
+                        offset = pos + 1
+                        monomer_tokens.insert(offset, torch.tensor([[self.vocab['[*:']]], device=device))
+                        monomer_tokens.insert(offset+1, torch.tensor([[self.vocab['2']]], device=device))
+                        monomer_tokens.insert(offset+2, torch.tensor([[self.vocab[']']]], device=device))
+            
+            # Stage 2: Generate format deterministically
+            format_tokens = []
+            
+            # Add pipe separator
+            format_tokens.append(torch.tensor([[self.vocab['|']]], device=device))
+            
+            # Add stoichiometry 1 (default 1.000)
+            for char in '1.000':
+                if char in self.vocab:
+                    format_tokens.append(torch.tensor([[self.vocab[char]]], device=device))
+            
+            # Add second pipe
+            format_tokens.append(torch.tensor([[self.vocab['|']]], device=device))
+            
+            # Add stoichiometry 2 (default 1.000)
+            for char in '1.000':
+                if char in self.vocab:
+                    format_tokens.append(torch.tensor([[self.vocab[char]]], device=device))
+            
+            # Add third pipe
+            format_tokens.append(torch.tensor([[self.vocab['|']]], device=device))
+            
+            # Add connectivity pattern
+            connectivity = '<1-1:0.500:0.500>'
+            for char in connectivity:
+                if char in self.vocab:
+                    format_tokens.append(torch.tensor([[self.vocab[char]]], device=device))
+            
+            # Add EOS
+            format_tokens.append(torch.tensor([[self.vocab["_EOS"]]], device=device))
+            
+            # Combine monomer and format tokens
+            full_sequence = monomer_tokens + format_tokens
+            
+            # Convert to list format
+            token_ids = [t.item() for t in full_sequence]
+            all_sequences.append((token_ids, 0.0))
+        
+        return all_sequences
+    
     def fix_polymer_format(self, smiles):
         """Fix common format errors in generated SMILES"""
         if not smiles:
@@ -827,17 +1079,7 @@ class SequenceDecoder(nn.Module):
                         layer.context_attn.attn = None
 
     def forward(self, graph_batch, z, loss_weights=None, teacher_forcing_ratio=1.0):
-        """Forward pass of decoder with scheduled teacher forcing
-    
-        Args:
-            graph_batch (Data): Data of correct graphs
-            z (Tensor): Latent space embedding [b, h]
-            loss_weights: Optional loss weights
-            teacher_forcing_ratio (float): Probability of using teacher forcing (1.0 = always use ground truth)
-    
-        Returns:
-            Tensor, Tensor, Tensor, Tensor: Reconstruction loss, accuracy, predictions, target
-        """
+        """Forward pass with hierarchical decoder and grammar constraints"""
         # CRITICAL FIX: Reset decoder cache at the beginning of each forward pass
         self.reset_decoder_cache()
         
@@ -849,11 +1091,6 @@ class SequenceDecoder(nn.Module):
         m = nn.ConstantPad1d((1, 0), self.vocab["_SOS"]) #pads SOS token left side (beginning of sequences)
         target = m(target)
         
-        # CRITICAL FIX: Don't unsqueeze when no feature embeddings are used
-        # The Elementwise module expects the input dimensions to match the number of embedding modules
-        # Since we have feat_vocab_sizes=[], we should NOT add the extra dimension
-        # target = target.unsqueeze(-1)  # REMOVE THIS LINE
-    
         # CRITICAL FIX: Clear any existing decoder state to prevent graph retention
         if hasattr(self.Decoder, 'state'):
             self.Decoder.state.clear()
@@ -877,10 +1114,10 @@ class SequenceDecoder(nn.Module):
                 add_latent=self.add_latent
             )
             dec_outs = dec_outs.transpose(0, 1)  # Convert back to batch-first: [t, b, h] -> [b, t, h]
-            dec_outs = self.output_layer(dec_outs)  # [b, t, h] => [b, t, v]  (FIXED COMMENT)
-            dec_outs = dec_outs.permute(0, 2, 1)    # [b, t, v] => [b, v, t]  (FIXED COMMENT)
+            dec_outs = self.output_layer(dec_outs)  # [b, t, h] => [b, t, v]
+            dec_outs = dec_outs.permute(0, 2, 1)    # [b, t, v] => [b, v, t]
         else:
-            # Use model's own predictions (scheduled sampling)
+            # Use model's own predictions with grammar constraints
             batch_size = z.size(0)
             max_len = target.size(1)
             vocab_size = len(self.vocab)
@@ -905,6 +1142,12 @@ class SequenceDecoder(nn.Module):
                 
                 # Get logits for current step
                 logits = self.output_layer(dec_out)  # [b, 1, vocab_size]
+                
+                # Apply grammar constraints
+                for b in range(batch_size):
+                    current_tokens = tokenids_to_vocab(current_input[b].cpu().numpy(), self.vocab)
+                    logits[b] = self.apply_grammar_mask(logits[b], current_tokens)
+                
                 dec_outs[:, :, t] = logits.squeeze(1)  # Store in output tensor
                 
                 # Get prediction for next input
@@ -1010,86 +1253,9 @@ class SequenceDecoder(nn.Module):
     def inference(self, z, temperature=None, use_beam_search=False):
         if temperature is None:
             temperature = self.temperature  # Use model's default temperature
-        # CRITICAL FIX: Reset decoder cache before inference
-        self.reset_decoder_cache()
         
-        batch_size = z.size(0)
-        device = z.device
-        
-        # Use sampling-based generation for better diversity
-        if not use_beam_search:
-            # Initialize
-            enc_output = z.unsqueeze(1)
-            src_lengths = torch.ones(batch_size, device=device).long()
-            self.Decoder.state["src"] = enc_output
-            
-            # Start with SOS
-            generated = torch.full((batch_size, 1), self.vocab["_SOS"], device=device)
-            
-            for step in range(self.max_n):
-                # Prepare input
-                input_seq = generated[:, -1:].unsqueeze(-1).transpose(0, 1)
-                
-                # Decode
-                dec_out, _ = self.Decoder(
-                    tgt=input_seq,
-                    enc_out=enc_output,
-                    src_len=src_lengths,
-                    step=step+1,
-                    add_latent=self.add_latent
-                )
-                dec_out = dec_out.transpose(0, 1)
-                logits = self.output_layer(dec_out.squeeze(1))
-                
-                # Apply validity constraints softly
-                for b in range(batch_size):
-                    current_tokens = generated[b].tolist()
-                    current_token_strings = [self.inv_vocab.get(t, '') for t in current_tokens]
-                    for token_id in range(logits.size(-1)):
-                        if not self.is_valid_next_token(current_token_strings, token_id):
-                            logits[b, token_id] -= 5.0  # Soft penalty instead of -inf
-
-                # Apply light format guidance even in regular inference
-                current_tokens = [self.inv_vocab.get(t, '') for t in generated[b].tolist()]
-                current_string = ''.join(current_tokens[1:])
-                
-                # Gentle boosts for format requirements
-                if len(current_string) > 10 and '[*:' not in current_string:
-                    for token_id, token in self.inv_vocab.items():
-                        if '[*:' in token:
-                            logits[b, token_id] += 0.5  # Gentle boost
-                
-                if '[*:' in current_string and '|' not in current_string:
-                    pipe_id = self.vocab.get('|', -1)
-                    if pipe_id >= 0:
-                        logits[b, pipe_id] += 0.5
-                        
-                # Sample next token with temperature
-                next_token = self.sample_with_temperature(
-                    logits, temperature=temperature, top_k=5, top_p=0.95)
-                
-                generated = torch.cat([generated, next_token], dim=1)
-                
-                # Check for EOS
-                if (next_token == self.vocab["_EOS"]).all() or step > 300:
-                    break
-            
-            # Convert to expected format
-            predictions = []
-            for b in range(batch_size):
-                seq = generated[b].tolist()
-                # Apply post-processing fixes
-                tokens = tokenids_to_vocab(seq, self.vocab)
-                smiles = combine_tokens(tokens, tokenization="RT_tokenized")
-                if hasattr(self, 'fix_polymer_format'):
-                    smiles = self.fix_polymer_format(smiles)
-                predictions.append((seq, 0.0))
-            
-            return predictions
-        
-        else:
-            # Fall back to original beam search if requested
-            return self.constrained_beam_search(z, beam_size=3, temperature=temperature)
+        # Always use hierarchical generation for better results
+        return self.hierarchical_generate(z, temperature)
 
     def generate_with_format_guidance(self, z, max_length=400, temperature=0.7):
         """Generation with strong format guidance - NEW METHOD"""

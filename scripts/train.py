@@ -2454,28 +2454,93 @@ data_augment="old"
 property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
 model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
 
+# Log directory creation
+
+data_augment="old"
+# Include property info in model name for better organization
+property_str = "_".join(property_names) if len(property_names) <= 3 else f"{len(property_names)}props"
+model_name = 'Model_'+data_augment+'data_DecL='+str(args.dec_layers)+'_beta='+str(args.beta)+'_alpha='+str(args.alpha)+'_maxbeta='+str(args.max_beta)+'_maxalpha='+str(args.max_alpha)+'eps='+str(args.epsilon)+'_loss='+str(args.loss)+'_augment='+str(args.augment)+'_tokenization='+str(args.tokenization)+'_AE_warmup='+str(args.AE_Warmup)+'_init='+str(args.initialization)+'_seed='+str(args.seed)+'_add_latent='+str(add_latent)+'_pp-guided='+str(args.ppguided)+'_props='+str(property_str)+'/'
+
+# Initialize tracking variable
+skip_hyperparameter_tracking = False
+
 # Determine directory path based on whether we're resuming or starting fresh
 if args.resume_from_checkpoint is not None:
-    # When resuming, ALWAYS use the directory containing the checkpoint
-    checkpoint_dir = os.path.dirname(args.resume_from_checkpoint)
-    # Check if the checkpoint is directly in a Model_ directory
-    if os.path.basename(checkpoint_dir).startswith('Model_'):
-        directory_path = checkpoint_dir
-    else:
-        # Checkpoint might be in a subdirectory, go up one level
-        parent_dir = os.path.dirname(checkpoint_dir)
-        if os.path.basename(parent_dir).startswith('Model_'):
-            directory_path = parent_dir
+    # First, check what stage the checkpoint is from
+    try:
+        checkpoint_temp = torch.load(args.resume_from_checkpoint, map_location='cpu')
+        checkpoint_stage = checkpoint_temp.get('training_stage', None)
+        
+        # If no stage info in checkpoint, try to infer from path
+        if checkpoint_stage is None:
+            checkpoint_path = args.resume_from_checkpoint.lower()
+            if 'stage0' in checkpoint_path:
+                checkpoint_stage = 0
+            elif 'stage1' in checkpoint_path:
+                checkpoint_stage = 1
+            elif 'stage2' in checkpoint_path:
+                checkpoint_stage = 2
+        
+        # Clean up temporary checkpoint load
+        del checkpoint_temp
+        
+    except Exception as e:
+        print(f"[WARNING] Could not determine checkpoint stage: {e}")
+        checkpoint_stage = None
+    
+    # Check if this is transfer learning (different stages) or same-stage resumption
+    is_transfer_learning = (checkpoint_stage is not None and checkpoint_stage != args.training_stage)
+    
+    if is_transfer_learning or (args.save_dir is not None and 
+                               'Stage' in args.save_dir and 
+                               f'Stage{args.training_stage}' in args.save_dir):
+        # Transfer learning or explicit stage directory: Create NEW directory
+        if checkpoint_stage is not None:
+            print(f"[INFO] Transfer learning detected: Stage {checkpoint_stage} → Stage {args.training_stage}")
         else:
-            # Fallback: use the checkpoint directory itself
+            print(f"[INFO] Creating new directory for Stage {args.training_stage}")
+            
+        if args.save_dir is not None:
+            # Use provided save_dir
+            if os.path.basename(args.save_dir).startswith('Model_'):
+                directory_path = args.save_dir
+            else:
+                directory_path = os.path.join(args.save_dir, model_name)
+        else:
+            directory_path = os.path.join(main_dir_path, 'Checkpoints/', model_name)
+            
+        print(f"[INFO] Creating new directory for Stage {args.training_stage}: {directory_path}")
+        
+        # Don't track hyperparameter changes from previous stage
+        skip_hyperparameter_tracking = True
+        
+    else:
+        # Same-stage resumption: Use the checkpoint's directory
+        checkpoint_dir = os.path.dirname(args.resume_from_checkpoint)
+        # Check if the checkpoint is directly in a Model_ directory
+        if os.path.basename(checkpoint_dir).startswith('Model_'):
             directory_path = checkpoint_dir
-    print(f"[INFO] Resuming training in existing directory: {directory_path}")
+        else:
+            # Checkpoint might be in a subdirectory, go up one level
+            parent_dir = os.path.dirname(checkpoint_dir)
+            if os.path.basename(parent_dir).startswith('Model_'):
+                directory_path = parent_dir
+            else:
+                # Fallback: use the checkpoint directory itself
+                directory_path = checkpoint_dir
+        print(f"[INFO] Resuming Stage {args.training_stage} training in existing directory: {directory_path}")
+        skip_hyperparameter_tracking = False
+        
 else:
     # Starting fresh - create new model directory
     if args.save_dir is not None:
-        directory_path = os.path.join(args.save_dir, model_name)
+        if os.path.basename(args.save_dir).startswith('Model_'):
+            directory_path = args.save_dir
+        else:
+            directory_path = os.path.join(args.save_dir, model_name)
     else:
         directory_path = os.path.join(main_dir_path, 'Checkpoints/', model_name)
+    skip_hyperparameter_tracking = False
 
 # Create directory with all parent directories
 os.makedirs(directory_path, exist_ok=True)
@@ -2527,7 +2592,7 @@ if resume_from_checkpoint:
     print(f"[RESUME] Checkpoint directory: {directory_path}")
     
     # NEW: Automatic parameter change detection and logging
-    if 'model_config' in checkpoint:
+    if 'model_config' in checkpoint and not skip_hyperparameter_tracking:
         old_config = checkpoint['model_config']
         
         # Define all tunable hyperparameters with their command line argument names
@@ -2817,6 +2882,7 @@ for epoch in range(epoch_cp, epochs):
             'model_config': model_config,
             'global_step': global_step,
             'monotonic_step': monotonic_step,
+            'training_stage': args.training_stage,
         }
         torch.save(model_dict, os.path.join(directory_path, "model_latest.pt"))
         print(f"Saved latest checkpoint *after* epoch {epoch + 1}")
@@ -2895,7 +2961,7 @@ for epoch in range(epoch_cp, epochs):
 
     # FIXED: Check and save best model with proper logging (only when validation runs)
     if (epoch + 1) % args.validation_freq == 0:
-        model_dict = {
+       model_dict = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -2904,6 +2970,7 @@ for epoch in range(epoch_cp, epochs):
             'model_config': model_config,
             'global_step': global_step,
             'monotonic_step': monotonic_step,
+            'training_stage': args.training_stage,
         }
         # Save best loss model (traditional)
         loss_improved = earlystopping_loss(val_loss, model_dict)

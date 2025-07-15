@@ -1873,6 +1873,8 @@ parser.add_argument("--freeze_decoder", action="store_true", default=False,
                     help="Freeze decoder during stage 2")
 parser.add_argument("--stage1_sample_weight", type=float, default=1.0,
                     help="Weight for sampling data with source properties in stage 1")
+parser.add_argument("--temperature", type=float, default=1.0,
+                    help="Temperature for sampling during generation (higher = more diverse, lower = more conservative)")
 
 
 args = parser.parse_args()
@@ -1957,28 +1959,27 @@ print()
 
 
 model_config = {
-    "embedding_dim": args.embedding_dim, # latent dimension needs to be embedding dimension of word vectors
+    "embedding_dim": args.embedding_dim,
     "beta": args.beta,
-    "max_beta":args.max_beta,
-    "epsilon":args.epsilon,
+    "max_beta": args.max_beta,
+    "epsilon": args.epsilon,
     "decoder_num_layers": args.dec_layers,
-    "num_attention_heads":4,
+    "num_attention_heads": 4,
     'batch_size': args.batch_size,
     'epochs': args.epochs,
-    'hidden_dimension': 300, #hidden dimension of nodes
-    'n_nodes_pool': 10, #how many representative nodes are used for attention based pooling
-    'pooling': 'mean', #mean or custom
+    'hidden_dimension': 300,
+    'n_nodes_pool': 10,
+    'pooling': 'mean',
     'learning_rate': args.learning_rate,
     'es_patience': args.es_patience,
-    'loss': args.loss, # focal or ce
+    'loss': args.loss,
     'max_alpha': args.max_alpha,
     'alpha': args.alpha,
-    # Add property configuration to model config
     'property_count': property_count,
     'property_names': property_names,
-    # Add new regularization parameters
     'dropout_rate': args.dropout_rate,
-    'weight_decay': args.weight_decay
+    'weight_decay': args.weight_decay,
+    'temperature': args.temperature,  # ADD THIS LINE
 }
 
 # Parse property relationships if provided

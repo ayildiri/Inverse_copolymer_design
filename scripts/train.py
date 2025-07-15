@@ -1877,6 +1877,12 @@ parser.add_argument("--temperature", type=float, default=1.0,
                     help="Temperature for sampling during generation (higher = more diverse, lower = more conservative)")
 parser.add_argument("--use_hierarchical_decoder", action="store_true", default=True,
                     help="Use hierarchical decoder for better polymer generation")
+parser.add_argument("--use_property_conditioning", action="store_true", default=False,
+                    help="Use property-conditioned generation with cross-attention")
+parser.add_argument("--use_dual_path", action="store_true", default=False,
+                    help="Use dual-path architecture for structure and format")
+parser.add_argument("--use_disentangled_encoder", action="store_true", default=False,
+                    help="Use disentangled latent space encoder")
 
 
 args = parser.parse_args()
@@ -1983,6 +1989,9 @@ model_config = {
     'weight_decay': args.weight_decay,
     'temperature': args.temperature,
     'use_hierarchical_decoder': args.use_hierarchical_decoder,
+    'use_property_conditioning': args.use_property_conditioning,
+    'use_dual_path': args.use_dual_path,
+    'use_disentangled_encoder': args.use_disentangled_encoder,
 }
 
 # Parse property relationships if provided

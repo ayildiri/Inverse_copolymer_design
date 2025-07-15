@@ -267,6 +267,7 @@ class SequenceDecoder(nn.Module):
         self.inv_vocab = {v: k for k, v in vocab.items()}
         self.beam_size = 1
         self.add_latent = add_latent
+        self.temperature = model_config.get('temperature', 1.0)
     
         # 🔧 DEBUG: Add debug information before embeddings creation
         print(f"🔧 DEBUG: Creating embeddings with vocab size: {len(self.vocab)}")
@@ -1006,7 +1007,9 @@ class SequenceDecoder(nn.Module):
             print(f"Warning: map_state failed safely: {e}")
             return False
 
-    def inference(self, z, temperature=0.9, use_beam_search=False):
+    def inference(self, z, temperature=None, use_beam_search=False):
+        if temperature is None:
+            temperature = self.temperature  # Use model's default temperature
         # CRITICAL FIX: Reset decoder cache before inference
         self.reset_decoder_cache()
         

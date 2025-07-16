@@ -1024,6 +1024,34 @@ def debug_stage0_generation(model, vocab, device, num_samples=10):
     
     model.train()
 
+def load_modular_data(csv_path, batch_size, property_config_path):
+    """Load additional property data for modular architecture"""
+    
+    # Load property configuration
+    with open(property_config_path, 'r') as f:
+        config = yml.safe_load(f)
+    
+    # Read CSV with all properties
+    df = pd.read_csv(csv_path)
+    
+    # Organize data by property modules
+    modular_data = {}
+    
+    for module_name, module_config in config['property_modules'].items():
+        if module_name == 'structure':
+            continue  # Structure is handled by existing data loader
+            
+        module_data = {}
+        for feature in module_config.get('features', []):
+            feature_name = feature['name']
+            if feature_name in df.columns:
+                module_data[feature_name] = torch.tensor(df[feature_name].values, dtype=torch.float32)
+        
+        if module_data:
+            modular_data[module_name] = module_data
+    
+    return modular_data
+
 def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshold, epoch, total_epochs):
     # shuffle batches every epoch
     order_batches = list(range(len(dict_train_loader)))
@@ -1105,14 +1133,41 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
             # 🔧 PROFILING: Time forward pass
             t0 = time.time()
             
-            # FIXED: Handle both basic VAE and PP-guided VAE with teacher forcing
-            # Pass teacher forcing ratio to the model
-            try:
-                # Try with teacher forcing first
-                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
-            except TypeError:
-                # Fallback to without teacher forcing for basic VAE
-                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            # Prepare modular data if using modular architecture
+            if args.use_modular_architecture:
+                # Get batch indices
+                batch_indices = data.batch.unique()
+                modular_batch_data = {}
+                
+                # Extract modular data for this batch
+                if hasattr(data, 'processing_temp'):
+                    modular_batch_data['processing'] = {
+                        'temperature': data.processing_temp,
+                        'time': data.processing_time if hasattr(data, 'processing_time') else None,
+                        'pressure': data.processing_pressure if hasattr(data, 'processing_pressure') else None
+                    }
+                
+                if hasattr(data, 'crystallinity'):
+                    modular_batch_data['morphology'] = {
+                        'crystallinity': data.crystallinity,
+                        'density': data.density if hasattr(data, 'density') else None
+                    }
+                
+                # Forward pass with modular data
+                try:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
+                                 teacher_forcing_ratio=teacher_forcing_ratio, 
+                                 modular_data=modular_batch_data)
+                except TypeError:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
+                                 modular_data=modular_batch_data)
+            else:
+                # Traditional forward pass
+                try:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
+                except TypeError:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            
 
             # Forward pass
             if len(result) == 7:  # Basic G2S_VAE
@@ -1403,19 +1458,30 @@ def test(dict_loader):
             inc_edges_to_atom_matrix = dict_loader[str(batch)][2]
             inc_edges_to_atom_matrix.to(device)
 
-            # FIXED: Handle both basic VAE and PP-guided VAE
-            result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
-
-            if len(result) == 7:  # Basic G2S_VAE
-                loss, recon_loss, kl_loss, acc, predictions, target, z = result
-                mse = torch.tensor(0.0, device=device)  # Dummy MSE
-                y = torch.tensor(0.0, device=device)    # Dummy property prediction
-            elif len(result) == 9:  # PP-guided VAE without relationships
-                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
-            elif len(result) == 10:  # PP-guided VAE with relationships
-                loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss = result
+            # Prepare modular data if using modular architecture
+            if args.use_modular_architecture:
+                modular_batch_data = {}
+                
+                # Extract modular data for this batch
+                if hasattr(data, 'processing_temp'):
+                    modular_batch_data['processing'] = {
+                        'temperature': data.processing_temp,
+                        'time': data.processing_time if hasattr(data, 'processing_time') else None,
+                        'pressure': data.processing_pressure if hasattr(data, 'processing_pressure') else None
+                    }
+                
+                if hasattr(data, 'crystallinity'):
+                    modular_batch_data['morphology'] = {
+                        'crystallinity': data.crystallinity,
+                        'density': data.density if hasattr(data, 'density') else None
+                    }
+                
+                # Forward pass with modular data
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
+                             modular_data=modular_batch_data)
             else:
-                raise ValueError(f"Unexpected number of return values from model: {len(result)}")
+                # Traditional forward pass
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
 
             ce_losses.append(recon_loss.item())
             total_losses.append(loss.item())
@@ -1919,6 +1985,18 @@ parser.add_argument("--property_condition_strength", type=float, default=1.0,
                     help="Strength of property conditioning influence")
 parser.add_argument("--disentangle_loss_weight", type=float, default=0.0,
                     help="Weight for disentanglement loss in encoder")
+parser.add_argument("--use_modular_architecture", action="store_true", default=False,
+                    help="Use modular architecture for extensible property handling")
+parser.add_argument("--property_config_path", type=str, default="property_config.yml",
+                    help="Path to property configuration yml file")
+parser.add_argument("--inverse_design_mode", action="store_true", default=False,
+                    help="Enable inverse design capabilities")
+parser.add_argument("--use_processing", action="store_true", default=True,
+                    help="Include processing conditions module")
+parser.add_argument("--use_morphology", action="store_true", default=True,
+                    help="Include morphology module")
+parser.add_argument("--use_dispersity", action="store_true", default=True,
+                    help="Include dispersity module")
 
 
 args = parser.parse_args()
@@ -2266,7 +2344,6 @@ def add_attention_regularization(model):
     print("✅ Attention regularization added!")
     return model
 
-# %% Create an instance of the G2S model with safe creation
 if args.training_stage == 0 or args.training_stage == 1:
     # Stage 0 (monomer pretraining) or Stage 1 (full pretraining): Regular training
     if args.ppguided:
@@ -2278,12 +2355,38 @@ if args.training_stage == 0 or args.training_stage == 1:
     if args.training_stage == 0:
         model_config['is_monomer_mode'] = True
     
-    model = safe_model_creation(
-        model_type,
-        num_node_features, num_edge_features, hidden_dimension, 
-        embedding_dim, device, model_config, vocab, seed, 
-        loss_weights=class_weights, add_latent=add_latent
-    )
+    # Check if modular architecture is requested
+    if args.use_modular_architecture:
+        model_config['use_modular_encoder'] = True
+        model_config['property_config_path'] = args.property_config_path
+        
+        # Add node/edge dims for modular encoder
+        model_config['node_dim'] = num_node_features
+        model_config['edge_dim'] = num_edge_features
+        
+        # Create modular VAE wrapper
+        base_model = safe_model_creation(
+            model_type,
+            num_node_features, num_edge_features, hidden_dimension, 
+            embedding_dim, device, model_config, vocab, seed, 
+            loss_weights=class_weights, add_latent=add_latent
+        )
+        
+        model = ModularPolymerVAE(
+            base_vae_class=model_type,
+            config_path=args.property_config_path,
+            num_node_features, num_edge_features, hidden_dimension,
+            embedding_dim, device, model_config, vocab, seed,
+            loss_weights=class_weights, add_latent=add_latent
+        )
+    else:
+        # Traditional model creation
+        model = safe_model_creation(
+            model_type,
+            num_node_features, num_edge_features, hidden_dimension, 
+            embedding_dim, device, model_config, vocab, seed, 
+            loss_weights=class_weights, add_latent=add_latent
+        )
 elif args.training_stage == 2:
     # Stage 2: Transfer learning (requires pretrained model)
     if args.pretrained_model_path is None:

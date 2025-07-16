@@ -1,0 +1,82 @@
+# property_config.yaml - Easily extensible property configuration
+property_modules:
+  # Core structural properties (always present)
+  structure:
+    type: "graph"
+    encoder: "GraphEncoder"
+    required: true
+    
+  # Optional property modules - customers can add/remove as needed
+  processing:
+    type: "tabular"
+    encoder: "TabularEncoder"
+    features:
+      - name: "temperature"
+        type: "continuous"
+        range: [20, 300]
+      - name: "time"
+        type: "continuous"
+        range: [0, 168]
+      - name: "pressure"
+        type: "continuous"
+        range: [0.1, 10]
+      - name: "method"
+        type: "categorical"
+        values: ["RAFT", "ATRP", "FRP", "ROP", "ROMP"]
+    
+  morphology:
+    type: "tabular"
+    encoder: "TabularEncoder"
+    features:
+      - name: "crystallinity"
+        type: "continuous"
+        range: [0, 1]
+      - name: "density"
+        type: "continuous"
+        range: [0.8, 2.0]
+      - name: "phase_transition_temp"
+        type: "continuous"
+        range: [-100, 400]
+        
+  dispersity:
+    type: "tabular"
+    encoder: "TabularEncoder"
+    features:
+      - name: "Mn"
+        type: "continuous"
+        range: [1000, 1000000]
+        log_scale: true
+      - name: "PDI"
+        type: "continuous"
+        range: [1.0, 5.0]
+        
+  # Customers can add custom modules here
+  custom_module_example:
+    type: "tabular"
+    encoder: "TabularEncoder"
+    features:
+      - name: "custom_property"
+        type: "continuous"
+        range: [0, 100]
+
+# Target properties for prediction
+target_properties:
+  standard:
+    - name: "Tg"
+      type: "continuous"
+      range: [-100, 300]
+    - name: "Tm"
+      type: "continuous"
+      range: [-50, 400]
+    - name: "tensile_strength"
+      type: "continuous"
+      range: [0, 200]
+    - name: "elongation"
+      type: "continuous"
+      range: [0, 1000]
+      
+  # Customers can add custom targets
+  custom:
+    - name: "custom_target"
+      type: "continuous"
+      range: [0, 100]

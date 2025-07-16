@@ -4,7 +4,7 @@ import networkx as nx
 #import igraph
 import torch
 import re
-import yml
+import yaml
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Any
 #from torch.autograd import Variable

@@ -1041,6 +1041,15 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
     # Start at 1.0 and gradually decrease to 0.5 over training
     teacher_forcing_ratio = max(0.5, 1.0 - (epoch / total_epochs) * 0.5)
     
+    # Adjust grammar strength during hierarchical warmup
+    if epoch < args.hierarchical_warmup_epochs:
+        current_grammar_strength = args.grammar_strength * (epoch / args.hierarchical_warmup_epochs)
+        if hasattr(model, 'Decoder') and hasattr(model.Decoder, 'grammar_strength'):
+            model.Decoder.grammar_strength = current_grammar_strength
+    else:
+        if hasattr(model, 'Decoder') and hasattr(model.Decoder, 'grammar_strength'):
+            model.Decoder.grammar_strength = args.grammar_strength
+    
     # Log teacher forcing ratio periodically
     if epoch % 10 == 0:
         print(f"📚 Teacher forcing ratio: {teacher_forcing_ratio:.3f}")
@@ -1105,11 +1114,30 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 # Fallback to without teacher forcing for basic VAE
                 result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
 
+            # Forward pass
             if len(result) == 7:  # Basic G2S_VAE
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
-                mse = torch.tensor(0.0, device=device)  # Dummy MSE
-                y = torch.tensor(0.0, device=device)    # Dummy property prediction
-                relationship_loss = torch.tensor(0.0, device=device)  # No relationship loss
+                mse = torch.tensor(0.0, device=device)
+                y = torch.tensor(0.0, device=device)
+                relationship_loss = torch.tensor(0.0, device=device)
+                
+            # Add disentanglement loss if using disentangled encoder
+            disentangle_loss = torch.tensor(0.0, device=device)
+            if args.use_disentangled_encoder and args.disentangle_loss_weight > 0:
+                # Calculate disentanglement loss (encourage orthogonality between components)
+                if hasattr(model.Encoder, 'component_slices'):
+                    z_components = []
+                    for comp_name, (start, end) in model.Encoder.component_slices.items():
+                        z_components.append(z[:, start:end])
+                    
+                    # Orthogonality loss between components
+                    for i in range(len(z_components)):
+                        for j in range(i+1, len(z_components)):
+                            # Cosine similarity should be close to 0
+                            cos_sim = F.cosine_similarity(z_components[i], z_components[j], dim=1)
+                            disentangle_loss += cos_sim.abs().mean()
+                    
+                    loss = loss + args.disentangle_loss_weight * disentangle_loss
             elif len(result) == 9:  # PP-guided VAE without relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
                 relationship_loss = torch.tensor(0.0, device=device)  # No relationship loss

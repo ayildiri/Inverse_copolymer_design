@@ -1034,7 +1034,7 @@ def load_modular_data(csv_path, batch_size, property_config_path):
     
     # Load property configuration
     with open(property_config_path, 'r') as f:
-        config = yml.safe_load(f)
+        config = yaml.safe_load(f)
     
     # Read CSV with all properties
     df = pd.read_csv(csv_path)

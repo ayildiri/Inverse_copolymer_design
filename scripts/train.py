@@ -1144,44 +1144,35 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 batch_indices = data.batch.unique()
                 modular_batch_data = {}
                 
-                # Extract modular data for this batch with safer attribute access
-                # Processing module data
-                processing_data = {}
-                if hasattr(data, 'processing_temp'):
-                    processing_data['temperature'] = data.processing_temp
-                if hasattr(data, 'processing_time'):
-                    processing_data['time'] = data.processing_time
-                if hasattr(data, 'processing_pressure'):
-                    processing_data['pressure'] = data.processing_pressure
+                # Define expected attributes for each module
+                module_attributes = {
+                    'processing': ['processing_temp', 'processing_time', 'processing_pressure'],
+                    'morphology': ['crystallinity', 'density', 'chain_length', 'glass_transition'],
+                    'dispersity': ['PDI', 'Mn', 'Mw'],
+                    'mechanical': ['tensile_strength', 'elongation', 'modulus']
+                }
                 
-                # Only add processing module if we have at least one attribute
-                if processing_data:
-                    modular_batch_data['processing'] = processing_data
+                # Extract data for each module
+                for module_name, attributes in module_attributes.items():
+                    module_data = {}
+                    
+                    # Check each attribute safely
+                    for attr in attributes:
+                        if hasattr(data, attr):
+                            value = getattr(data, attr)
+                            # Additional validation: ensure not None and proper shape
+                            if value is not None:
+                                module_data[attr.replace(f'{module_name}_', '')] = value
+                    
+                    # Only add module if we have data
+                    if module_data:
+                        modular_batch_data[module_name] = module_data
                 
-                # Morphology module data
-                morphology_data = {}
-                if hasattr(data, 'crystallinity'):
-                    morphology_data['crystallinity'] = data.crystallinity
-                if hasattr(data, 'density'):
-                    morphology_data['density'] = data.density
-                if hasattr(data, 'chain_length'):
-                    morphology_data['chain_length'] = data.chain_length
-                
-                # Only add morphology module if we have at least one attribute
-                if morphology_data:
-                    modular_batch_data['morphology'] = morphology_data
-                
-                # Dispersity module data (example of adding more modules)
-                dispersity_data = {}
-                if hasattr(data, 'PDI'):
-                    dispersity_data['PDI'] = data.PDI
-                if hasattr(data, 'Mn'):
-                    dispersity_data['Mn'] = data.Mn
-                if hasattr(data, 'Mw'):
-                    dispersity_data['Mw'] = data.Mw
-                
-                if dispersity_data:
-                    modular_batch_data['dispersity'] = dispersity_data
+                # Debug logging (optional)
+                if epoch == 0 and i == 0:  # First batch of first epoch
+                    print(f"🔍 Modular data extracted:")
+                    for module, data_dict in modular_batch_data.items():
+                        print(f"   {module}: {list(data_dict.keys())}")
                 
                 # Forward pass with modular data
                 try:

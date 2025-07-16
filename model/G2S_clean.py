@@ -561,6 +561,12 @@ class SequenceDecoder(nn.Module):
         # Setup grammar rules
         self.setup_grammar_rules()
         
+        # Store new hyperparameters
+        self.grammar_strength = model_config.get('grammar_strength', 1.0)
+        self.property_condition_strength = model_config.get('property_condition_strength', 1.0)
+        self.hierarchical_warmup_epochs = model_config.get('hierarchical_warmup_epochs', 0)
+        
+        
         # DUAL-PATH ARCHITECTURE
         self.use_dual_path = model_config.get('use_dual_path', False)
         if self.use_dual_path:
@@ -677,10 +683,12 @@ class SequenceDecoder(nn.Module):
         
         # Apply mask if we have valid tokens defined
         if valid_tokens and state not in ['NEED_PIPE', 'NEED_CONNECTIVITY', 'COMPLETE']:
-            # Mask all invalid tokens
+            # Mask all invalid tokens with grammar strength
             for idx in range(logits.size(-1)):
                 if idx not in valid_tokens:
-                    logits[:, idx] = float('-inf')
+                    # Apply grammar strength (1.0 = hard constraint, 0.0 = no constraint)
+                    penalty = -10.0 * self.grammar_strength
+                    logits[:, idx] += penalty
         
         return logits
     
@@ -1014,8 +1022,10 @@ class SequenceDecoder(nn.Module):
             value=prop_embedding
         )
         
-        # Gated combination
+        # Gated combination with conditioning strength
         gate = self.property_gate(torch.cat([decoder_hidden, attended_hidden], dim=-1))
+        # Scale gate by conditioning strength
+        gate = gate * self.property_condition_strength
         conditioned_hidden = gate * attended_hidden + (1 - gate) * decoder_hidden
         
         return conditioned_hidden

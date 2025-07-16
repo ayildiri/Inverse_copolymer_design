@@ -1144,19 +1144,44 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 batch_indices = data.batch.unique()
                 modular_batch_data = {}
                 
-                # Extract modular data for this batch
+                # Extract modular data for this batch with safer attribute access
+                # Processing module data
+                processing_data = {}
                 if hasattr(data, 'processing_temp'):
-                    modular_batch_data['processing'] = {
-                        'temperature': data.processing_temp,
-                        'time': data.processing_time if hasattr(data, 'processing_time') else None,
-                        'pressure': data.processing_pressure if hasattr(data, 'processing_pressure') else None
-                    }
+                    processing_data['temperature'] = data.processing_temp
+                if hasattr(data, 'processing_time'):
+                    processing_data['time'] = data.processing_time
+                if hasattr(data, 'processing_pressure'):
+                    processing_data['pressure'] = data.processing_pressure
                 
+                # Only add processing module if we have at least one attribute
+                if processing_data:
+                    modular_batch_data['processing'] = processing_data
+                
+                # Morphology module data
+                morphology_data = {}
                 if hasattr(data, 'crystallinity'):
-                    modular_batch_data['morphology'] = {
-                        'crystallinity': data.crystallinity,
-                        'density': data.density if hasattr(data, 'density') else None
-                    }
+                    morphology_data['crystallinity'] = data.crystallinity
+                if hasattr(data, 'density'):
+                    morphology_data['density'] = data.density
+                if hasattr(data, 'chain_length'):
+                    morphology_data['chain_length'] = data.chain_length
+                
+                # Only add morphology module if we have at least one attribute
+                if morphology_data:
+                    modular_batch_data['morphology'] = morphology_data
+                
+                # Dispersity module data (example of adding more modules)
+                dispersity_data = {}
+                if hasattr(data, 'PDI'):
+                    dispersity_data['PDI'] = data.PDI
+                if hasattr(data, 'Mn'):
+                    dispersity_data['Mn'] = data.Mn
+                if hasattr(data, 'Mw'):
+                    dispersity_data['Mw'] = data.Mw
+                
+                if dispersity_data:
+                    modular_batch_data['dispersity'] = dispersity_data
                 
                 # Forward pass with modular data
                 try:

@@ -418,7 +418,7 @@ class ModularPolymerEncoder(nn.Module):
         
         # Load configuration
         with open(config_path, 'r') as f:
-            self.config = yml.safe_load(f)
+            self.config = yaml.safe_load(f)
         
         # Initialize property modules
         self.property_modules = nn.ModuleDict()

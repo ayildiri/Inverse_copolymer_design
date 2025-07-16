@@ -1,7 +1,6 @@
 import sys, os
 main_dir_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(main_dir_path)
-
 import time
 from datetime import datetime
 import json
@@ -19,6 +18,12 @@ import math
 import argparse
 import numpy as np
 import csv
+
+# ADD THESE NEW IMPORTS:
+import yaml  # For loading property_config.yml
+import pandas as pd  # For load_modular_data function
+import torch.nn.functional as F  # For functional operations like cosine_similarity
+from typing import Dict, List, Optional, Tuple, Any  # Used in type hints (optional but good practice)
 
 def debug_vocab_and_embeddings(vocab_file_path, dataset_path=None):
     """Debug vocabulary and embedding setup"""

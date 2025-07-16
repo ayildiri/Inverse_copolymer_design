@@ -4,6 +4,9 @@ import networkx as nx
 #import igraph
 import torch
 import re
+import yml
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple, Any
 #from torch.autograd import Variable
 from torch.distributions import Bernoulli, Categorical
 from torch_geometric.nn import MessagePassing, global_mean_pool
@@ -300,6 +303,262 @@ class DisentangledGraphEncoder(nn.Module):
         }
         
         return z_mu, z_logvar
+
+# Property Module Registry
+PROPERTY_ENCODERS = {}
+
+def register_encoder(name):
+    """Decorator to register new encoder types"""
+    def decorator(cls):
+        PROPERTY_ENCODERS[name] = cls
+        return cls
+    return decorator
+
+class PropertyModuleBase(ABC):
+    """Base class for all property modules"""
+    
+    @abstractmethod
+    def forward(self, data: Any) -> torch.Tensor:
+        pass
+    
+    @abstractmethod
+    def get_output_dim(self) -> int:
+        pass
+
+@register_encoder("TabularEncoder")
+class TabularEncoder(PropertyModuleBase, nn.Module):
+    """Encoder for tabular/numerical properties"""
+    
+    def __init__(self, feature_config: List[Dict], hidden_dim: int = 128):
+        super().__init__()
+        self.feature_config = feature_config
+        self.feature_dims = {}
+        
+        # Calculate input dimension
+        input_dim = 0
+        for feature in feature_config:
+            if feature['type'] == 'continuous':
+                input_dim += 1
+                self.feature_dims[feature['name']] = 1
+            elif feature['type'] == 'categorical':
+                input_dim += len(feature['values'])
+                self.feature_dims[feature['name']] = len(feature['values'])
+        
+        # Build encoder network
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU()
+        )
+        
+        self.output_dim = hidden_dim // 2
+        
+    def forward(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+        # Process features according to configuration
+        features = []
+        for feature_info in self.feature_config:
+            name = feature_info['name']
+            if name not in data:
+                # Handle missing data with zeros
+                if feature_info['type'] == 'continuous':
+                    features.append(torch.zeros(data[list(data.keys())[0]].size(0), 1, device=data[list(data.keys())[0]].device))
+                elif feature_info['type'] == 'categorical':
+                    features.append(torch.zeros(data[list(data.keys())[0]].size(0), len(feature_info['values']), device=data[list(data.keys())[0]].device))
+            else:
+                value = data[name]
+                if feature_info['type'] == 'continuous':
+                    # Normalize to [0, 1]
+                    min_val, max_val = feature_info['range']
+                    if feature_info.get('log_scale', False):
+                        value = torch.log(value + 1e-8)
+                        min_val, max_val = np.log(min_val + 1e-8), np.log(max_val + 1e-8)
+                    normalized = (value - min_val) / (max_val - min_val)
+                    features.append(normalized.unsqueeze(-1) if normalized.dim() == 1 else normalized)
+                elif feature_info['type'] == 'categorical':
+                    # One-hot encode
+                    one_hot = torch.zeros(value.size(0), len(feature_info['values']), device=value.device)
+                    for i, val in enumerate(feature_info['values']):
+                        mask = (value == val)
+                        one_hot[mask, i] = 1
+                    features.append(one_hot)
+        
+        # Concatenate all features
+        x = torch.cat(features, dim=-1)
+        return self.encoder(x)
+    
+    def get_output_dim(self) -> int:
+        return self.output_dim
+
+@register_encoder("GraphEncoder") 
+class ModularGraphEncoder(PropertyModuleBase, nn.Module):
+    """Wrapper for existing GraphEncoder to fit modular interface"""
+    
+    def __init__(self, node_dim, edge_dim, hidden_dim, device, model_config):
+        super().__init__()
+        self.encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+        self.output_dim = hidden_dim
+        
+    def forward(self, data: Tuple) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Data is (graph, dest_matrix, inc_matrix, device)
+        return self.encoder(*data)
+    
+    def get_output_dim(self) -> int:
+        return self.output_dim
+
+class ModularPolymerEncoder(nn.Module):
+    """Flexible encoder that combines multiple property modules"""
+    
+    def __init__(self, config_path: str, model_config: Dict, device: torch.device):
+        super().__init__()
+        self.device = device
+        self.model_config = model_config
+        
+        # Load configuration
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        
+        # Initialize property modules
+        self.property_modules = nn.ModuleDict()
+        self.module_output_dims = {}
+        
+        for module_name, module_config in self.config['property_modules'].items():
+            if module_config.get('required', False) or model_config.get(f'use_{module_name}', True):
+                encoder_type = module_config['encoder']
+                encoder_class = PROPERTY_ENCODERS.get(encoder_type)
+                
+                if encoder_class is None:
+                    print(f"Warning: Encoder type {encoder_type} not found. Skipping {module_name}")
+                    continue
+                
+                # Special handling for graph encoder
+                if encoder_type == "GraphEncoder":
+                    encoder = ModularGraphEncoder(
+                        model_config['node_dim'],
+                        model_config['edge_dim'],
+                        model_config['hidden_dimension'],
+                        device,
+                        model_config
+                    )
+                else:
+                    encoder = encoder_class(
+                        module_config.get('features', []),
+                        model_config.get('property_hidden_dim', 128)
+                    )
+                
+                self.property_modules[module_name] = encoder
+                self.module_output_dims[module_name] = encoder.get_output_dim()
+        
+        # Adaptive fusion layer
+        total_dim = sum(self.module_output_dims.values())
+        self.fusion = AdaptiveFusion(
+            input_dims=self.module_output_dims,
+            output_dim=model_config['embedding_dim'],
+            model_config=model_config
+        )
+        
+    def forward(self, data: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Args:
+            data: Dictionary with keys matching property module names
+        Returns:
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+            module_outputs: Individual module outputs for analysis
+        """
+        module_outputs = {}
+        
+        for module_name, module in self.property_modules.items():
+            if module_name in data and data[module_name] is not None:
+                output = module(data[module_name])
+                # Handle both single tensor and (mu, logvar) outputs
+                if isinstance(output, tuple):
+                    module_outputs[module_name] = output[0]  # Use mean for fusion
+                else:
+                    module_outputs[module_name] = output
+            else:
+                # Handle missing modules with zeros
+                batch_size = next(iter(data.values()))[0].size(0) if isinstance(next(iter(data.values())), tuple) else next(iter(data.values())).size(0)
+                module_outputs[module_name] = torch.zeros(
+                    batch_size,
+                    self.module_output_dims[module_name],
+                    device=self.device
+                )
+        
+        # Adaptive fusion
+        z_mu, z_logvar = self.fusion(module_outputs)
+        
+        return z_mu, z_logvar, module_outputs
+
+class AdaptiveFusion(nn.Module):
+    """Adaptive fusion mechanism for combining multiple property encodings"""
+    
+    def __init__(self, input_dims: Dict[str, int], output_dim: int, model_config: Dict):
+        super().__init__()
+        self.input_dims = input_dims
+        self.output_dim = output_dim
+        
+        # Attention mechanism for adaptive weighting
+        total_dim = sum(input_dims.values())
+        self.attention = nn.Sequential(
+            nn.Linear(total_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, len(input_dims)),
+            nn.Softmax(dim=-1)
+        )
+        
+        # Individual projections for each module
+        self.projections = nn.ModuleDict()
+        for name, dim in input_dims.items():
+            self.projections[name] = nn.Linear(dim, output_dim)
+        
+        # Final projection to mu and logvar
+        self.mu_layer = nn.Linear(output_dim, output_dim)
+        self.logvar_layer = nn.Linear(output_dim, output_dim)
+        
+        # Learnable miss-data handling
+        self.missing_data_embeddings = nn.ParameterDict()
+        for name, dim in input_dims.items():
+            self.missing_data_embeddings[name] = nn.Parameter(torch.randn(dim) * 0.01)
+    
+    def forward(self, module_outputs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Handle missing data
+        filled_outputs = {}
+        concatenated = []
+        
+        for name, dim in self.input_dims.items():
+            if name in module_outputs and module_outputs[name].sum() != 0:
+                filled_outputs[name] = module_outputs[name]
+            else:
+                # Use learned embeddings for missing data
+                batch_size = next(iter(module_outputs.values())).size(0)
+                filled_outputs[name] = self.missing_data_embeddings[name].unsqueeze(0).expand(batch_size, -1)
+            concatenated.append(filled_outputs[name])
+        
+        # Calculate attention weights
+        concat_features = torch.cat(concatenated, dim=-1)
+        attention_weights = self.attention(concat_features)
+        
+        # Project each module output
+        projected_outputs = []
+        for i, (name, output) in enumerate(filled_outputs.items()):
+            projected = self.projections[name](output)
+            # Apply attention weight
+            weighted = projected * attention_weights[:, i:i+1]
+            projected_outputs.append(weighted)
+        
+        # Sum weighted projections
+        fused = sum(projected_outputs)
+        
+        # Generate mu and logvar
+        mu = self.mu_layer(fused)
+        logvar = self.logvar_layer(fused)
+        
+        return mu, logvar
+
+
 
 class GraphEncoder(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim, device, model_config):
@@ -1895,7 +2154,156 @@ def parse_property_relationships(relationship_strings):
         }
     
     return relationships
+
+class ModularPolymerVAE(nn.Module):
+    """Future-proof VAE that wraps existing architecture with modular capabilities"""
     
+    def __init__(self, base_vae_class, config_path, *args, **kwargs):
+        super().__init__()
+        
+        # Initialize base VAE (backward compatible)
+        self.base_vae = base_vae_class(*args, **kwargs)
+        
+        # Check if modular features are enabled
+        self.use_modular = kwargs.get('model_config', {}).get('use_modular_encoder', False)
+        
+        if self.use_modular:
+            # Replace encoder with modular version
+            self.modular_encoder = ModularPolymerEncoder(
+                config_path=config_path,
+                model_config=kwargs.get('model_config', {}),
+                device=kwargs.get('device', torch.device('cpu'))
+            )
+            
+            # Store original encoder for potential use
+            self.original_encoder = self.base_vae.Encoder
+            
+            # Property-specific decoders for inverse design
+            self.property_decoders = nn.ModuleDict()
+            config = self.modular_encoder.config
+            
+            for prop_group in ['standard', 'custom']:
+                if prop_group in config.get('target_properties', {}):
+                    for prop in config['target_properties'][prop_group]:
+                        self.property_decoders[prop['name']] = InversePropertyDecoder(
+                            latent_dim=kwargs.get('model_config', {})['embedding_dim'],
+                            property_config=prop
+                        )
+    
+    def forward(self, *args, **kwargs):
+        """Forward pass with modular or traditional encoding"""
+        if self.use_modular and 'modular_data' in kwargs:
+            # Extract modular data
+            modular_data = kwargs.pop('modular_data')
+            
+            # Get base data for structure
+            batch_list = args[0]
+            dest_is_origin_matrix = args[1]
+            inc_edges_to_atom_matrix = args[2]
+            device = args[3]
+            
+            # Prepare data for modular encoder
+            encoder_data = {
+                'structure': (batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            }
+            encoder_data.update(modular_data)
+            
+            # Use modular encoder
+            h_G_mean, h_G_var, module_outputs = self.modular_encoder(encoder_data)
+            
+            # Replace the encoder call in base VAE
+            self.base_vae.Encoder = lambda *x: (h_G_mean, h_G_var)
+            result = self.base_vae.forward(*args, **kwargs)
+            self.base_vae.Encoder = self.original_encoder  # Restore
+            
+            # Add module outputs to result for analysis
+            return result + (module_outputs,)
+        else:
+            # Traditional forward pass
+            return self.base_vae.forward(*args, **kwargs)
+    
+    def inverse_design(self, target_properties: Dict[str, float], 
+                      conditions: Optional[Dict[str, Any]] = None,
+                      num_samples: int = 100) -> List[str]:
+        """Generate polymers with specified properties under given conditions"""
+        
+        # Encode conditions if provided
+        if conditions and self.use_modular:
+            condition_encoding = self.modular_encoder.property_modules['processing'](conditions)
+        else:
+            condition_encoding = None
+        
+        # Optimize latent space for target properties
+        z = torch.randn(num_samples, self.base_vae.embedding_dim, device=self.device)
+        z.requires_grad = True
+        
+        optimizer = torch.optim.Adam([z], lr=0.01)
+        
+        for step in range(100):  # Optimization steps
+            optimizer.zero_grad()
+            
+            # Predict properties from latent code
+            if hasattr(self.base_vae, 'PP_lin1'):
+                pp_hidden = self.base_vae.PP_lin1(z)
+                pp_hidden = self.base_vae.dropout(pp_hidden)
+                predicted_props = self.base_vae.PP_lin2(pp_hidden)
+            
+            # Calculate loss for target properties
+            loss = 0
+            for prop_name, target_value in target_properties.items():
+                if prop_name in self.property_decoders:
+                    # Use specific decoder for this property
+                    pred = self.property_decoders[prop_name](z, condition_encoding)
+                    loss += F.mse_loss(pred, torch.tensor(target_value).expand_as(pred))
+            
+            loss.backward()
+            optimizer.step()
+        
+        # Generate polymers from optimized latent codes
+        with torch.no_grad():
+            predictions = self.base_vae.inference(z, device=self.device)
+            
+        # Convert to SMILES strings
+        generated_polymers = []
+        for pred in predictions[0]:
+            tokens = tokenids_to_vocab(pred[0], self.base_vae.vocab)
+            smiles = combine_tokens(tokens, tokenization="RT_tokenized")
+            generated_polymers.append(smiles)
+        
+        return generated_polymers
+
+class InversePropertyDecoder(nn.Module):
+    """Decoder for specific property in inverse design"""
+    
+    def __init__(self, latent_dim: int, property_config: Dict):
+        super().__init__()
+        self.property_config = property_config
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
+        # Denormalization parameters
+        self.min_val = property_config['range'][0]
+        self.max_val = property_config['range'][1]
+    
+    def forward(self, z: torch.Tensor, conditions: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if conditions is not None:
+            z = torch.cat([z, conditions], dim=-1)
+        
+        # Predict normalized value
+        normalized_pred = torch.sigmoid(self.decoder(z))
+        
+        # Denormalize
+        pred = normalized_pred * (self.max_val - self.min_val) + self.min_val
+        
+        return pred
+
 class G2S_VAE_PPguided(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim, embedding_dim, device, model_config, vocab, seed, loss_weights=None, add_latent=True):
         super().__init__()

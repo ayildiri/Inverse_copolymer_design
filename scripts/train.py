@@ -1883,6 +1883,14 @@ parser.add_argument("--use_dual_path", action="store_true", default=False,
                     help="Use dual-path architecture for structure and format")
 parser.add_argument("--use_disentangled_encoder", action="store_true", default=False,
                     help="Use disentangled latent space encoder")
+parser.add_argument("--hierarchical_warmup_epochs", type=int, default=0,
+                    help="Number of epochs to warm up hierarchical components")
+parser.add_argument("--grammar_strength", type=float, default=1.0,
+                    help="Strength of grammar constraints (0-1)")
+parser.add_argument("--property_condition_strength", type=float, default=1.0,
+                    help="Strength of property conditioning influence")
+parser.add_argument("--disentangle_loss_weight", type=float, default=0.0,
+                    help="Weight for disentanglement loss in encoder")
 
 
 args = parser.parse_args()
@@ -1965,7 +1973,6 @@ print(f"Last 10 tokens: {list(vocab.items())[-10:]}")
 print(f"Special tokens: _PAD={vocab.get('_PAD', 'MISSING')}, _SOS={vocab.get('_SOS', 'MISSING')}, _EOS={vocab.get('_EOS', 'MISSING')}, _UNK={vocab.get('_UNK', 'MISSING')}")
 print()
 
-
 model_config = {
     "embedding_dim": args.embedding_dim,
     "beta": args.beta,
@@ -1992,6 +1999,10 @@ model_config = {
     'use_property_conditioning': args.use_property_conditioning,
     'use_dual_path': args.use_dual_path,
     'use_disentangled_encoder': args.use_disentangled_encoder,
+    'hierarchical_warmup_epochs': args.hierarchical_warmup_epochs,
+    'grammar_strength': args.grammar_strength,
+    'property_condition_strength': args.property_condition_strength,
+    'disentangle_loss_weight': args.disentangle_loss_weight,
 }
 
 # Parse property relationships if provided

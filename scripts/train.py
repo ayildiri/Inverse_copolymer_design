@@ -2376,6 +2376,7 @@ if args.training_stage == 0 or args.training_stage == 1:
     if args.training_stage == 0:
         model_config['is_monomer_mode'] = True
     
+   
     # Check if modular architecture is requested
     if args.use_modular_architecture:
         model_config['use_modular_encoder'] = True
@@ -2385,17 +2386,10 @@ if args.training_stage == 0 or args.training_stage == 1:
         model_config['node_dim'] = num_node_features
         model_config['edge_dim'] = num_edge_features
         
-        # Create modular VAE wrapper
-        base_model = safe_model_creation(
-            model_type,
-            num_node_features, num_edge_features, hidden_dimension, 
-            embedding_dim, device, model_config, vocab, seed, 
-            loss_weights=class_weights, add_latent=add_latent
-        )
-        
+        # Create modular VAE wrapper - FIXED VERSION
         model = ModularPolymerVAE(
-            base_vae_class=model_type,
-            config_path=args.property_config_path,
+            model_type,  # Pass as positional argument
+            args.property_config_path,  # Pass as positional argument
             num_node_features, num_edge_features, hidden_dimension,
             embedding_dim, device, model_config, vocab, seed,
             loss_weights=class_weights, add_latent=add_latent

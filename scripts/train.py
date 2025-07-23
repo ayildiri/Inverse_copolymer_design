@@ -1479,11 +1479,6 @@ def test(dict_loader):
             inc_edges_to_atom_matrix = dict_loader[str(batch)][2]
             inc_edges_to_atom_matrix.to(device)
 
-            # Extract SMILES if using FM4M
-            smiles_list = None
-            if args.use_fm4m:
-                smiles_list = extract_smiles_from_batch(data, vocab, tokenization)
-
             # Prepare modular data if using modular architecture
             if args.use_modular_architecture:
                 modular_batch_data = {}
@@ -1503,29 +1498,18 @@ def test(dict_loader):
                     }
                 
                 # Forward pass with modular data
-                if args.use_fm4m and smiles_list:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
-                                 modular_data=modular_batch_data, smiles_list=smiles_list)
-                else:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
-                                 modular_data=modular_batch_data)
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
+                             modular_data=modular_batch_data)
             else:
                 # Traditional forward pass
-                if args.use_fm4m and smiles_list:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
-                                 smiles_list=smiles_list)
-                else:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+                result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
 
             # Unpack results based on model type
             if len(result) == 7:  # Basic G2S_VAE
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
                 mse = torch.tensor(0.0, device=device)
-                y = torch.tensor(0.0, device=device)
-                relationship_loss = torch.tensor(0.0, device=device)
             elif len(result) == 9:  # PP-guided VAE without relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y = result
-                relationship_loss = torch.tensor(0.0, device=device)
             elif len(result) == 10:  # PP-guided VAE with relationships
                 loss, recon_loss, kl_loss, mse, acc, predictions, target, z, y, relationship_loss = result
             else:

@@ -701,17 +701,6 @@ class FM4MEncoder(nn.Module):
         else:
             # Average multiple model representations
             return torch.stack(all_representations).mean(dim=0)
-        # Cache result if enabled
-        if self.use_cache:
-            # Implement simple cache size limit
-            if len(self.cache) >= self.cache_size_limit:
-                # Remove oldest entry (FIFO)
-                oldest_key = next(iter(self.cache))
-                del self.cache[oldest_key]
-            
-            self.cache[cache_key] = result.clone()
-        
-        return result
 
 
 class HybridPolymerEncoder(nn.Module):

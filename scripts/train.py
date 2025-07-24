@@ -581,6 +581,27 @@ def strip_polymer_notation(smiles_string):
         return monomer_clean
     return smiles_string
 
+def extract_smiles_from_batch(data_batch, vocab, tokenization="RT_tokenized"):
+    """Extract SMILES strings from batch data"""
+    smiles_list = []
+    
+    if hasattr(data_batch, 'tgt_token_ids'):
+        for seq in data_batch.tgt_token_ids:
+            try:
+                # Convert token IDs to tokens
+                tokens = tokenids_to_vocab(seq, vocab)
+                # Combine tokens to SMILES
+                smiles = combine_tokens(tokens, tokenization=tokenization)
+                smiles_list.append(smiles)
+            except Exception as e:
+                print(f"Warning: Failed to extract SMILES: {e}")
+                smiles_list.append("")  # Append empty string as fallback
+    else:
+        # If no target sequences, return empty list
+        return []
+    
+    return smiles_list
+
 def create_monomer_data_loader(original_loader, vocab, tokenization):
     """Create a data loader with monomer-only SMILES for pretraining"""
     import copy
@@ -1190,6 +1211,27 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                     result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
             
 
+            # Extract SMILES if using FM4M
+            smiles_list = None
+            if args.use_fm4m:
+                smiles_list = extract_smiles_from_batch(data, vocab, tokenization)
+            
+            # Forward pass with SMILES
+            if args.use_fm4m and smiles_list:
+                try:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
+                                  teacher_forcing_ratio=teacher_forcing_ratio, smiles_list=smiles_list)
+                except TypeError:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
+                                  smiles_list=smiles_list)
+            else:
+                # Original forward pass
+                try:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
+                                  teacher_forcing_ratio=teacher_forcing_ratio)
+                except TypeError:
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+            
             # Forward pass
             if len(result) == 7:  # Basic G2S_VAE
                 loss, recon_loss, kl_loss, acc, predictions, target, z = result
@@ -2029,7 +2071,19 @@ parser.add_argument("--use_morphology", action="store_true", default=True,
                     help="Include morphology module")
 parser.add_argument("--use_dispersity", action="store_true", default=True,
                     help="Include dispersity module")
-
+# FM4M Integration arguments
+parser.add_argument("--use_fm4m", action="store_true", default=False,
+                    help="Enable FM4M integration for enhanced molecular representations")
+parser.add_argument("--fm4m_models", type=str, nargs='+', default=['smi-ted'],
+                    choices=['smi-ted', 'mhg-gnn', 'selfies-ted', 'smi-ssed'],
+                    help="FM4M models to use")
+parser.add_argument("--fm4m_fusion", type=str, default='attention',
+                    choices=['attention', 'moe', 'concat', 'mean'],
+                    help="Fusion strategy for combining wD-MPNN and FM4M representations")
+parser.add_argument("--fm4m_weight", type=float, default=0.3,
+                    help="Weight for FM4M contribution in loss (if applicable)")
+parser.add_argument("--fm4m_output_dim", type=int, default=768,
+                    help="Output dimension for FM4M representations")
 
 args = parser.parse_args()
 
@@ -2141,6 +2195,13 @@ model_config = {
     'grammar_strength': args.grammar_strength,
     'property_condition_strength': args.property_condition_strength,
     'disentangle_loss_weight': args.disentangle_loss_weight,
+    'use_fm4m': args.use_fm4m,
+    'fm4m_models': args.fm4m_models,
+    'fm4m_fusion': args.fm4m_fusion,
+    'fm4m_weight': args.fm4m_weight,
+    'fm4m_output_dim': args.fm4m_output_dim,
+}
+    
 }
 
 # Parse property relationships if provided
@@ -2737,6 +2798,13 @@ earlystopping = EarlyStoppingWithValidity(dir=directory_path, patience=es_patien
 print(f'STARTING TRAINING')
 print(f'Model will predict {property_count} properties: {property_names}')
 print(f'Enhanced features: dropout_rate={args.dropout_rate}, weight_decay={args.weight_decay}, gradient_clip={args.gradient_clip_threshold}')
+
+if args.use_fm4m:
+    print(f'🚀 FM4M Integration Enabled')
+    print(f'   Models: {args.fm4m_models}')
+    print(f'   Fusion: {args.fm4m_fusion}')
+    print(f'   Weight: {args.fm4m_weight}')
+    print(f'   Output dim: {args.fm4m_output_dim}')
 
 # Prepare dictionaries for training or load checkpoint
 checkpoint_file = None

@@ -1203,21 +1203,9 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                 except TypeError:
                     result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device,
                                  modular_data=modular_batch_data)
-            else:
-                # Traditional forward pass
-                try:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
-                except TypeError:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
-            
-
-            # Extract SMILES if using FM4M
-            smiles_list = None
-            if args.use_fm4m:
+            elif args.use_fm4m:
+                # FM4M-enhanced forward pass
                 smiles_list = extract_smiles_from_batch(data, vocab, tokenization)
-            
-            # Forward pass with SMILES
-            if args.use_fm4m and smiles_list:
                 try:
                     result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
                                   teacher_forcing_ratio=teacher_forcing_ratio, smiles_list=smiles_list)
@@ -1225,10 +1213,9 @@ def train(dict_train_loader, global_step, monotonic_step, gradient_clip_threshol
                     result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
                                   smiles_list=smiles_list)
             else:
-                # Original forward pass
+                # Traditional forward pass
                 try:
-                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, 
-                                  teacher_forcing_ratio=teacher_forcing_ratio)
+                    result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=teacher_forcing_ratio)
                 except TypeError:
                     result = model(data, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
             
@@ -2074,8 +2061,8 @@ parser.add_argument("--use_dispersity", action="store_true", default=True,
 # FM4M Integration arguments
 parser.add_argument("--use_fm4m", action="store_true", default=False,
                     help="Enable FM4M integration for enhanced molecular representations")
-parser.add_argument("--fm4m_models", type=str, nargs='+', default=['smi-ted'],
-                    choices=['smi-ted', 'mhg-gnn', 'selfies-ted', 'smi-ssed'],
+parser.add_argument("--fm4m_models", type=str, nargs='+', default=['SMI-TED'],
+                    choices=['SMI-TED', 'MHG-GNN', 'SELFIES-TED', 'SMI-SSED'],
                     help="FM4M models to use")
 parser.add_argument("--fm4m_fusion", type=str, default='attention',
                     choices=['attention', 'moe', 'concat', 'mean'],
@@ -2200,8 +2187,6 @@ model_config = {
     'fm4m_fusion': args.fm4m_fusion,
     'fm4m_weight': args.fm4m_weight,
     'fm4m_output_dim': args.fm4m_output_dim,
-}
-    
 }
 
 # Parse property relationships if provided

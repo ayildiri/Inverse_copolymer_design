@@ -598,6 +598,7 @@ class FM4MEncoder(nn.Module):
     def __init__(self, model_names, model_config, device):
         super().__init__()
         self.device = device
+        self.model_config = model_config
         self.model_names = model_names if isinstance(model_names, list) else [model_names]
         self.output_dim = model_config.get('fm4m_output_dim', 768)  # Default FM4M dimension
         
@@ -607,24 +608,74 @@ class FM4MEncoder(nn.Module):
         # Initialize FM4M Kit
         self.fm4m_kit = FM4M_Kit()
         
+        # Initialize cache if enabled
+        self.use_cache = model_config.get('use_fm4m_cache', False)
+        self.cache = {} if self.use_cache else None
+        self.cache_size_limit = model_config.get('fm4m_cache_size', 10000)
+        
+        # Comprehensive dimension mapping for all FM4M models
+        self.fm4m_dimensions = {
+            'smi-ted': 768,      # SMILES Transformer
+            'mhg-gnn': 512,      # Molecular Hypergraph GNN
+            'selfies-ted': 768,  # SELFIES Transformer
+            'smi-ssed': 768,     # SMILES State Space Model
+            'mol-moe': 1024,     # Mixture of Experts
+            'default': 768       # Default dimension
+        }
+        
         # Project FM4M outputs to consistent dimension
         self.projection_layers = nn.ModuleDict()
         for model_name in self.model_names:
-            # Each FM4M model might have different output dimensions
-            if model_name == 'smi-ted':
-                fm4m_dim = 768  # SMI-TED dimension
-            elif model_name == 'mhg-gnn':
-                fm4m_dim = 512  # MHG-GNN dimension
-            elif model_name == 'selfies-ted':
-                fm4m_dim = 768  # SELFIES-TED dimension
-            else:
-                fm4m_dim = 768  # Default
+            # Get dimension from mapping or use default
+            fm4m_dim = self.fm4m_dimensions.get(model_name, self.fm4m_dimensions['default'])
             
-            self.projection_layers[model_name] = nn.Linear(fm4m_dim, self.output_dim)
+            # Create projection layer if dimensions don't match
+            if fm4m_dim != self.output_dim:
+                self.projection_layers[model_name] = nn.Linear(fm4m_dim, self.output_dim)
+            else:
+                # Identity mapping if dimensions match
+                self.projection_layers[model_name] = nn.Identity()
     
     def forward(self, smiles_list):
         """Extract features from SMILES using FM4M models"""
+        # Input validation
+        if not smiles_list:
+            raise ValueError("smiles_list cannot be empty")
+        
+        if not isinstance(smiles_list, list):
+            raise ValueError("smiles_list must be a list of SMILES strings")
+        
+        # Check cache if enabled
+        if self.use_cache:
+            cache_key = tuple(smiles_list)  # Convert to hashable type
+            if cache_key in self.cache:
+                return self.cache[cache_key].clone()  # Return clone to prevent in-place modifications
+        
+        # Validate and clean SMILES strings
+        validated_smiles = []
+        for i, smiles in enumerate(smiles_list):
+            if not isinstance(smiles, str):
+                print(f"Warning: Non-string SMILES at index {i}, converting to string")
+                smiles = str(smiles)
+            
+            smiles = smiles.strip()
+            if not smiles:
+                print(f"Warning: Empty SMILES at index {i}, using default 'C'")
+                smiles = "C"  # Simple carbon as fallback
+            
+            validated_smiles.append(smiles)
+        
+        smiles_list = validated_smiles
         batch_size = len(smiles_list)
+        
+        # Clean SMILES if in monomer mode
+        if self.model_config.get('is_monomer_mode', False):
+            cleaned_smiles = []
+            for smiles in smiles_list:
+                # Strip polymer notation for monomer-only training
+                cleaned = strip_polymer_notation(smiles)
+                cleaned_smiles.append(cleaned)
+            smiles_list = cleaned_smiles
         
         # Get representations from each model
         all_representations = []
@@ -646,17 +697,36 @@ class FM4MEncoder(nn.Module):
                 all_representations.append(representations)
                 
             except Exception as e:
-                print(f"Warning: Failed to get {model_name} representations: {e}")
-                # Fallback to zeros
+                # Detailed error reporting for debugging
+                print(f"Warning: Failed to get {model_name} representations")
+                print(f"  Error: {type(e).__name__}: {e}")
+                print(f"  Batch size: {batch_size}")
+                print(f"  Input SMILES sample: {smiles_list[0][:50] + '...' if len(smiles_list[0]) > 50 else smiles_list[0]}")
+                print(f"  Output dimension: {self.output_dim}")
+                print(f"  Using zero fallback of shape ({batch_size}, {self.output_dim})")
+                
+                # Create fallback representation
                 fallback = torch.zeros(batch_size, self.output_dim, device=self.device)
                 all_representations.append(fallback)
         
         # Combine representations
         if len(all_representations) == 1:
-            return all_representations[0]
+            result = all_representations[0]
         else:
             # Average multiple model representations
-            return torch.stack(all_representations).mean(dim=0)
+            result = torch.stack(all_representations).mean(dim=0)
+        
+        # Cache result if enabled
+        if self.use_cache:
+            # Implement simple cache size limit
+            if len(self.cache) >= self.cache_size_limit:
+                # Remove oldest entry (FIFO)
+                oldest_key = next(iter(self.cache))
+                del self.cache[oldest_key]
+            
+            self.cache[cache_key] = result.clone()
+        
+        return result
 
 
 class HybridPolymerEncoder(nn.Module):
@@ -696,6 +766,15 @@ class HybridPolymerEncoder(nn.Module):
                 nn.Linear(64, 2),
                 nn.Softmax(dim=-1)
             )
+        elif self.fusion_method == 'weighted':
+            # Learnable weighted fusion
+            self.fusion_weight = nn.Parameter(torch.tensor(0.5))  # Initialize at 0.5
+            self.weight_projection = nn.Sequential(
+                nn.Linear(hidden_dim * 2, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+                nn.Sigmoid()
+            )
         else:  # concat or mean
             self.fusion_projection = nn.Linear(hidden_dim * 2, hidden_dim)
         
@@ -713,6 +792,14 @@ class HybridPolymerEncoder(nn.Module):
         
         # Get FM4M representations
         fm4m_features = self.fm4m_encoder(smiles_list)
+        
+        # Validate batch dimensions match
+        if graph_mu.shape[0] != fm4m_features.shape[0]:
+            raise ValueError(f"Batch size mismatch: graph={graph_mu.shape[0]}, fm4m={fm4m_features.shape[0]}")
+        
+        # Validate SMILES list length matches batch size
+        if len(smiles_list) != graph_mu.shape[0]:
+            raise ValueError(f"SMILES list length ({len(smiles_list)}) doesn't match batch size ({graph_mu.shape[0]})")
         
         # Ensure dimensions match
         if fm4m_features.shape[-1] != self.hidden_dim:
@@ -748,6 +835,14 @@ class HybridPolymerEncoder(nn.Module):
             # Simple concatenation + projection
             combined = torch.cat([graph_mu, fm4m_features], dim=-1)
             fused = self.fusion_projection(combined)
+            
+        elif self.fusion_method == 'weighted':
+            # Learnable weighted combination
+            combined = torch.cat([graph_mu, fm4m_features], dim=-1)
+            dynamic_weight = self.weight_projection(combined)  # [batch, 1]
+            
+            # Combine using learned weights
+            fused = dynamic_weight * fm4m_features + (1 - dynamic_weight) * graph_mu
             
         else:  # mean
             # Simple averaging
@@ -2183,16 +2278,19 @@ class G2S_VAE(nn.Module):
         return eps.mul(std).add_(mean) 
 
     def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0, smiles_list=None):
-    # encode
-    if hasattr(self.Encoder, 'forward') and 'smiles_list' in self.Encoder.forward.__code__.co_varnames:
-        # Hybrid encoder that accepts SMILES
-        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, smiles_list)
-    else:
-        # Original encoder
-        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        # encode
+        if hasattr(self.Encoder, 'forward') and 'smiles_list' in self.Encoder.forward.__code__.co_varnames:
+            # Hybrid encoder that accepts SMILES
+            h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, smiles_list)
+        else:
+            # Original encoder
+            h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        
+        # Apply compression if needed (this should be outside the else block)
         if not self.hidden_dim==self.embedding_dim:
             h_G_mean = self.lincompress(h_G_mean)
             h_G_var = self.lincompress(h_G_var)
+        
         z = self.sample(h_G_mean, h_G_var, eps_scale=self.eps)
         kl_loss = -0.5 * torch.sum(1 + h_G_var - h_G_mean.pow(2) - h_G_var.exp())/(len(batch_list.ptr-1))
     

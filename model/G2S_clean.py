@@ -38,7 +38,15 @@ from model.transformer_mod import TransformerDecoder, TransformerLMDecoder
 from model.embeddings_mod import Embeddings
 from onmt.translate import BeamSearch, GNMTGlobalScorer, GreedySearch
 from data_processing.data_utils import *
-
+try:
+    import sys
+    # Add FM4M to path if needed
+    sys.path.append('/content/Inverse_copolymer_design/fm4m')  # This is the correct path for Colab
+    from fm4m import FM4M_Kit
+    FM4M_AVAILABLE = True
+except ImportError:
+    FM4M_AVAILABLE = False
+    print("Warning: FM4M not available, FM4M integration disabled")
 
 def strip_polymer_notation(smiles_string):
     """Strip polymer notation to get monomer-only SMILES"""
@@ -558,8 +566,6 @@ class AdaptiveFusion(nn.Module):
         
         return mu, logvar
 
-
-
 class GraphEncoder(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim, device, model_config):
         super(GraphEncoder, self).__init__()
@@ -586,6 +592,172 @@ class GraphEncoder(nn.Module):
 
         return mu, logvar
 
+class FM4MEncoder(nn.Module):
+    """Wrapper for IBM FM4M models to extract molecular representations"""
+    
+    def __init__(self, model_names, model_config, device):
+        super().__init__()
+        self.device = device
+        self.model_names = model_names if isinstance(model_names, list) else [model_names]
+        self.output_dim = model_config.get('fm4m_output_dim', 768)  # Default FM4M dimension
+        
+        if not FM4M_AVAILABLE:
+            raise ImportError("FM4M not available. Please install fm4m-kit.")
+        
+        # Initialize FM4M Kit
+        self.fm4m_kit = FM4M_Kit()
+        
+        # Project FM4M outputs to consistent dimension
+        self.projection_layers = nn.ModuleDict()
+        for model_name in self.model_names:
+            # Each FM4M model might have different output dimensions
+            if model_name == 'smi-ted':
+                fm4m_dim = 768  # SMI-TED dimension
+            elif model_name == 'mhg-gnn':
+                fm4m_dim = 512  # MHG-GNN dimension
+            elif model_name == 'selfies-ted':
+                fm4m_dim = 768  # SELFIES-TED dimension
+            else:
+                fm4m_dim = 768  # Default
+            
+            self.projection_layers[model_name] = nn.Linear(fm4m_dim, self.output_dim)
+    
+    def forward(self, smiles_list):
+        """Extract features from SMILES using FM4M models"""
+        batch_size = len(smiles_list)
+        
+        # Get representations from each model
+        all_representations = []
+        
+        for model_name in self.model_names:
+            try:
+                # Use FM4M Kit to get representations
+                representations = self.fm4m_kit.get_representation(
+                    model=model_name,
+                    data=smiles_list
+                )
+                
+                # Convert to tensor if needed
+                if not isinstance(representations, torch.Tensor):
+                    representations = torch.tensor(representations, device=self.device)
+                
+                # Project to consistent dimension
+                representations = self.projection_layers[model_name](representations)
+                all_representations.append(representations)
+                
+            except Exception as e:
+                print(f"Warning: Failed to get {model_name} representations: {e}")
+                # Fallback to zeros
+                fallback = torch.zeros(batch_size, self.output_dim, device=self.device)
+                all_representations.append(fallback)
+        
+        # Combine representations
+        if len(all_representations) == 1:
+            return all_representations[0]
+        else:
+            # Average multiple model representations
+            return torch.stack(all_representations).mean(dim=0)
+
+
+class HybridPolymerEncoder(nn.Module):
+    """Combines wD-MPNN graph encoder with FM4M molecular encoder"""
+    
+    def __init__(self, node_dim, edge_dim, hidden_dim, device, model_config):
+        super().__init__()
+        
+        self.device = device
+        self.hidden_dim = hidden_dim
+        
+        # Original wD-MPNN encoder
+        self.graph_encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+        
+        # FM4M encoder
+        fm4m_models = model_config.get('fm4m_models', ['smi-ted'])
+        self.fm4m_encoder = FM4MEncoder(fm4m_models, model_config, device)
+        
+        # Fusion method
+        self.fusion_method = model_config.get('fm4m_fusion', 'attention')
+        
+        # Fusion layers
+        if self.fusion_method == 'attention':
+            # Attention-based fusion
+            self.attention = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=4,
+                dropout=0.3,
+                batch_first=True
+            )
+            self.fusion_projection = nn.Linear(hidden_dim * 2, hidden_dim)
+        elif self.fusion_method == 'moe':
+            # Mixture of Experts
+            self.gate = nn.Sequential(
+                nn.Linear(hidden_dim * 2, 64),
+                nn.ReLU(),
+                nn.Linear(64, 2),
+                nn.Softmax(dim=-1)
+            )
+        else:  # concat or mean
+            self.fusion_projection = nn.Linear(hidden_dim * 2, hidden_dim)
+        
+        # Output projections
+        self.mu_projection = nn.Linear(hidden_dim, hidden_dim)
+        self.logvar_projection = nn.Linear(hidden_dim, hidden_dim)
+    
+    def forward(self, graph, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, smiles_list=None):
+        # Get graph representations
+        graph_mu, graph_logvar = self.graph_encoder(graph, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+        
+        if smiles_list is None or not FM4M_AVAILABLE:
+            # Fallback to graph-only encoding
+            return graph_mu, graph_logvar
+        
+        # Get FM4M representations
+        fm4m_features = self.fm4m_encoder(smiles_list)
+        
+        # Ensure dimensions match
+        if fm4m_features.shape[-1] != self.hidden_dim:
+            # Project FM4M features to hidden_dim
+            projection = nn.Linear(fm4m_features.shape[-1], self.hidden_dim).to(device)
+            fm4m_features = projection(fm4m_features)
+        
+        # Fuse representations
+        if self.fusion_method == 'attention':
+            # Use graph features as query, FM4M as key/value
+            graph_mu_unsqueezed = graph_mu.unsqueeze(1)  # [batch, 1, hidden]
+            fm4m_unsqueezed = fm4m_features.unsqueeze(1)  # [batch, 1, hidden]
+            
+            attended, _ = self.attention(
+                query=graph_mu_unsqueezed,
+                key=fm4m_unsqueezed,
+                value=fm4m_unsqueezed
+            )
+            attended = attended.squeeze(1)  # [batch, hidden]
+            
+            # Combine with residual connection
+            fused = torch.cat([graph_mu, attended], dim=-1)
+            fused = self.fusion_projection(fused)
+            
+        elif self.fusion_method == 'moe':
+            # Mixture of Experts gating
+            combined = torch.cat([graph_mu, fm4m_features], dim=-1)
+            gates = self.gate(combined)  # [batch, 2]
+            
+            fused = gates[:, 0:1] * graph_mu + gates[:, 1:2] * fm4m_features
+            
+        elif self.fusion_method == 'concat':
+            # Simple concatenation + projection
+            combined = torch.cat([graph_mu, fm4m_features], dim=-1)
+            fused = self.fusion_projection(combined)
+            
+        else:  # mean
+            # Simple averaging
+            fused = (graph_mu + fm4m_features) / 2
+        
+        # Generate final mu and logvar
+        final_mu = self.mu_projection(fused)
+        final_logvar = self.logvar_projection(fused)
+        
+        return final_mu, final_logvar
 
 class DualPathDecoder(nn.Module):
     """Dual-path decoder that separates structure from format generation"""
@@ -1985,7 +2157,12 @@ class G2S_VAE(nn.Module):
         #if model_config['pooling']=='custom':
         #    self.Encoder = GraphEncoder_GMT(node_dim, edge_dim, hidden_dim, device, model_config)
         #elif model_config['pooling']=='mean':
-        self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+        # Choose encoder based on configuration
+        if model_config.get('use_fm4m', False) and FM4M_AVAILABLE:
+            print("🚀 Using Hybrid Encoder with FM4M integration")
+            self.Encoder = HybridPolymerEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+        else:
+            self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
         self.Decoder = SequenceDecoder(model_config, vocab, loss_weights, add_latent=add_latent)
         if not self.hidden_dim==self.embedding_dim:
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
@@ -2003,10 +2180,15 @@ class G2S_VAE(nn.Module):
         
         std = log_var.mul(0.5).exp_()
         eps = torch.randn_like(std) * eps_scale
-        return eps.mul(std).add_(mean)   
+        return eps.mul(std).add_(mean) 
 
-    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0):
-        # encode
+    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0, smiles_list=None):
+    # encode
+    if hasattr(self.Encoder, 'forward') and 'smiles_list' in self.Encoder.forward.__code__.co_varnames:
+        # Hybrid encoder that accepts SMILES
+        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, smiles_list)
+    else:
+        # Original encoder
         h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
         if not self.hidden_dim==self.embedding_dim:
             h_G_mean = self.lincompress(h_G_mean)
@@ -2354,7 +2536,12 @@ class G2S_VAE_PPguided(nn.Module):
         if use_disentangled:
             self.Encoder = DisentangledGraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
         else:
-            self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+            # Choose encoder based on configuration
+            if model_config.get('use_fm4m', False) and FM4M_AVAILABLE:
+                print("🚀 Using Hybrid Encoder with FM4M integration")
+                self.Encoder = HybridPolymerEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
+            else:
+                self.Encoder = GraphEncoder(node_dim, edge_dim, hidden_dim, device, model_config)
         self.Decoder = SequenceDecoder(model_config, vocab, loss_weights, add_latent=add_latent)
         if not self.hidden_dim==self.embedding_dim:
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
@@ -2383,9 +2570,14 @@ class G2S_VAE_PPguided(nn.Module):
         eps = torch.randn_like(std) * eps_scale
         return eps.mul(std).add_(mean)   
 
-    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0):
-        # encode
-        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)
+    def forward(self, batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, teacher_forcing_ratio=1.0, smiles_list=None):
+    # encode
+    if hasattr(self.Encoder, 'forward') and 'smiles_list' in self.Encoder.forward.__code__.co_varnames:
+        # Hybrid encoder that accepts SMILES
+        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device, smiles_list)
+    else:
+        # Original encoder
+        h_G_mean, h_G_var = self.Encoder(batch_list, dest_is_origin_matrix, inc_edges_to_atom_matrix, device)   
         if not self.hidden_dim==self.embedding_dim:
             h_G_mean = self.lincompress(h_G_mean)
             h_G_var = self.lincompress(h_G_var)

@@ -2627,6 +2627,20 @@ class G2S_VAE_PPguided(nn.Module):
         self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, self.property_count)).to(device)
         self.dropout = nn.Dropout(0.2)
 
+    def validate_property_data(self, batch_data):
+        """Validate that expected properties exist in the batch data"""
+        mapping = self.get_property_attribute_mapping()
+        missing_properties = []
+        
+        for prop_name, prop_attr in mapping.items():
+            if not hasattr(batch_data, prop_attr):
+                missing_properties.append(prop_name)
+        
+        if missing_properties:
+            print(f"Warning: Missing properties in batch data: {missing_properties}")
+        
+        return len(missing_properties) == 0
+
     def get_property_attribute_mapping(self):
         """Generate dynamic property to attribute mapping based on property names order"""
         mapping = {}
@@ -2687,22 +2701,23 @@ class G2S_VAE_PPguided(nn.Module):
         # 🔧 FIXED: Dynamically handle property targets based on available properties
         y_true_list = []
         
-        # Check what properties actually exist in the batch
-        available_properties = []
-        # Check for properties up to a reasonable maximum
-        for i in range(10):  # Support up to 10 properties
-            prop_attr = f'y{i+1}'
-            if hasattr(batch_list, prop_attr):
-                available_properties.append(prop_attr)
+        # Get dynamic property mapping
+        property_mapping = self.get_property_attribute_mapping()
         
-        # Build y_true based on available properties
-        for i in range(self.property_count):
-            if i < len(available_properties):
-                prop_attr = available_properties[i]
+        # Build y_true based on property names
+        for prop_name in self.property_names:
+            prop_attr = property_mapping[prop_name]
+            if hasattr(batch_list, prop_attr):
                 y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
             else:
                 # If property doesn't exist, create NaN tensor (will be masked out)
-                y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
+                # Get the first available property just for tensor size reference
+                ref_attr = next((attr for attr in property_mapping.values() if hasattr(batch_list, attr)), None)
+                if ref_attr:
+                    batch_size = getattr(batch_list, ref_attr).size(0)
+                else:
+                    batch_size = batch_list.num_graphs
+                y_prop = torch.full((batch_size, 1), float('nan'), device=device)
             y_true_list.append(y_prop)
         
         y_true = torch.cat(y_true_list, dim=1)
@@ -3201,6 +3216,35 @@ class G2S_VAE_Transfer(nn.Module):
         # Compression layer if needed
         if not self.hidden_dim == self.embedding_dim:
             self.lincompress = Linear(self.hidden_dim, self.embedding_dim).to(device)
+
+    def get_property_attribute_mapping(self):
+        """Generate dynamic property to attribute mapping based on all properties"""
+        mapping = {}
+        # Map source properties first
+        for i, prop_name in enumerate(self.source_properties):
+            mapping[prop_name] = f'y{i+1}'
+        
+        # Map target properties (avoiding duplicates)
+        start_idx = len(self.source_properties)
+        for i, prop_name in enumerate(self.target_properties):
+            if prop_name not in mapping:
+                mapping[prop_name] = f'y{start_idx + i + 1}'
+        
+        return mapping
+
+    def validate_property_data(self, batch_data):
+        """Validate that expected properties exist in the batch data"""
+        mapping = self.get_property_attribute_mapping()
+        missing_properties = []
+        
+        for prop_name, prop_attr in mapping.items():
+            if not hasattr(batch_data, prop_attr):
+                missing_properties.append(prop_name)
+        
+        if missing_properties:
+            print(f"Warning: Missing properties in batch data: {missing_properties}")
+        
+        return len(missing_properties) == 0
     
     # Use the same forward, sample, and inference methods as G2S_VAE_PPguided
     def sample(self, mean, log_var, eps_scale=1):
@@ -3240,26 +3284,25 @@ class G2S_VAE_Transfer(nn.Module):
         y_true_list = []
         property_predictions = {}
         
+        # Create dynamic property mapping
+        all_properties = self.source_properties + [p for p in self.target_properties if p not in self.source_properties]
+        property_mapping = {}
+        for idx, prop_name in enumerate(all_properties):
+            property_mapping[prop_name] = f'y{idx+1}'
+        
         for i, prop_name in enumerate(self.target_properties):
-            # Map property names to batch attributes dynamically
-            # Use the order of properties to determine y1, y2, etc.
-            prop_attr_map = {}
+            prop_attr = property_mapping.get(prop_name, f'y{i+1}')
             
-            # First, map source properties
-            for i, prop_name in enumerate(self.source_properties):
-                prop_attr_map[prop_name] = f'y{i+1}'
-            
-            # Then, map target properties (starting after source properties)
-            start_idx = len(self.source_properties)
-            for i, prop_name in enumerate(self.target_properties):
-                if prop_name not in prop_attr_map:  # Avoid duplicates
-                    prop_attr_map[prop_name] = f'y{start_idx + i + 1}'
-            
-            prop_attr = prop_attr_map.get(prop_name, f'y{i+1}')
             if hasattr(batch_list, prop_attr):
                 y_prop = torch.unsqueeze(getattr(batch_list, prop_attr).float(), 1)
             else:
-                y_prop = torch.full((batch_list.y1.size(0), 1), float('nan'), device=device)
+                # Get reference for tensor size
+                ref_attr = next((attr for attr in property_mapping.values() if hasattr(batch_list, attr)), None)
+                if ref_attr:
+                    batch_size = getattr(batch_list, ref_attr).size(0)
+                else:
+                    batch_size = batch_list.num_graphs
+                y_prop = torch.full((batch_size, 1), float('nan'), device=device)
             y_true_list.append(y_prop)
             
             # Store target predictions

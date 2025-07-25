@@ -471,13 +471,16 @@ def load_transfer_data_safely(csv_path, stage, source_properties, target_propert
                 total_count += 1
                 has_label = False
                 
-                # Check bandgap property
-                if hasattr(data, 'y3') or hasattr(data, 'y1'):  # y3 typical for bandgap, but check y1 too
-                    prop_attr = 'y3' if hasattr(data, 'y3') else 'y1'
-                    prop_val = getattr(data, prop_attr)[i]
-                    if not torch.isnan(prop_val):
-                        has_label = True
-                        labeled_count += 1
+                # Check target property dynamically
+                # For stage 2, properties_to_load contains target properties
+                for prop_idx, prop in enumerate(properties_to_load):
+                    prop_attr = f'y{prop_idx + 1}'
+                    if hasattr(data, prop_attr):
+                        prop_val = getattr(data, prop_attr)[i]
+                        if not torch.isnan(prop_val):
+                            has_label = True
+                            labeled_count += 1
+                            break  # Found at least one valid label
                 
                 if not has_label:
                     unlabeled_count += 1
@@ -3052,17 +3055,25 @@ for epoch in range(epoch_cp, epochs):
                     if len(result) == 9:  # PP-guided VAE
                         _, _, _, _, _, _, _, _, y_pred = result
                         
-                        # Get true values
-                        y_true = sample_data.y1.float() if hasattr(sample_data, 'y1') else None
+                        # Get true values dynamically for all properties
+                        y_true_list = []
+                        for i, prop_name in enumerate(property_names):
+                            prop_attr = f'y{i+1}'
+                            if hasattr(sample_data, prop_attr):
+                                y_true_list.append(getattr(sample_data, prop_attr).float())
                         
-                        if y_pred is not None and y_true is not None:
+                        if y_pred is not None and y_true_list:
                             print(f"\n📊 Property Prediction Check (Epoch {epoch + 1}):")
-                            print(f"Predicted values (first 10): {y_pred[:10].squeeze().tolist()}")
-                            print(f"True values (first 10): {y_true[:10].tolist()}")
-                            print(f"Prediction std: {y_pred.std().item():.4f}")
-                            print(f"Prediction mean: {y_pred.mean().item():.4f}")
-                            print(f"True value std: {y_true.std().item():.4f}")
-                            print(f"True value mean: {y_true.mean().item():.4f}")
+                            # Show predictions for each property
+                            for i, (prop_name, y_true) in enumerate(zip(property_names, y_true_list)):
+                                if i < y_pred.size(1):  # Check if prediction exists for this property
+                                    print(f"\n{prop_name}:")
+                                    print(f"  Predicted values (first 10): {y_pred[:10, i].tolist()}")
+                                    print(f"  True values (first 10): {y_true[:10].tolist()}")
+                                    print(f"  Prediction std: {y_pred[:, i].std().item():.4f}")
+                                    print(f"  Prediction mean: {y_pred[:, i].mean().item():.4f}")
+                                    print(f"  True value std: {y_true.std().item():.4f}")
+                                    print(f"  True value mean: {y_true.mean().item():.4f}")
             model.train()
             
     else:

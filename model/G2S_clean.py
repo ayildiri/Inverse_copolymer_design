@@ -2627,6 +2627,13 @@ class G2S_VAE_PPguided(nn.Module):
         self.PP_lin2 = Sequential(Linear(self.pp_ffn_hidden, self.property_count)).to(device)
         self.dropout = nn.Dropout(0.2)
 
+    def get_property_attribute_mapping(self):
+        """Generate dynamic property to attribute mapping based on property names order"""
+        mapping = {}
+        for i, prop_name in enumerate(self.property_names):
+            mapping[prop_name] = f'y{i+1}'
+        return mapping
+
     def sample(self, mean, log_var, eps_scale=1):
         
         if self.training:

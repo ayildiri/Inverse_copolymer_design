@@ -2682,9 +2682,11 @@ class G2S_VAE_PPguided(nn.Module):
         
         # Check what properties actually exist in the batch
         available_properties = []
-        for prop_name in ['y1', 'y2', 'y3', 'y4']:  # Check up to 4 properties
-            if hasattr(batch_list, prop_name):
-                available_properties.append(prop_name)
+        # Check for properties up to a reasonable maximum
+        for i in range(10):  # Support up to 10 properties
+            prop_attr = f'y{i+1}'
+            if hasattr(batch_list, prop_attr):
+                available_properties.append(prop_attr)
         
         # Build y_true based on available properties
         for i in range(self.property_count):
@@ -3232,11 +3234,19 @@ class G2S_VAE_Transfer(nn.Module):
         property_predictions = {}
         
         for i, prop_name in enumerate(self.target_properties):
-            # Map property names to batch attributes
-            prop_attr_map = {
-                'EA': 'y1', 'IP': 'y2', 'bandgap': 'y3',
-                # Add more mappings as needed
-            }
+            # Map property names to batch attributes dynamically
+            # Use the order of properties to determine y1, y2, etc.
+            prop_attr_map = {}
+            
+            # First, map source properties
+            for i, prop_name in enumerate(self.source_properties):
+                prop_attr_map[prop_name] = f'y{i+1}'
+            
+            # Then, map target properties (starting after source properties)
+            start_idx = len(self.source_properties)
+            for i, prop_name in enumerate(self.target_properties):
+                if prop_name not in prop_attr_map:  # Avoid duplicates
+                    prop_attr_map[prop_name] = f'y{start_idx + i + 1}'
             
             prop_attr = prop_attr_map.get(prop_name, f'y{i+1}')
             if hasattr(batch_list, prop_attr):

@@ -425,9 +425,9 @@ def load_transfer_data_safely(csv_path, stage, source_properties, target_propert
             # Check each molecule in batch
             for i in range(batch_size):
                 has_labels = True
-                for prop in properties_to_load:
-                    prop_map = {'EA': 'y1', 'IP': 'y2', 'bandgap': 'y3'}
-                    prop_attr = prop_map.get(prop, f'y{properties_to_load.index(prop)+1}')
+                for prop_idx, prop in enumerate(properties_to_load):
+                    # Map properties to y1, y2, etc. based on their order
+                    prop_attr = f'y{prop_idx + 1}'
                     
                     if hasattr(data, prop_attr):
                         prop_val = getattr(data, prop_attr)[i]

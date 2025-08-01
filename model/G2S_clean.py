@@ -619,9 +619,7 @@ class FM4MEncoder(nn.Module):
             'mhg-ged': 'MHG-GED',  # Corrected from mhg-gnn
             'MHG-GED': 'MHG-GED',
             'pos-egnn': 'POS-EGNN',
-            'POS-EGNN': 'POS-EGNN',
-            'mol-moe': 'MOL-MOE',
-            'MOL-MOE': 'MOL-MOE'
+            'POS-EGNN': 'POS-EGNN'
         }
         
         # Model output dimensions (may need empirical verification)
@@ -631,7 +629,6 @@ class FM4MEncoder(nn.Module):
             'SELFIES-TED': 768,  # BART-based model
             'MHG-GED': 512,      # Graph-based encoder
             'POS-EGNN': 256,     # 3D position model (estimate)
-            'MOL-MOE': 1024,     # Mixture of experts (estimate)
             'default': 768
         }
         

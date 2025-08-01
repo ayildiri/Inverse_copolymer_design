@@ -2065,7 +2065,7 @@ parser.add_argument("--use_dispersity", action="store_true", default=True,
 parser.add_argument("--use_fm4m", action="store_true", default=False,
                     help="Enable FM4M integration for enhanced molecular representations")
 parser.add_argument("--fm4m_models", type=str, nargs='+', default=['SMI-TED'],
-                    choices=['SMI-TED', 'MHG-GNN', 'SELFIES-TED', 'SMI-SSED'],
+                    choices=['SMI-TED', 'MHG-GED', 'SELFIES-TED', 'SMI-SSED', 'POS-EGNN'],
                     help="FM4M models to use")
 parser.add_argument("--fm4m_fusion", type=str, default='attention',
                     choices=['attention', 'moe', 'concat', 'mean'],

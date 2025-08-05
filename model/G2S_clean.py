@@ -592,11 +592,16 @@ class GraphEncoder(nn.Module):
 
         return mu, logvar
 
+# Global cache for FM4M embeddings
+FM4M_EMBEDDING_CACHE = {}
+
 class FM4MEncoder(nn.Module):
     """Wrapper for IBM FM4M models to extract molecular representations"""
     
     def __init__(self, model_names, model_config, device):
         super().__init__()
+        self.use_cache = model_config.get('fm4m_use_cache', True)
+        self.cache_path = model_config.get('fm4m_cache_path', None)
         self.device = device
         self.model_config = model_config
         self.model_names = model_names if isinstance(model_names, list) else [model_names]
@@ -652,6 +657,12 @@ class FM4MEncoder(nn.Module):
         
         batch_size = len(smiles_list)
         
+        # Check cache first
+        if self.use_cache:
+            cache_key = str(hash(tuple(smiles_list)))
+            if cache_key in FM4M_EMBEDDING_CACHE:
+                return FM4M_EMBEDDING_CACHE[cache_key].to(self.device)
+
         # Clean SMILES if in monomer mode
         if self.model_config.get('is_monomer_mode', False):
             smiles_list = [strip_polymer_notation(s) for s in smiles_list]
@@ -694,10 +705,17 @@ class FM4MEncoder(nn.Module):
         
         # Combine representations
         if len(all_representations) == 1:
-            return all_representations[0]
+            result = all_representations[0]
         else:
             # Average multiple model representations
-            return torch.stack(all_representations).mean(dim=0)
+            result = torch.stack(all_representations).mean(dim=0)
+        
+        # Cache the result
+        if self.use_cache:
+            cache_key = str(hash(tuple(smiles_list)))
+            FM4M_EMBEDDING_CACHE[cache_key] = result.cpu()
+        
+        return result
 
 
 class HybridPolymerEncoder(nn.Module):
@@ -716,19 +734,31 @@ class HybridPolymerEncoder(nn.Module):
         fm4m_models = model_config.get('fm4m_models', ['SMI-TED'])
         self.fm4m_encoder = FM4MEncoder(fm4m_models, model_config, device)
         
+        # Get FM4M output dimension
+        fm4m_output_dim = model_config.get('fm4m_output_dim', 768)
+        
+        # Project FM4M to match hidden_dim BEFORE fusion
+        self.fm4m_projection = nn.Sequential(
+            nn.Linear(fm4m_output_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2)
+        )
+        
         # Fusion method
         self.fusion_method = model_config.get('fm4m_fusion', 'attention')
         
         # Fusion layers
         if self.fusion_method == 'attention':
-            # Attention-based fusion
+            # Fixed: Now both inputs are hidden_dim
             self.attention = nn.MultiheadAttention(
                 embed_dim=hidden_dim,
                 num_heads=4,
                 dropout=0.3,
                 batch_first=True
             )
-            self.fusion_projection = nn.Linear(hidden_dim * 2, hidden_dim)
+            # Skip connection weight
+            self.residual_weight = nn.Parameter(torch.tensor(0.5))
         elif self.fusion_method == 'moe':
             # Mixture of Experts
             self.gate = nn.Sequential(
@@ -768,32 +798,35 @@ class HybridPolymerEncoder(nn.Module):
         if graph_mu.shape[0] != fm4m_features.shape[0]:
             raise ValueError(f"Batch size mismatch: graph={graph_mu.shape[0]}, fm4m={fm4m_features.shape[0]}")
         
-        # Validate SMILES list length matches batch size
-        if len(smiles_list) != graph_mu.shape[0]:
-            raise ValueError(f"SMILES list length ({len(smiles_list)}) doesn't match batch size ({graph_mu.shape[0]})")
-        
-        # Ensure dimensions match
-        if fm4m_features.shape[-1] != self.hidden_dim:
-            # Project FM4M features to hidden_dim
-            projection = nn.Linear(fm4m_features.shape[-1], self.hidden_dim).to(device)
-            fm4m_features = projection(fm4m_features)
+        # Project FM4M features to hidden_dim (always do this for consistency)
+        fm4m_features = self.fm4m_projection(fm4m_features)
         
         # Fuse representations
         if self.fusion_method == 'attention':
-            # Use graph features as query, FM4M as key/value
+            # Use bidirectional attention
             graph_mu_unsqueezed = graph_mu.unsqueeze(1)  # [batch, 1, hidden]
             fm4m_unsqueezed = fm4m_features.unsqueeze(1)  # [batch, 1, hidden]
             
-            attended, _ = self.attention(
+            # Graph attending to FM4M
+            attended_fm4m, _ = self.attention(
                 query=graph_mu_unsqueezed,
                 key=fm4m_unsqueezed,
                 value=fm4m_unsqueezed
             )
-            attended = attended.squeeze(1)  # [batch, hidden]
+            attended_fm4m = attended_fm4m.squeeze(1)
             
-            # Combine with residual connection
-            fused = torch.cat([graph_mu, attended], dim=-1)
-            fused = self.fusion_projection(fused)
+            # FM4M attending to graph
+            attended_graph, _ = self.attention(
+                query=fm4m_unsqueezed,
+                key=graph_mu_unsqueezed,
+                value=graph_mu_unsqueezed
+            )
+            attended_graph = attended_graph.squeeze(1)
+            
+            # Combine with skip connections
+            fused = (self.residual_weight * graph_mu + 
+                    (1 - self.residual_weight) * attended_fm4m + 
+                    0.1 * attended_graph)
             
         elif self.fusion_method == 'moe':
             # Mixture of Experts gating

@@ -19,11 +19,45 @@ import argparse
 import numpy as np
 import csv
 
-# ADD THESE NEW IMPORTS:
 import yaml  # For loading property_config.yml
 import pandas as pd  # For load_modular_data function
 import torch.nn.functional as F  # For functional operations like cosine_similarity
 from typing import Dict, List, Optional, Tuple, Any  # Used in type hints (optional but good practice)
+
+# Global FM4M cache
+PRECOMPUTED_FM4M_CACHE = {}
+
+def load_precomputed_fm4m_cache(dataset_path, fm4m_models, tokenization, stage):
+    """Load precomputed FM4M embeddings"""
+    global PRECOMPUTED_FM4M_CACHE
+    
+    for model_name in fm4m_models:
+        cache_file = os.path.join(
+            dataset_path, 
+            f'fm4m_cache_{model_name}_{tokenization}_stage{stage}.pt'
+        )
+        
+        if os.path.exists(cache_file):
+            print(f"📥 Loading precomputed {model_name} embeddings from {cache_file}")
+            embeddings = torch.load(cache_file)
+            
+            # Add to global cache with model prefix
+            for smiles, embedding in embeddings.items():
+                key = f"{model_name}:{smiles}"
+                PRECOMPUTED_FM4M_CACHE[key] = embedding
+            
+            print(f"✅ Loaded {len(embeddings)} {model_name} embeddings")
+            
+            # Load metadata if available
+            metadata_file = cache_file.replace('.pt', '_metadata.pkl')
+            if os.path.exists(metadata_file):
+                import pickle
+                with open(metadata_file, 'rb') as f:
+                    metadata = pickle.load(f)
+                print(f"   Shape: {metadata.get('embedding_shape', 'Unknown')}")
+                print(f"   Valid embeddings: {metadata.get('num_valid_embeddings', 'Unknown')}")
+        else:
+            print(f"⚠️ No precomputed cache found at {cache_file}")
 
 def debug_vocab_and_embeddings(vocab_file_path, dataset_path=None):
     """Debug vocabulary and embedding setup"""
@@ -2282,58 +2316,30 @@ else:  # Stage 2
     property_names = args.target_properties
     property_count = len(property_names)
 
-# Precompute FM4M embeddings if using FM4M
+# Load precomputed FM4M embeddings if using FM4M
 if args.use_fm4m:
-    print("\n🚀 Precomputing FM4M embeddings for efficiency...")
-    from tqdm import tqdm
+    print("\n🚀 Loading precomputed FM4M embeddings...")
+    load_precomputed_fm4m_cache(
+        args.dataset_path,
+        args.fm4m_models,
+        tokenization,
+        args.training_stage
+    )
     
-    # Function to precompute embeddings
-    def precompute_fm4m_embeddings(data_loader, vocab, tokenization):
-        all_smiles = set()
+    if len(PRECOMPUTED_FM4M_CACHE) == 0:
+        print("⚠️ No precomputed embeddings found. FM4M will compute on-the-fly (slow!)")
+    else:
+        print(f"✅ Total precomputed embeddings loaded: {len(PRECOMPUTED_FM4M_CACHE)}")
         
-        # Collect all unique SMILES
-        for batch_key in tqdm(data_loader, desc="Collecting SMILES"):
-            if batch_key in ['dest_is_origin_matrix', 'inc_edges_to_atom_matrix']:
-                continue
-            data_batch = data_loader[batch_key][0]
-            smiles_list = extract_smiles_from_batch(data_batch, vocab, tokenization)
-            all_smiles.update(smiles_list)
-        
-        print(f"Found {len(all_smiles)} unique SMILES strings")
-        
-        # If we have FM4M, precompute in batches
-        if FM4M_AVAILABLE and len(all_smiles) > 0:
-            # Create temporary FM4M encoder
-            temp_config = {
-                'fm4m_models': args.fm4m_models,
-                'fm4m_output_dim': args.fm4m_output_dim,
-                'fm4m_use_cache': True
-            }
-            temp_encoder = FM4MEncoder(args.fm4m_models, temp_config, device)
-            
-            # Process in batches
-            smiles_list = list(all_smiles)
-            batch_size = 100
-            
-            for i in tqdm(range(0, len(smiles_list), batch_size), desc="Computing FM4M embeddings"):
-                batch = smiles_list[i:i+batch_size]
-                _ = temp_encoder(batch)  # This will cache the embeddings
-            
-            print(f"✅ Cached {len(FM4M_EMBEDDING_CACHE)} FM4M embeddings")
-            
-            # Save cache to disk for reuse
-            if args.save_dir:
-                cache_file = os.path.join(args.save_dir, f'fm4m_cache_stage{args.training_stage}.pt')
-                torch.save(FM4M_EMBEDDING_CACHE, cache_file)
-                print(f"💾 Saved FM4M cache to {cache_file}")
-    
-    # Precompute for all data loaders
-    precompute_fm4m_embeddings(dict_train_loader, vocab, tokenization)
-    precompute_fm4m_embeddings(dict_val_loader, vocab, tokenization)
+        # Update the global FM4M cache in G2S_clean
+        from model.G2S_clean import FM4M_EMBEDDING_CACHE
+        FM4M_EMBEDDING_CACHE.update(PRECOMPUTED_FM4M_CACHE)
+        print(f"✅ Updated G2S_clean FM4M cache with {len(PRECOMPUTED_FM4M_CACHE)} embeddings")
 
 # Convert to monomer-only data BEFORE model creation if Stage 0
 if args.training_stage == 0:
     print("\nConverting to monomer-only sequences...")
+
     dict_train_loader = create_monomer_data_loader(dict_train_loader, vocab, tokenization)
     dict_val_loader = create_monomer_data_loader(dict_val_loader, vocab, tokenization)
     dict_test_loader = create_monomer_data_loader(dict_test_loader, vocab, tokenization)
